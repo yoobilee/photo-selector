@@ -109,42 +109,59 @@
 
 ## 프로젝트별 컨벤션
 
-- 프로젝트명: 미정
-- 기술 스택: 미정
-- 기술 선택 이유: 미정
-- 배포 환경: Vercel 우선 후보, 프로젝트에 맞게 확정
-- 데이터 저장: Supabase 우선 후보, 프로젝트에 맞게 확정
-- 외부 서비스 연동: 미정
-- 지원 기기·브라우저: 미정
-- 패키지 관리 도구: 미정
-- 잠금 파일: 미정
-- 테스트 도구: 미정
+- 프로젝트명: Photo Selector
+- 프로젝트 목표: 여러 장의 사진에서 실패한 사진(흔들림·초점 불량·눈 감김)과 중복·유사 사진을 구분하고 좋은 사진을 추천한다. 최종 선택은 사용자가 한다.
+- 기술 스택: React + Vite + TypeScript, Tailwind CSS
+- 기술 선택 이유: 서버 없이 정적 배포가 가능하고 브라우저 내 분석(Web Worker·WASM·WebGPU)에 제약이 적다. 향후 PWA와 Capacitor로 같은 웹 코드를 모바일 앱에 재사용한다.
+- 배포 환경: Vercel 정적 배포 (MVP는 서버 함수 미사용)
+- 데이터 저장: MVP는 서버·DB 미사용, 브라우저 로컬 저장만 사용. 기기 간 취향 동기화가 필요해질 때 사용자 동의를 전제로 Supabase를 검토한다.
+- 외부 서비스 연동: 없음. 분석 모델과 런타임 파일도 자체 도메인에서 제공하고 외부 CDN·분석 도구를 기본 사용하지 않는다.
+- 지원 기기·브라우저: 최신 데스크톱 Chrome·Edge·Safari·Firefox, Android Chrome, iOS Safari. 최소 버전과 HEIC 처리 범위는 실기기 확인 후 확정한다.
+- 패키지 관리 도구: npm
+- 잠금 파일: `package-lock.json`
+- Node 버전: `^22.22.2 || ^24.15.0 || >=26.0.0` (`package.json`의 `engines`, 잠금 파일 의존성 중 가장 엄격한 jsdom 기준). `.npmrc`의 `engine-strict`로 범위 밖 Node에서는 설치가 실패한다.
+- 테스트 도구: Vitest + Testing Library(단위·컴포넌트), Playwright + axe-core(E2E·자동 접근성 보조 검사)
+- E2E 대상: desktop-chromium, mobile-chromium(Pixel 7), mobile-webkit(iPhone 15). WebKit 결과는 실제 iOS Safari 확인을 대체하지 않는다.
 - 커버리지 정책: 초기 미사용
 - 백로그 위치: GitHub Issues 또는 필요 시 `.ai/BACKLOG.md`
 - 레퍼런스 출처: 없음
+- 명명 방식: 컴포넌트·타입은 PascalCase, 함수·변수는 camelCase, 컴포넌트 파일은 컴포넌트명과 같은 PascalCase, 그 밖의 모듈은 camelCase 파일명을 사용한다.
+
+### 제품 원칙
+
+- 원본 사진은 바이트 단위로 보존한다. 재압축·재인코딩·자동 수정·자동 삭제를 하지 않는다.
+- 원본과 분석용 이미지(썸네일)를 데이터 구조에서 분리하고, 내보내기는 원본 바이트만 사용한다.
+- 사진을 외부 서버로 전송하지 않는다.
+- 추천은 보조 정보이며 사용자가 최종 선택한다.
+- 분석 로직은 React·DOM에 의존하지 않는 모듈로 분리해 Web Worker와 향후 모바일 앱에서 재사용할 수 있게 한다.
+- 대량 사진 처리 시 메모리 사용량과 화면 반응성을 관리한다.
+- 사용자 선택 이력 기반 취향 학습을 후속 단계에서 추가할 수 있도록 선택 기록 구조의 확장성을 고려한다.
 
 ### 디자인 방향
 
-- 디자인 시스템 사용 여부·선택 이유: 미정
-- 브랜드 고유 요소와 유지할 자산: 미정
-- 화면 밀도·정보 계층·시각적 분위기: 미정
-- 참고 범위와 피할 표현: 미정
+- 디자인 시스템 사용 여부·선택 이유: 미정. 첫 실제 화면 작업 전에 `.ai/policies/design-direction.md`에 따라 확정한다.
+- 브랜드 고유 요소와 유지할 자산: 미정. 첫 화면 작업 전 사용자 확인 필요.
+- 화면 밀도·정보 계층·시각적 분위기: 미정. 사진이 주인공인 화면이므로 첫 화면 작업 전 사용자 확인 필요.
+- 참고 범위와 피할 표현: 미정. 첫 화면 작업 전 사용자 확인 필요.
+- 현재 화면은 개발 환경 확인용 최소 화면이다.
 
 ### 명령
 
-- 설치: 미정
-- 개발 실행: 미정
-- Lint: 미정
-- Test: 미정
-- Build: 미정
-- 전체 검증: 미정
+- 설치: `npm ci` (최초 E2E 실행 전 `npx playwright install chromium webkit`)
+- 개발 실행: `npm run dev`
+- Lint: `npm run lint`
+- Type Check: `npm run typecheck`
+- Test: `npm run test` (단위), `npm run test:e2e` (E2E, 빌드 결과물 대상)
+- Build: `npm run build`
+- 리뷰 게이트 테스트: `npm run test:gate`
+- 전체 검증: `npm run verify` (Lint → Type Check → Test → Build → E2E → 리뷰 게이트 테스트)
 
 ### Git·배포 설정
 
-- 기본 브랜치: 미정
+- 기본 브랜치: `main`
 - 브랜치 접두사: `feature`, `fix`, `refactor`, `chore`
-- 버전 배포 사용 여부: 미정
-- 버전 기준 파일: 미정
+- 버전 배포 사용 여부: 미정. 첫 공개 배포 전에 확정한다.
+- 버전 기준 파일: `package.json`의 `version` (버전 배포를 사용할 경우)
 - 태그 형식: `vX.Y.Z`
 - 배포 절차 재정의: 없음
 
@@ -153,7 +170,8 @@
 - 사용 여부: 기본 게이트 제공, AI 실행 연동은 프로젝트별 선택
 - 추가 API 과금: 사용 안 함
 - 게이트 가변 설정: `.ai/review-config.json` (위험 경로·중간 위험 정책·사람 구현 시 기본 reviewer). 검사 이름 `independent-review`와 GitHub Actions 앱 출처 검증은 고정 계약이다.
-- 리뷰 도구·신뢰할 작성자 식별 정보: 프로젝트에서 확정, 기본값은 사람의 결과 확인
+- 리뷰 도구·신뢰할 작성자 식별 정보: Claude 구현 PR은 개발자 로컬 Claude Code의 Codex 플러그인(`/codex:review --base main`)으로 수동 리뷰한다. 모델·추론 강도는 `.codex/config.toml`(`gpt-6.1-sol`, `high`)을 따르며 ChatGPT 구독 인증만 사용한다. 결과는 사람이 확인한다.
+- 로컬 자동 리뷰: Codex 플러그인 Stop 리뷰 게이트와 Codex GitHub Automatic reviews 모두 사용 안 함
 - 게이트 완료 기준: 최신 fingerprint·보고서 근거·관리자 확인, critical/high/medium 미해결 0건
 - AI 요청 방식: 프로젝트에서 확정, 게이트에서 자동 호출하지 않음
 - AI 자동 재시도: 기본 0회, 실패·한도 초과는 사람 확인
