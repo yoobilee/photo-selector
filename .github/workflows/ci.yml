@@ -1,0 +1,44 @@
+name: CI
+
+# PR 코드의 Lint·Type Check·Test·Build·E2E·리뷰 게이트 테스트를 실행한다.
+# 신뢰하지 않는 PR 코드를 실행하므로 pull_request(읽기 전용 토큰, 시크릿 없음)만 사용한다.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.15.0'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Playwright browsers and system dependencies
+        run: npx playwright install --with-deps chromium webkit
+      - name: Run full verification
+        run: npm run verify
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-test-results
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7
