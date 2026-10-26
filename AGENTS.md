@@ -155,6 +155,7 @@
 - Build: `npm run build`
 - 리뷰 게이트 테스트: `npm run test:gate`
 - 전체 검증: `npm run verify` (Lint → Type Check → Test → Build → E2E → 리뷰 게이트 테스트)
+- CI: `.github/workflows/ci.yml`의 `verify` 작업이 모든 PR과 `main` push에서 Node 24.15.0으로 `npm ci` → Playwright 브라우저·시스템 의존성 설치 → `npm run verify`를 실행한다. 읽기 전용 토큰만 사용하고 시크릿을 쓰지 않는다.
 
 ### Git·배포 설정
 
