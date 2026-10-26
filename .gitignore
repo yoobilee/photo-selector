@@ -17,3 +17,23 @@ Thumbs.db
 *.tmp
 *.temp
 *.log
+
+# Local Claude Code wrapper state
+.claude/.headroom_wrap_*
+
+# Node and build output
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.local
+*.tsbuildinfo
+
+# Playwright output
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+
+# Vercel local state
+.vercel/

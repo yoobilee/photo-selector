@@ -1,0 +1,4 @@
+# 이 저장소에서 실행하는 Codex(독립 리뷰 포함)의 기본 모델과 추론 강도.
+# 신뢰된 프로젝트에서만 적용되며 사용자 전역 설정(~/.codex/config.toml)보다 우선한다.
+model = "gpt-6.1-sol"
+model_reasoning_effort = "high"
