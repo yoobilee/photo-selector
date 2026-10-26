@@ -1,0 +1,19 @@
+# Local secrets and environment files
+.env
+.env.*
+
+# Local-only agent preferences
+CLAUDE.local.md
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Editor-local files
+.idea/
+.vscode/
+
+# Temporary files
+*.tmp
+*.temp
+*.log

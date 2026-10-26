@@ -1,0 +1,20 @@
+{
+  "checkName": "independent-review",
+  "defaultReviewer": "codex",
+  "reviewAllMedium": true,
+  "highRiskPaths": [
+    ".github/workflows",
+    ".github/scripts",
+    ".github/actions",
+    ".github/CODEOWNERS",
+    ".github/dependabot.yml",
+    ".github/pull_request_template.md",
+    ".ai/policies",
+    ".ai/prompts",
+    ".ai/checklists",
+    ".ai/templates",
+    ".ai/review-config.json",
+    "AGENTS.md",
+    "CLAUDE.md"
+  ]
+}
