@@ -119,7 +119,7 @@
 - 지원 기기·브라우저: 최신 데스크톱 Chrome·Edge·Safari·Firefox, Android Chrome, iOS Safari. 최소 버전과 HEIC 처리 범위는 실기기 확인 후 확정한다.
 - 패키지 관리 도구: npm
 - 잠금 파일: `package-lock.json`
-- Node 버전: 22.12 이상 (`package.json`의 `engines`)
+- Node 버전: `^22.22.2 || ^24.15.0 || >=26.0.0` (`package.json`의 `engines`, 잠금 파일 의존성 중 가장 엄격한 jsdom 기준). `.npmrc`의 `engine-strict`로 범위 밖 Node에서는 설치가 실패한다.
 - 테스트 도구: Vitest + Testing Library(단위·컴포넌트), Playwright + axe-core(E2E·자동 접근성 보조 검사)
 - E2E 대상: desktop-chromium, mobile-chromium(Pixel 7), mobile-webkit(iPhone 15). WebKit 결과는 실제 iOS Safari 확인을 대체하지 않는다.
 - 커버리지 정책: 초기 미사용
