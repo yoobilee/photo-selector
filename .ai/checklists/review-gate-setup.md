@@ -101,4 +101,4 @@ git diff --check
 
 프로젝트 CI의 Test/Lint/Build는 기술 스택 선택 이후 별도로 구성한다. 이 게이트가 프로젝트 기능 테스트를 대체하지 않는다.
 
-병합 도구의 테스트는 Linux에서 가짜 GitHub CLI로 인수와 판정 흐름을 확인한다. Windows에서는 첫 번째 게이트 테스트만 실행한다. 실제 원격 병합이나 Windows에서 실행한 결과를 뜻하지 않는다. Windows 최초 도입 시 사람이 실제 병합 제목을 확인한다.
+병합 도구의 테스트는 Linux에서 가짜 GitHub CLI로 인수와 판정 흐름을 확인한다. 이 프로젝트는 두 테스트를 `npm run test:gate`로 함께 실행하며 Linux CI의 `verify`에 포함된다. Windows·macOS 로컬에서는 병합 도구 테스트를 건너뛰고, `CI` 환경에서 Linux가 아니면 실패한다. 실제 원격 병합이나 Windows에서 실행한 결과를 뜻하지 않는다. Windows 최초 도입 시 사람이 실제 병합 제목을 확인한다.

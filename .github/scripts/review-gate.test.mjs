@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validTitle, parseMetadata, describe, decide, sha256, parseConfirmation, blockingReviews } from './review-gate-core.mjs';
+import { validTitle, parseMetadata, describe, decide, sha256, parseConfirmation, blockingReviews, normalizeNewlines, reportHash } from './review-gate-core.mjs';
 import { runGate } from './review-gate.mjs';
 
 const config = JSON.parse(readFileSync(new URL('../../.ai/review-config.json', import.meta.url)));
@@ -76,16 +76,46 @@ test('잘못된 JSON과 문자열 PASS를 확인으로 인정하지 않음', () 
   for (const body of ['PASS','/review-gate\n```json\n{bad}\n```','/review-gate\n```json\n[]\n```']) assert.equal(parseConfirmation(body), null);
 });
 
-async function integration({permission='admin', role_name, type='User', changed=false, partial=false, malformed=false, reviews=[], apiFailure=false, mutateEvidence=false, duplicate=false, peerPermission='write', newestInvalid=false, otherEvidence=false, noPR=false, push=false}={}) {
+const withLineEnding = (text, ending) => text.replace(/\n/g, ending);
+
+test('CRLF·단독 CR 줄바꿈을 LF로 정규화하고 LF 입력은 그대로 둠', () => {
+  assert.equal(normalizeNewlines('a\r\nb\rc\nd'), 'a\nb\nc\nd');
+  assert.equal(normalizeNewlines('a\r\r\nb'), 'a\n\nb');
+  const lf = '# 독립 리뷰 보고서\n본문\n';
+  assert.equal(normalizeNewlines(lf), lf);
+  // 기존 LF 보고서로 작성한 확인 댓글의 해시가 그대로 유효해야 한다.
+  assert.equal(reportHash(lf), sha256(lf));
+  assert.equal(normalizeNewlines(undefined), '');
+});
+
+test('CRLF·CR 보고서도 LF 보고서와 같은 해시로 통과하고 내용 변경은 차단', () => {
+  const {d, c} = data();
+  for (const ending of ['\n', '\r\n', '\r']) {
+    const body = withLineEnding(reportFor(d), ending);
+    assert.equal(reportHash(body), c.evidenceHash, JSON.stringify(ending));
+    assert.equal(decide(d, c, {body, hash: reportHash(body)}).state, 'success', JSON.stringify(ending));
+    const tampered = body.replace('인증 경계', '권한 경계');
+    assert.equal(decide(d, c, {body: tampered, hash: reportHash(tampered)}).state, 'failure', JSON.stringify(ending));
+  }
+});
+
+test('CRLF·CR 확인 댓글도 같은 내용으로 해석', () => {
+  const {c} = data();
+  const lf = `/review-gate\n\`\`\`json\n${JSON.stringify(c)}\n\`\`\``;
+  for (const ending of ['\r\n', '\r']) assert.deepEqual(parseConfirmation(withLineEnding(lf, ending)), c);
+});
+
+async function integration({permission='admin', role_name, type='User', changed=false, partial=false, malformed=false, reviews=[], apiFailure=false, mutateEvidence=false, duplicate=false, peerPermission='write', newestInvalid=false, otherEvidence=false, noPR=false, push=false, lineEnding='\n', reportPrefix=''}={}) {
   const current = pr();
   const d = describe(current, files, config);
   const c = confirmationFor(d);
   if (otherEvidence) c.evidence=c.evidence.replace('/pull/1#','/pull/2#');
   const statuses = [];
+  const summaryLines = [];
   const users = {login:'maintainer',id:1,type};
   const comments = [
-    {id:10,user:users,body:reportFor(d)+(mutateEvidence?'변경':'')},
-    {id:11,user:users,body:malformed?'/review-gate\n```json\n{bad}\n```':`/review-gate\n\`\`\`json\n${JSON.stringify(c)}\n\`\`\``},
+    {id:10,user:users,body:withLineEnding(reportPrefix+reportFor(d)+(mutateEvidence?'변경':''),lineEnding)},
+    {id:11,user:users,body:withLineEnding(malformed?'/review-gate\n```json\n{bad}\n```':`/review-gate\n\`\`\`json\n${JSON.stringify(c)}\n\`\`\``,lineEnding)},
   ];
   if (newestInvalid) comments.push({id:12,user:users,body:'/review-gate\n```json\n{invalid}\n```'});
   let gets=0;
@@ -98,11 +128,30 @@ async function integration({permission='admin', role_name, type='User', changed=
     },
     paginate:async(fn,args)=>(await fn(args)).data,
   };
-  const summary = {addHeading(){return this;},addRaw(){return this;},addCodeBlock(){return this;},async write(){}};
+  const summary = {addHeading(){return this;},addRaw(text){summaryLines.push(text);return this;},addCodeBlock(){return this;},async write(){}};
   let failure=false;
   await runGate({github,context:{repo:{owner:'owner',repo:'repo'},payload:noPR?{issue:{number:9}}:push?{}:{pull_request:{number:1}},eventName:push?'push':'pull_request_target',runId:42},core:{summary,setFailed(){failure=true;}}});
-  return {statuses,failure};
+  return {statuses,failure,summary:summaryLines.join(''),evidenceHash:c.evidenceHash};
 }
+
+test('CRLF·CR 관리자 보고서를 Summary에 출력하고 확인 댓글로 통과', async()=>{
+  for (const lineEnding of ['\r\n', '\r']) {
+    const r=await integration({lineEnding});
+    assert.equal(r.statuses.at(-1).state,'success',JSON.stringify(lineEnding));
+    assert.match(r.summary,/보고서 댓글 ID: 10/);
+    assert.ok(r.summary.includes(`보고서 SHA-256: ${r.evidenceHash}`));
+  }
+});
+
+test('CRLF 보고서도 권한 없음·봇·내용 변경·첫 줄 불일치는 차단', async()=>{
+  for (const options of [{permission:'write'},{type:'Bot'},{mutateEvidence:true},{reportPrefix:'참고\n'}]) {
+    const r=await integration({...options,lineEnding:'\r\n'});
+    assert.equal(r.statuses.at(-1).state,'failure',JSON.stringify(options));
+    // 내용이 바뀐 관리자 보고서는 보고서로 표시되지만 확인 댓글의 해시와 달라 실패한다.
+    if (options.mutateEvidence) assert.doesNotMatch(r.summary,new RegExp(`보고서 SHA-256: ${r.evidenceHash}`));
+    else assert.doesNotMatch(r.summary,/보고서 댓글 ID/,JSON.stringify(options));
+  }
+});
 
 test('API 경로에서 정상 관리자 확인만 성공', async()=>{
   const r=await integration();assert.equal(r.statuses.at(-1).state,'success');assert.equal(r.failure,false);

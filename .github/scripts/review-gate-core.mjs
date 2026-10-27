@@ -2,6 +2,13 @@ import { createHash } from 'node:crypto';
 
 export const sha256 = value => createHash('sha256').update(value, 'utf8').digest('hex');
 const shaPattern = /^[a-f0-9]{40}$/;
+const reportHeading = '# 독립 리뷰 보고서\n';
+
+// 댓글 작성 환경에 따라 CRLF·CR로 저장될 수 있다. 줄바꿈만 LF로 통일하고 다른 내용은 바꾸지 않는다.
+export const normalizeNewlines = value => String(value ?? '').replace(/\r\n?/g, '\n');
+export const isReportBody = body => normalizeNewlines(body).startsWith(reportHeading);
+// LF 보고서는 정규화 전후가 같으므로 기존 확인 댓글의 해시가 그대로 유효하다.
+export const reportHash = body => sha256(normalizeNewlines(body));
 const titlePattern = /^(feat|fix|chore|refactor|test|docs)(\([a-zA-Z0-9_/-]+\))?!?: [^\r\n]+$/;
 
 export function validTitle(title) {
@@ -51,7 +58,7 @@ export function describe(pr, files, config) {
 }
 
 export function parseConfirmation(body) {
-  const match = /^\/review-gate\s*\n```json\s*\n([\s\S]*?)\n```\s*$/.exec(body ?? '');
+  const match = /^\/review-gate\s*\n```json\s*\n([\s\S]*?)\n```\s*$/.exec(normalizeNewlines(body));
   if (!match) return null;
   try {
     const data = JSON.parse(match[1]);
@@ -77,7 +84,9 @@ export function decide(description, confirmation, evidence) {
     return { state: 'failure', reason: '지적사항 집계 오류' };
   }
   if (counts.critical || counts.high || counts.medium) return { state: 'failure', reason: '미해결 차단 지적 또는 medium 사람 판단 필요' };
-  if (!evidence || !evidence.body.startsWith('# 독립 리뷰 보고서\n') || evidence.hash !== confirmation.evidenceHash || !evidence.body.includes(description.head) || !evidence.body.includes(description.base)) {
+  const evidenceBody = evidence && normalizeNewlines(evidence.body);
+  if (!evidence || !isReportBody(evidenceBody) || evidence.hash !== reportHash(evidenceBody) || evidence.hash !== confirmation.evidenceHash
+      || !evidenceBody.includes(description.head) || !evidenceBody.includes(description.base)) {
     return { state: 'failure', reason: '리뷰 근거 누락·변경 또는 대상 SHA 불일치' };
   }
   return { state: 'success', reason: '최신 변경의 독립 리뷰 결과를 사람이 확인함' };
