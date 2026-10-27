@@ -72,7 +72,8 @@ describe('App', () => {
     ])
 
     const heading = await findGallery(3)
-    expect(heading).toHaveFocus()
+    // 초점 이동은 화면 반영 후 effect에서 일어나므로 기다린다.
+    await waitFor(() => expect(heading).toHaveFocus())
     expect(screen.getByRole('status')).toHaveTextContent('사진 3장을 추가했습니다.')
     const images = within(screen.getByRole('list')).getAllByRole('img')
     expect(images.map((image) => image.getAttribute('alt'))).toEqual(['a.jpg', 'b.png', 'c.webp'])
@@ -157,11 +158,12 @@ describe('App', () => {
     await findGallery(1)
     expect(screen.queryByRole('img', { name: 'a.jpg' })).not.toBeInTheDocument()
     expect(objectUrls.revokeObjectURL).toHaveBeenCalledWith(removedUrl)
-    expect(screen.getByRole('button', { name: 'b.jpg 목록에서 제거' })).toHaveFocus()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'b.jpg 목록에서 제거' })).toHaveFocus())
 
     fireEvent.click(screen.getByRole('button', { name: 'b.jpg 목록에서 제거' }))
 
-    expect(await screen.findByRole('button', { name: '사진 선택' })).toHaveFocus()
+    const pickerButton = await screen.findByRole('button', { name: '사진 선택' })
+    await waitFor(() => expect(pickerButton).toHaveFocus())
     expect(objectUrls.liveUrls.size).toBe(0)
   })
 

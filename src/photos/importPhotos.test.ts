@@ -140,6 +140,28 @@ describe('importPhotos', () => {
     expect(result.skipped).toEqual([])
   })
 
+  it('does not report a duplicate when the matching photo is removed during the byte comparison', async () => {
+    const first = await importPhotos([createImageFile('a.jpg', 'jpeg', [1])], () => [], {
+      createThumbnail: fakeCreateThumbnail,
+    })
+    const existing = first.added[0]
+    if (!existing) throw new Error('setup failed')
+    let currentPhotos = first.added
+    // 기존 사진의 바이트를 읽기 시작하는 순간(비교 도중) 목록에서 제거한다.
+    const readExisting = existing.source.slice.bind(existing.source)
+    vi.spyOn(existing.source, 'slice').mockImplementation((...args) => {
+      currentPhotos = []
+      return readExisting(...args)
+    })
+
+    const result = await importPhotos([createImageFile('a-copy.jpg', 'jpeg', [1])], () => currentPhotos, {
+      createThumbnail: fakeCreateThumbnail,
+    })
+
+    expect(result.added.map((photo) => photo.source.name)).toEqual(['a-copy.jpg'])
+    expect(result.skipped).toEqual([])
+  })
+
   it('reports progress for every file', async () => {
     const onProgress = vi.fn()
 

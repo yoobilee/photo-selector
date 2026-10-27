@@ -33,10 +33,11 @@ function createPhotoId(): string {
 }
 
 // 중복 기준: 바이트가 완전히 같은 파일. 이름이 달라도 내용이 같으면 중복이고, 이름이 같아도 내용이 다르면 다른 사진이다.
-async function isDuplicate(file: File, knownSources: readonly File[]): Promise<boolean> {
-  for (const known of knownSources) {
+// 비교하는 동안에도 사진이 목록에서 제거될 수 있으므로 일치한 대상이 아직 목록에 있는지 비교 후 다시 확인한다.
+async function isDuplicate(file: File, getKnownSources: () => readonly File[]): Promise<boolean> {
+  for (const known of getKnownSources()) {
     try {
-      if (await haveSameBytes(file, known)) return true
+      if ((await haveSameBytes(file, known)) && getKnownSources().includes(known)) return true
     } catch {
       // 비교 대상을 읽지 못하면 중복으로 단정하지 않는다. 새 파일 자체의 손상 여부는 미리보기 생성에서 확인한다.
     }
@@ -46,14 +47,14 @@ async function isDuplicate(file: File, knownSources: readonly File[]): Promise<b
 
 async function readPhoto(
   file: File,
-  knownSources: readonly File[],
+  getKnownSources: () => readonly File[],
   createThumbnail: (file: Blob) => Promise<PhotoThumbnail>,
 ): Promise<ReadPhotoOutcome> {
   try {
     const format = await detectImageFormat(file)
     if (!format) return { kind: 'skipped', reason: 'unsupported-format' }
 
-    if (await isDuplicate(file, knownSources)) return { kind: 'skipped', reason: 'duplicate' }
+    if (await isDuplicate(file, getKnownSources)) return { kind: 'skipped', reason: 'duplicate' }
 
     const thumbnail = await createThumbnail(file)
     return {
@@ -74,7 +75,7 @@ async function readPhoto(
 }
 
 // 메모리 사용량을 제한하기 위해 파일을 한 장씩 순서대로 처리한다.
-// 가져오는 동안에도 사용자가 사진을 제거할 수 있으므로 기존 목록은 파일마다 getExistingPhotos로 다시 읽는다.
+// 가져오는 동안에도 사용자가 사진을 제거할 수 있으므로 기존 목록은 getExistingPhotos로 필요할 때마다 다시 읽는다.
 export async function importPhotos(
   files: readonly File[],
   getExistingPhotos: () => readonly Photo[],
@@ -82,12 +83,12 @@ export async function importPhotos(
 ): Promise<ImportPhotosResult> {
   const added: Photo[] = []
   const skipped: SkippedFile[] = []
+  const getKnownSources = () => [...getExistingPhotos(), ...added].map((photo) => photo.source)
 
   for (const [index, file] of files.entries()) {
     if (signal?.aborted) break
 
-    const knownSources = [...getExistingPhotos(), ...added].map((photo) => photo.source)
-    const outcome = await readPhoto(file, knownSources, createThumbnail)
+    const outcome = await readPhoto(file, getKnownSources, createThumbnail)
     if (outcome.kind === 'added') {
       added.push(outcome.photo)
     } else {
