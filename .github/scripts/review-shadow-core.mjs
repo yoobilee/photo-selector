@@ -7,7 +7,10 @@ const summaryMarker = '<!-- codex-pull-request-review-summary -->';
 const statePattern = /<!-- codex-review-state:v1 (\{.*\}) -->/;
 const usageLimitPrefix = 'You have reached your Codex usage limits';
 const reviewRequest = '@codex review';
-const approvalPattern = /^\/review-gate approve ([a-f0-9]{7,40})$/;
+// 기존 게이트는 `/review-gate`로 시작하는 최신 관리자 댓글을 확인으로 읽는다. 승인 댓글이 기존 판정을 바꾸지 않도록 별도 명령을 쓴다.
+export const approvalCommand = '/merge-approve';
+const approvalPattern = /^\/merge-approve ([a-f0-9]{7,40})$/;
+export const isApprovalComment = body => normalizeNewlines(body).trim().startsWith(`${approvalCommand} `);
 
 const matchesPrefix = (path, prefixes) => prefixes.some(prefix => path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`));
 const byId = (a, b) => Number(a.id) - Number(b.id);
@@ -84,7 +87,8 @@ export function evaluateCodexReview({ head, comments, reviews, reviewComments, b
   const flags = new Set(headStates.map(item => `${item.state.hasAnyFindings}/${item.state.hasUnresolvedFindings}`));
   if (flags.size !== 1) return result('indeterminate', '같은 head의 리뷰 상태가 서로 다름', base);
   const { hasAnyFindings, hasUnresolvedFindings } = headStates[0].state;
-  if (typeof hasAnyFindings !== 'boolean') return result('indeterminate', '지적 여부 값 누락', base);
+  if (typeof hasAnyFindings !== 'boolean' || typeof hasUnresolvedFindings !== 'boolean') return result('indeterminate', '지적 여부 값 누락', base);
+  if (!hasAnyFindings && hasUnresolvedFindings) return result('indeterminate', '지적 없음인데 미해결 지적 있음으로 표시됨', base);
 
   const headReviews = reviews.filter(review => isTrustedBotUser(review.user, bot) && review.commit_id === head);
   const reviewIds = new Set(headReviews.map(review => review.id));
@@ -143,6 +147,8 @@ export function decideShadow({ risk, meta, checks, codex, approval, blocked, req
   if (blocked) blockers.push('해제되지 않은 변경 요청 리뷰');
   if (risk !== 'low') {
     if (meta['implemented-by'] === 'unknown') blockers.push('구현 Agent 불명확');
+    // Codex GitHub 리뷰는 Codex가 구현하지 않은 PR에서만 독립 리뷰다. Codex 구현 PR은 별도 Claude 리뷰가 필요하다.
+    if (meta['implemented-by'] === 'codex') blockers.push('Codex 구현 PR은 Codex 리뷰로 독립 검증 불가');
     if (request.requestCount > maxReviewRequests) blockers.push('리뷰 요청 상한 초과');
     if (codex.status === 'findings') {
       const { critical, high, medium, unknown } = codex.findings;

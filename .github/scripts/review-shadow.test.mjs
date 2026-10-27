@@ -147,13 +147,13 @@ test('관리자 승인은 최신 head를 명시하고 변경 이후에 작성돼
   const approval = (body, id = 30, created_at = '2026-10-28T01:00:00Z') => ({ id, body, created_at, user: { id: 102342597, type: 'User' } });
   const find = (comments, confirmers = new Set([30]), lastChangedAt = '2026-10-28T00:00:00Z') => findApproval({ head, comments, confirmers, lastChangedAt }).state;
   assert.equal(find([]), 'none');
-  assert.equal(find([approval(`/review-gate approve ${head.slice(0, 7)}`)]), 'approved');
-  assert.equal(find([approval(`/review-gate approve ${head}\r\n`)]), 'approved');
-  assert.equal(find([approval(`/review-gate approve ${otherHead}`)]), 'invalid');
-  assert.equal(find([approval(`/review-gate approve ${head}`)], new Set()), 'invalid');
-  assert.equal(find([approval(`/review-gate approve ${head}`, 30, '2026-10-27T23:59:59Z')]), 'invalid');
-  assert.equal(find([approval(`/review-gate approve ${head}`)], new Set([30]), 'unknown'), 'indeterminate');
-  assert.equal(find([approval(`/review-gate approve ${head}`)], new Set([30]), null), 'approved');
+  assert.equal(find([approval(`/merge-approve ${head.slice(0, 7)}`)]), 'approved');
+  assert.equal(find([approval(`/merge-approve ${head}\r\n`)]), 'approved');
+  assert.equal(find([approval(`/merge-approve ${otherHead}`)]), 'invalid');
+  assert.equal(find([approval(`/merge-approve ${head}`)], new Set()), 'invalid');
+  assert.equal(find([approval(`/merge-approve ${head}`, 30, '2026-10-27T23:59:59Z')]), 'invalid');
+  assert.equal(find([approval(`/merge-approve ${head}`)], new Set([30]), 'unknown'), 'indeterminate');
+  assert.equal(find([approval(`/merge-approve ${head}`)], new Set([30]), null), 'approved');
   assert.equal(find([approval('PASS 승인합니다')]), 'none');
 });
 
@@ -286,9 +286,34 @@ test('PR 본문 변경은 fingerprint를 바꾸고 기존 확인을 무효화', 
   assert.match(after.summary, /사용자 승인: none/);
 });
 
+test('Shadow 승인 댓글이 기존 관리자 확인보다 새로워도 기존 게이트 성공을 바꾸지 않음', async () => {
+  const approve = { id: 50, user: admin, body: `/merge-approve ${head.slice(0, 7)}`, created_at: '2026-10-27T16:00:00Z' };
+  const r = await runWithShadow({ extraComments: [approve] });
+  assert.deepEqual(r.calls, [['create', 'independent-review'], ['update', 'success']]);
+});
+
+test('완료 상태의 두 지적 값이 누락·모순이면 판단 불가', () => {
+  for (const change of [{ has_any_findings: false, has_unresolved_findings: null }, { has_any_findings: false, has_unresolved_findings: true }]) {
+    assert.equal(codexFor({ comments: [stateComment(change)] }).status, 'indeterminate', JSON.stringify(change));
+  }
+  assert.equal(codexFor({ comments: [stateComment({ has_any_findings: true, has_unresolved_findings: null })], ...findingReview() }).status, 'indeterminate');
+  assert.equal(codexFor({ comments: [stateComment({ has_any_findings: true, has_unresolved_findings: false })], ...findingReview() }).status, 'findings');
+});
+
+test('Codex 구현 PR은 Codex GitHub 리뷰를 독립 리뷰로 인정하지 않음', () => {
+  const clean = { status: 'clean', findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 } };
+  const decide = (agent, risk) => decideShadow({ risk, meta: meta('medium', 'no', agent), checks: [{ name: 'verify', state: 'success' }], codex: clean, approval: { state: 'approved' }, blocked: false, request: { requestCount: 1 }, maxReviewRequests: 3 });
+  for (const risk of ['medium', 'high']) {
+    assert.equal(decide('codex', risk).candidate, false, risk);
+    assert.match(decide('codex', risk).blockers.join(), /독립/);
+    assert.equal(decide('claude', risk).candidate, true, risk);
+    assert.equal(decide('human', risk).candidate, true, risk);
+  }
+});
+
 test('본문 수정 이전의 승인 댓글은 무효이고 이후 승인은 유효', async () => {
   const metadata = '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->';
-  const approve = { id: 50, user: admin, body: `/review-gate approve ${head.slice(0, 7)}`, created_at: '2026-10-27T16:00:00Z' };
+  const approve = { id: 50, user: admin, body: `/merge-approve ${head.slice(0, 7)}`, created_at: '2026-10-27T16:00:00Z' };
   // 본문이 바뀌어 기존 확인은 실패하므로 승인 댓글만으로 판단한다.
   const stale = await runWithShadow({ body: `${metadata}\n수정`, extraComments: [approve], lastEditedAt: '2026-10-27T16:30:00Z' });
   assert.match(stale.summary, /사용자 승인: invalid/);

@@ -1,6 +1,6 @@
 import {
   classifyRisk, compareWithGate, decideShadow, evaluateCodexReview, evaluateRequiredChecks, findApproval,
-  planReviewRequest, validateShadowConfig,
+  isApprovalComment, planReviewRequest, validateShadowConfig,
 } from './review-shadow-core.mjs';
 
 const dependencyPattern = /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?)$/;
@@ -37,9 +37,9 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
 
   let approval = { state: 'none' };
   if (decision.state === 'success' && risk.risk === 'high') approval = { state: 'approved', reason: '기존 관리자 확인 통과' };
-  else if (comments.some(comment => /^\/review-gate approve /.test(String(comment.body ?? '').trim()))) {
+  else if (comments.some(comment => isApprovalComment(comment.body))) {
     const confirmers = new Set();
-    for (const comment of comments) if (/^\/review-gate approve /.test(String(comment.body ?? '').trim()) && await canConfirm(comment.user)) confirmers.add(comment.id);
+    for (const comment of comments) if (isApprovalComment(comment.body) && await canConfirm(comment.user)) confirmers.add(comment.id);
     let changedAt;
     try { changedAt = await lastChangedAt({ github, repo, number: pr.number }); } catch { changedAt = 'unknown'; }
     approval = findApproval({ head, comments, confirmers, lastChangedAt: changedAt });

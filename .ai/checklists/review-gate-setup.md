@@ -124,18 +124,18 @@ git diff --check
 | 위험도 | 자동 판정 후보 조건 |
 |---|---|
 | Low | 필수 CI 성공, 해제되지 않은 변경 요청 없음 |
-| Medium | Low 조건 + 구현 Agent 명확 + 최신 head에 대한 Codex GitHub 리뷰 완료 + critical·high·medium·심각도 불명 지적 0건 + 요청 상한 이내 |
+| Medium | Low 조건 + 구현 Agent가 claude 또는 human(Codex 구현 PR은 Codex 리뷰가 독립 검증이 아니므로 후보 아님) + 최신 head에 대한 Codex GitHub 리뷰 완료 + critical·high·medium·심각도 불명 지적 0건 + 요청 상한 이내 |
 | High | Medium 조건 + 사용자 승인 |
 
 Codex GitHub 리뷰 판정 기준:
 
 - 봇 계정 ID·유형·로그인과 댓글의 앱 ID가 설정과 모두 같아야 한다. 이름만 같은 댓글, 다른 앱, 일반 댓글·PR 본문의 PASS 선언은 무시한다.
-- 상태 댓글의 `codex-review-state:v1`에서 `commit_sha`가 최신 head 전체 SHA와 같고 `status`가 `completed`여야 한다. `running`은 진행 중, 그 밖의 상태·형식 오류·값 누락은 판단 불가다.
+- 상태 댓글의 `codex-review-state:v1`에서 `commit_sha`가 최신 head 전체 SHA와 같고 `status`가 `completed`여야 한다. `running`은 진행 중, 그 밖의 상태·형식 오류는 판단 불가다. 완료 상태에서 `has_any_findings`와 `has_unresolved_findings`가 모두 참·거짓 값이어야 하며, 지적 없음인데 미해결 지적 있음처럼 모순되면 판단 불가다.
 - `has_any_findings: true`면 같은 head의 봇 리뷰와 인라인 댓글을 모두 모아 첫 줄의 `P0`~`P3` 배지로 critical·high·medium·low를 집계한다. 세부 지적이 없거나 배지를 해석할 수 없으면 통과 후보가 아니다. 해결(resolve) 표시는 집계를 줄이지 않는다.
 - 최신 head 결과가 없고 사용량 한도 댓글이 있으면 한도 초과, 그 밖에는 결과 없음이다. 둘 다 통과가 아니다.
 - 댓글·인라인 댓글 수가 PR 정보와 다르면 전체 조회 실패로 판단 불가다.
 
-사용자 승인(High)은 기존 관리자 확인이 통과했거나, `admin`·`maintain` 사용자가 최신 head SHA(7자 이상)를 적은 `/review-gate approve <SHA>` 댓글을 PR 본문·제목·base의 마지막 변경 이후에 작성한 경우다. 이 승인 형식은 현재 관찰용이며 병합 권한을 주지 않는다. 구현 Agent와 관리자가 같은 GitHub 인증을 공유하면 이 댓글이 실제 사람의 판단이라는 것을 기술적으로 증명할 수 없다.
+사용자 승인(High)은 기존 관리자 확인이 통과했거나, `admin`·`maintain` 사용자가 최신 head SHA(7자 이상)를 적은 `/merge-approve <SHA>` 댓글을 PR 본문·제목·base의 마지막 변경 이후에 작성한 경우다. 기존 게이트는 `/review-gate`로 시작하는 최신 관리자 댓글을 확인으로 읽으므로 승인은 이와 겹치지 않는 별도 명령을 쓴다. 이 승인 형식은 현재 관찰용이며 병합 권한을 주지 않는다. 구현 Agent와 관리자가 같은 GitHub 인증을 공유하면 이 댓글이 실제 사람의 판단이라는 것을 기술적으로 증명할 수 없다.
 
 같은 PR 상태에서는 이벤트가 중복되거나 순서가 바뀌어도 같은 결과가 나온다. Summary의 `새 요청 가능/불가`는 같은 head 중복·응답 대기·상한·한도 초과를 계산한 참고값이며 Codex를 실제로 호출하지 않는다.
 
