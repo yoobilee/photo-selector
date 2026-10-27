@@ -30,7 +30,7 @@ describe('importPhotos', () => {
       createImageFile('c.webp', 'webp', [3]),
     ]
 
-    const result = await importPhotos(files, [], { createThumbnail: fakeCreateThumbnail })
+    const result = await importPhotos(files, () => [], { createThumbnail: fakeCreateThumbnail })
 
     expect(result.skipped).toEqual([])
     expect(result.added.map((photo) => [photo.source.name, photo.format])).toEqual([
@@ -46,7 +46,7 @@ describe('importPhotos', () => {
     const original = createImageFile('original.jpg', 'jpeg', [10, 20, 30, 40])
     const bytesBefore = await readBytes(original)
 
-    const result = await importPhotos([original], [], { createThumbnail: fakeCreateThumbnail })
+    const result = await importPhotos([original], () => [], { createThumbnail: fakeCreateThumbnail })
 
     const photo = result.added[0]
     expect(photo?.source).toBe(original)
@@ -61,7 +61,7 @@ describe('importPhotos', () => {
   it('skips unsupported formats without decoding them', async () => {
     const result = await importPhotos(
       [createImageFile('anim.gif', 'gif'), createTextFile('notes.jpg'), createImageFile('ok.jpg', 'jpeg')],
-      [],
+      () => [],
       { createThumbnail: fakeCreateThumbnail },
     )
 
@@ -76,7 +76,7 @@ describe('importPhotos', () => {
   it('skips corrupted images and does not leave object URLs behind', async () => {
     const result = await importPhotos(
       [createImageFile('broken.jpg', 'jpeg', [9]), createImageFile('fine.png', 'png')],
-      [],
+      () => [],
       { createThumbnail: fakeCreateThumbnail },
     )
 
@@ -91,14 +91,14 @@ describe('importPhotos', () => {
       throw new DOMException('File was removed', 'NotReadableError')
     })
 
-    const result = await importPhotos([unreadable], [], { createThumbnail: fakeCreateThumbnail })
+    const result = await importPhotos([unreadable], () => [], { createThumbnail: fakeCreateThumbnail })
 
     expect(result.added).toEqual([])
     expect(result.skipped).toEqual([{ fileName: 'gone.jpg', reason: 'unreadable' }])
   })
 
   it('treats identical bytes as a duplicate regardless of the file name', async () => {
-    const first = await importPhotos([createImageFile('a.jpg', 'jpeg', [1, 2])], [], {
+    const first = await importPhotos([createImageFile('a.jpg', 'jpeg', [1, 2])], () => [], {
       createThumbnail: fakeCreateThumbnail,
     })
 
@@ -109,7 +109,7 @@ describe('importPhotos', () => {
         createImageFile('b.jpg', 'jpeg', [7, 7]),
         createImageFile('b-again.jpg', 'jpeg', [7, 7]),
       ],
-      first.added,
+      () => first.added,
       { createThumbnail: fakeCreateThumbnail },
     )
 
@@ -120,10 +120,30 @@ describe('importPhotos', () => {
     ])
   })
 
+  it('reads the current list for each file so photos removed during an import are not duplicates', async () => {
+    const first = await importPhotos([createImageFile('a.jpg', 'jpeg', [1])], () => [], {
+      createThumbnail: fakeCreateThumbnail,
+    })
+    let currentPhotos = first.added
+    const removeExistingAfterFirst = vi.fn(async (file: Blob) => {
+      currentPhotos = []
+      return fakeCreateThumbnail(file)
+    })
+
+    const result = await importPhotos(
+      [createImageFile('b.jpg', 'jpeg', [2]), createImageFile('a-copy.jpg', 'jpeg', [1])],
+      () => currentPhotos,
+      { createThumbnail: removeExistingAfterFirst },
+    )
+
+    expect(result.added.map((photo) => photo.source.name)).toEqual(['b.jpg', 'a-copy.jpg'])
+    expect(result.skipped).toEqual([])
+  })
+
   it('reports progress for every file', async () => {
     const onProgress = vi.fn()
 
-    await importPhotos([createImageFile('a.jpg', 'jpeg'), createTextFile('b.txt')], [], {
+    await importPhotos([createImageFile('a.jpg', 'jpeg'), createTextFile('b.txt')], () => [], {
       createThumbnail: fakeCreateThumbnail,
       onProgress,
     })
@@ -144,7 +164,7 @@ describe('importPhotos', () => {
 
     const result = await importPhotos(
       [createImageFile('a.jpg', 'jpeg', [1]), createImageFile('b.jpg', 'jpeg', [2])],
-      [],
+      () => [],
       { createThumbnail: abortAfterFirst, signal: controller.signal },
     )
 

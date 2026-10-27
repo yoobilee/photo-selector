@@ -74,22 +74,22 @@ async function readPhoto(
 }
 
 // 메모리 사용량을 제한하기 위해 파일을 한 장씩 순서대로 처리한다.
+// 가져오는 동안에도 사용자가 사진을 제거할 수 있으므로 기존 목록은 파일마다 getExistingPhotos로 다시 읽는다.
 export async function importPhotos(
   files: readonly File[],
-  existingPhotos: readonly Photo[],
+  getExistingPhotos: () => readonly Photo[],
   { createThumbnail = createPhotoThumbnail, onProgress, signal }: ImportPhotosOptions = {},
 ): Promise<ImportPhotosResult> {
   const added: Photo[] = []
   const skipped: SkippedFile[] = []
-  const knownSources = existingPhotos.map((photo) => photo.source)
 
   for (const [index, file] of files.entries()) {
     if (signal?.aborted) break
 
+    const knownSources = [...getExistingPhotos(), ...added].map((photo) => photo.source)
     const outcome = await readPhoto(file, knownSources, createThumbnail)
     if (outcome.kind === 'added') {
       added.push(outcome.photo)
-      knownSources.push(file)
     } else {
       skipped.push({ fileName: file.name, reason: outcome.reason })
     }

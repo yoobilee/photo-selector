@@ -178,6 +178,30 @@ describe('App', () => {
     expect(screen.getByRole('status')).toHaveTextContent('사진 1장을 추가했습니다.')
   })
 
+  it('checks duplicates against the current list when a photo is removed during an import', async () => {
+    render(<App />)
+    selectFiles([createImageFile('a.jpg', 'jpeg', [1])])
+    await findGallery(1)
+
+    let finishThumbnail: (thumbnail: PhotoThumbnail) => void = () => {}
+    vi.mocked(createPhotoThumbnail).mockImplementationOnce(
+      () => new Promise((resolve) => (finishThumbnail = resolve)),
+    )
+    selectFiles([createImageFile('b.jpg', 'jpeg', [2]), createImageFile('a-copy.jpg', 'jpeg', [1])])
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('(0/2)'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'a.jpg 목록에서 제거' }))
+    await screen.findByRole('button', { name: '사진 선택' })
+    finishThumbnail({ blob: new Blob(['thumbnail']), width: 40, height: 30 })
+
+    await findGallery(2)
+    const names = within(screen.getByRole('list'))
+      .getAllByRole('img')
+      .map((image) => image.getAttribute('alt'))
+    expect(names).toEqual(['b.jpg', 'a-copy.jpg'])
+    expect(screen.queryByRole('region', { name: /추가하지 않은 파일/ })).not.toBeInTheDocument()
+  })
+
   it('releases every preview URL when the app unmounts', async () => {
     const { unmount } = render(<App />)
     selectFiles([createImageFile('a.jpg', 'jpeg', [1]), createImageFile('b.jpg', 'jpeg', [2])])

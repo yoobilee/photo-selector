@@ -46,7 +46,7 @@ export function usePhotoLibrary() {
       setProgress({ processed: 0, total: files.length })
 
       try {
-        const result = await importPhotos(files, photosRef.current, {
+        const result = await importPhotos(files, () => photosRef.current, {
           signal: controller.signal,
           onProgress: (processed, total) => {
             if (!controller.signal.aborted) setProgress({ processed, total })
