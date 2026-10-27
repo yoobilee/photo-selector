@@ -1,0 +1,130 @@
+{
+  "description": "실제 chatgpt-codex-connector[bot] 응답. 본문은 원문 그대로이며 테스트는 SHA만 바꿔 사용한다.",
+  "photoSelectorPr5": {
+    "head": "9a16be0d679986931ca2a0ddb7457bdba6f1c939",
+    "environmentNotice": {
+      "source": "yoobilee/photo-selector#5",
+      "id": 6444438179,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "performed_via_github_app": {
+        "id": 1144995,
+        "slug": "chatgpt-codex-connector"
+      },
+      "created_at": "2026-10-27T14:19:57Z",
+      "updated_at": "2026-10-27T14:19:57Z",
+      "body": "To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments)."
+    },
+    "reviewSummaryCompleted": {
+      "source": "yoobilee/photo-selector#5",
+      "id": 6444490896,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "performed_via_github_app": {
+        "id": 1144995,
+        "slug": "chatgpt-codex-connector"
+      },
+      "created_at": "2026-10-27T14:22:10Z",
+      "updated_at": "2026-10-27T14:30:24Z",
+      "body": "<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 {\"code_review\":{\"commit_sha\":\"9a16be0d679986931ca2a0ddb7457bdba6f1c939\",\"has_any_findings\":false,\"has_unresolved_findings\":false,\"status\":\"completed\"},\"security_review\":{\"commit_sha\":null,\"has_any_findings\":null,\"has_unresolved_findings\":null,\"status\":null}} -->\n\n## Codex Review Summary\n\nThis comment shows the latest Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime=\"2026-10-27T14:30:24.101852Z\">2026-10-27T14:30:24.101852Z</relative-time> | `9a16be0` | Manual request |\n\n\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or \"@codex security review\".\n\nCodex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.\n\n</details>"
+    },
+    "reviewReceipt": {
+      "source": "yoobilee/photo-selector#5",
+      "id": 6444519944,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "performed_via_github_app": {
+        "id": 1144995,
+        "slug": "chatgpt-codex-connector"
+      },
+      "created_at": "2026-10-27T14:23:24Z",
+      "updated_at": "2026-10-27T14:23:24Z",
+      "body": "<!-- codex-review-receipt:v1 -->\n\nCodex Review: Didn't find any major issues. Can't wait for the next one!\n\n**Reviewed commit:** `9a16be0d67`\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>"
+    }
+  },
+  "workyUsageLimit": {
+    "source": "yoobilee/worky#116",
+    "id": 5536353309,
+    "user": {
+      "login": "chatgpt-codex-connector[bot]",
+      "id": 199175422,
+      "type": "Bot"
+    },
+    "performed_via_github_app": {
+      "id": 1144995,
+      "slug": "chatgpt-codex-connector"
+    },
+    "created_at": "2026-09-04T05:55:59Z",
+    "updated_at": "2026-09-04T05:55:59Z",
+    "body": "You have reached your Codex usage limits for code reviews. You can see your limits in the [Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).\nTo continue using code reviews, you can upgrade your account or add credits to your account and enable them for code reviews in your [settings](https://chatgpt.com/codex/cloud/settings/code-review)."
+  },
+  "workyFindings": {
+    "source": "yoobilee/worky#50",
+    "head": "7952db7a66ad03f103c123a3e1105f8dbd2ae82a",
+    "review": {
+      "id": 5073426966,
+      "user": {
+        "login": "chatgpt-codex-connector[bot]",
+        "id": 199175422,
+        "type": "Bot"
+      },
+      "state": "COMMENTED",
+      "commit_id": "7952db7a66ad03f103c123a3e1105f8dbd2ae82a",
+      "submitted_at": "2026-09-01T02:34:45Z",
+      "body": "\n### 💡 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `7952db7a66`\n    \n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>"
+    },
+    "comments": [
+      {
+        "id": 3900255472,
+        "user": {
+          "login": "chatgpt-codex-connector[bot]",
+          "id": 199175422,
+          "type": "Bot"
+        },
+        "pull_request_review_id": 5073426966,
+        "commit_id": "7952db7a66ad03f103c123a3e1105f8dbd2ae82a",
+        "original_commit_id": "7952db7a66ad03f103c123a3e1105f8dbd2ae82a",
+        "path": ".github/workflows/review-timeout-watchdog.yml",
+        "created_at": "2026-09-01T02:34:45Z",
+        "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Pipe the response through jq to bind query variables**\n\nIn the new `review-timeout-watchdog.yml`, every timed-out PR reaches this command, but `--arg` is a jq option rather than a `gh pr view` option. Checked against `gh pr view --help`, which exposes `--jq expression` but no `--arg` flag; the exact command exits with `unknown flag: --arg`. Because the script uses `set -e`, the watchdog aborts on the first eligible PR and sends no timeout alert. Emit raw JSON from `gh pr view` and pipe it to `jq --arg ...` instead.\n\nUseful? React with 👍 / 👎."
+      },
+      {
+        "id": 3900255473,
+        "user": {
+          "login": "chatgpt-codex-connector[bot]",
+          "id": 199175422,
+          "type": "Bot"
+        },
+        "pull_request_review_id": 5073426966,
+        "commit_id": "75bb428d6e0ec0ddcdfb42a6e31055a32e59a990",
+        "original_commit_id": "7952db7a66ad03f103c123a3e1105f8dbd2ae82a",
+        "path": ".github/workflows/review-timeout-watchdog.yml",
+        "created_at": "2026-09-01T02:34:45Z",
+        "body": "**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Record the timeout label only after Slack succeeds**\n\nWhen Slack has a transient failure, lines 105–106 have already attached `review-timeout:<sha>`, while the `curl` failure is converted to success by `|| echo`. On every later scan this early return sees that same label and permanently suppresses the promised retry, so the human-review alert can be lost without the workflow failing. Attach the deduplication label only after a successful notification, or remove it when delivery fails.\n\nUseful? React with 👍 / 👎."
+      },
+      {
+        "id": 3900255479,
+        "user": {
+          "login": "chatgpt-codex-connector[bot]",
+          "id": 199175422,
+          "type": "Bot"
+        },
+        "pull_request_review_id": 5073426966,
+        "commit_id": "7952db7a66ad03f103c123a3e1105f8dbd2ae82a",
+        "original_commit_id": "7952db7a66ad03f103c123a3e1105f8dbd2ae82a",
+        "path": ".github/workflows/review-timeout-watchdog.yml",
+        "created_at": "2026-09-01T02:34:45Z",
+        "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Exclude processing placeholders from completed reviews**\n\nIf the trusted bot posts `Currently processing new changes` and then hangs, `claude-review-response.yml` lines 100–102 deliberately skips that event as a placeholder, but this predicate counts the same comment as a delivered review based only on author and timestamp. The watchdog will therefore remove or never create the timeout marker and will never notify anyone that no actual review completed. Inspect the review/comment body here and exclude the same placeholder state before incrementing `REVIEWED`.\n\nUseful? React with 👍 / 👎."
+      }
+    ]
+  }
+}

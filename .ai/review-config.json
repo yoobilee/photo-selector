@@ -16,5 +16,42 @@
     ".ai/review-config.json",
     "AGENTS.md",
     "CLAUDE.md"
-  ]
+  ],
+  "shadow": {
+    "enabled": true,
+    "lowRiskPaths": [
+      "README.md",
+      "CHANGELOG.md",
+      "PATCH_NOTES.md"
+    ],
+    "highRiskPaths": [
+      "src/photos",
+      ".codex",
+      ".claude",
+      ".agents",
+      ".npmrc",
+      ".gitignore",
+      "index.html",
+      "public",
+      "vite.config.ts",
+      "playwright.config.ts",
+      "eslint.config.js",
+      "tsconfig.json",
+      "tsconfig.app.json",
+      "tsconfig.node.json",
+      "vercel.json"
+    ],
+    "requiredChecks": [
+      {
+        "name": "verify",
+        "appId": 15368
+      }
+    ],
+    "codexReviewer": {
+      "login": "chatgpt-codex-connector[bot]",
+      "userId": 199175422,
+      "appId": 1144995
+    },
+    "maxReviewRequests": 3
+  }
 }

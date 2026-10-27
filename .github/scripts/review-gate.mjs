@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, parseConfirmation, decide, validateConfig, blockingReviews, isReportBody, normalizeNewlines, reportHash } from './review-gate-core.mjs';
+import { formatShadowSummary } from './review-shadow-core.mjs';
+import { evaluateShadow } from './review-shadow.mjs';
 
 export async function evaluatePR({ github, repo, pr, config, summary }) {
   validateConfig(config);
@@ -43,12 +45,28 @@ export async function evaluatePR({ github, repo, pr, config, summary }) {
   }
   let decision=decide(description,confirmation,evidence);
   const reviews=await github.paginate(github.rest.pulls.listReviews,{...repo,pull_number:pr.number,per_page:100});
+  let blocked=false;
   for (const review of blockingReviews(reviews)) {
-    if (['admin','maintain','write'].includes(await permission(review.user))) decision={state:'failure',reason:'해제되지 않은 변경 요청 리뷰가 남아 있습니다.'};
+    if (['admin','maintain','write'].includes(await permission(review.user))) {blocked=true;decision={state:'failure',reason:'해제되지 않은 변경 요청 리뷰가 남아 있습니다.'};}
   }
   const now=(await github.rest.pulls.get({...repo,pull_number:pr.number})).data;
   if (now.state!=='open' || now.draft || now.head.sha!==pr.head.sha || now.base.sha!==pr.base.sha || now.title!==pr.title || now.body!==pr.body) throw new Error('검증 중 PR 변경 또는 검토 준비 전 상태');
-  return {description,decision};
+  // 판정 이외의 값은 Shadow 판정이 같은 조회 결과를 재사용하기 위한 것이다.
+  return {description,decision,files,comments,reviews,blocked,canConfirm};
+}
+
+// Shadow 판정은 Summary에만 기록한다. 오류가 나도 기존 check와 실행 결과에 영향을 주지 않는다.
+async function writeShadowSummary({github,repo,pr,config,evaluation,summary}) {
+  let text;
+  try {
+    const shadow=await evaluateShadow({github,repo,pr,config,evaluation,canConfirm:evaluation.canConfirm});
+    if (!shadow) return;
+    text=formatShadowSummary({number:pr.number,shadow});
+  } catch {
+    // 원시 오류에는 API 응답이 들어 있을 수 있어 출력하지 않는다.
+    text=formatShadowSummary({number:pr.number,shadow:{error:'조회·형식·설정 오류'}});
+  }
+  try {summary.addRaw(text);} catch {/* Summary 기록 실패도 기존 판정에 영향을 주지 않는다. */}
 }
 
 export async function runGate({github,context,core}) {
@@ -68,11 +86,13 @@ export async function runGate({github,context,core}) {
         details_url:`https://github.com/${repo.owner}/${repo.repo}/actions/runs/${context.runId}`,
         output:{title:'독립 리뷰 확인 중',summary:`PR #${pr.number}의 현재 상태를 확인합니다.`}});
       check=created.data.id;
-      const {description,decision}=await evaluatePR({github,repo,pr,config,summary:core.summary});
+      const evaluation=await evaluatePR({github,repo,pr,config,summary:core.summary});
+      const {description,decision}=evaluation;
       const proof={pr:pr.number,fingerprint:description.fingerprint,runId:String(context.runId),attempt:String(context.runAttempt ?? process.env.GITHUB_RUN_ATTEMPT ?? '1')};
       await github.rest.checks.update({...repo,check_run_id:check,status:'completed',conclusion:decision.state,
         external_id:JSON.stringify(proof),output:{title:decision.reason,summary:`PR #${pr.number}: ${decision.state}`,text:JSON.stringify(proof)}});
       core.summary.addRaw(`\nPR #${pr.number}: ${decision.state} — ${decision.reason}\n`);
+      await writeShadowSummary({github,repo,pr,config,evaluation,summary:core.summary});
       // 병합 여부는 PR head의 check가 결정한다. 다른 PR의 실패 때문에
       // 정상적으로 평가된 PR의 workflow 출처까지 실패로 만들지 않는다.
     } catch {

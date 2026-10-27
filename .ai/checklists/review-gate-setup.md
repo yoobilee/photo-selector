@@ -95,10 +95,48 @@ draft·제목 규칙·metadata 오류 등 개별 PR 평가 실패는 해당 PR�
 
 ```text
 node --test .github/scripts/review-gate.test.mjs
+node --test .github/scripts/review-shadow.test.mjs
 node --test .github/scripts/merge-pr.test.mjs
 git diff --check
 ```
 
 프로젝트 CI의 Test/Lint/Build는 기술 스택 선택 이후 별도로 구성한다. 이 게이트가 프로젝트 기능 테스트를 대체하지 않는다.
 
-병합 도구의 테스트는 Linux에서 가짜 GitHub CLI로 인수와 판정 흐름을 확인한다. 이 프로젝트는 두 테스트를 `npm run test:gate`로 함께 실행하며 Linux CI의 `verify`에 포함된다. Windows·macOS 로컬에서는 병합 도구 테스트를 건너뛰고, `CI` 환경에서 Linux가 아니면 실패한다. 실제 원격 병합이나 Windows에서 실행한 결과를 뜻하지 않는다. Windows 최초 도입 시 사람이 실제 병합 제목을 확인한다.
+병합 도구의 테스트는 Linux에서 가짜 GitHub CLI로 인수와 판정 흐름을 확인한다. 이 프로젝트는 게이트·Shadow·병합 도구 테스트를 `npm run test:gate`로 함께 실행하며 Linux CI의 `verify`에 포함된다. Windows·macOS 로컬에서는 병합 도구 테스트를 건너뛰고, `CI` 환경에서 Linux가 아니면 실패한다. 실제 원격 병합이나 Windows에서 실행한 결과를 뜻하지 않는다. Windows 최초 도입 시 사람이 실제 병합 제목을 확인한다.
+
+## 6. Shadow 판정(관찰용)
+
+게이트 실행마다 기존 판정을 check에 게시한 **뒤** 위험도별 자동 판정 후보를 계산해 Actions Summary에만 기록한다. 기존 `independent-review` 결론, 필수 검사, 병합 도구와 브랜치 보호에는 영향이 없고 별도 check를 게시하지 않는다. Shadow 조회·형식 오류는 Summary에 `판단 불가`로 남기며 기존 판정을 바꾸지 않는다. 자동 승인·자동 병합·Codex 자동 호출은 없다.
+
+설정은 `.ai/review-config.json`의 `shadow`다.
+
+| 키 | 의미 |
+|---|---|
+| `enabled` | Shadow 판정 기록 여부 |
+| `lowRiskPaths` | Low로 인정하는 정확한 경로·디렉터리 허용 목록. 모든 변경 파일이 목록 안이고 metadata가 low일 때만 Low |
+| `highRiskPaths` | 기존 `highRiskPaths`에 더해 High로 올릴 경로 |
+| `requiredChecks` | 성공해야 하는 check 이름과 게시 앱 ID |
+| `codexReviewer` | 신뢰할 Codex GitHub 리뷰 봇의 로그인·사용자 ID·앱 ID |
+| `maxReviewRequests` | PR당 `@codex review` 요청 상한 |
+
+위험도는 metadata보다 낮아지지 않는다. metadata high, 민감 변경 `yes`, 고위험 경로, 의존성·잠금 파일 변경은 High다. 허용 목록 밖 파일이 하나라도 있으면 최소 Medium이다.
+
+| 위험도 | 자동 판정 후보 조건 |
+|---|---|
+| Low | 필수 CI 성공, 해제되지 않은 변경 요청 없음 |
+| Medium | Low 조건 + 구현 Agent 명확 + 최신 head에 대한 Codex GitHub 리뷰 완료 + critical·high·medium·심각도 불명 지적 0건 + 요청 상한 이내 |
+| High | Medium 조건 + 사용자 승인 |
+
+Codex GitHub 리뷰 판정 기준:
+
+- 봇 계정 ID·유형·로그인과 댓글의 앱 ID가 설정과 모두 같아야 한다. 이름만 같은 댓글, 다른 앱, 일반 댓글·PR 본문의 PASS 선언은 무시한다.
+- 상태 댓글의 `codex-review-state:v1`에서 `commit_sha`가 최신 head 전체 SHA와 같고 `status`가 `completed`여야 한다. `running`은 진행 중, 그 밖의 상태·형식 오류·값 누락은 판단 불가다.
+- `has_any_findings: true`면 같은 head의 봇 리뷰와 인라인 댓글을 모두 모아 첫 줄의 `P0`~`P3` 배지로 critical·high·medium·low를 집계한다. 세부 지적이 없거나 배지를 해석할 수 없으면 통과 후보가 아니다. 해결(resolve) 표시는 집계를 줄이지 않는다.
+- 최신 head 결과가 없고 사용량 한도 댓글이 있으면 한도 초과, 그 밖에는 결과 없음이다. 둘 다 통과가 아니다.
+- 댓글·인라인 댓글 수가 PR 정보와 다르면 전체 조회 실패로 판단 불가다.
+
+사용자 승인(High)은 기존 관리자 확인이 통과했거나, `admin`·`maintain` 사용자가 최신 head SHA(7자 이상)를 적은 `/review-gate approve <SHA>` 댓글을 PR 본문·제목·base의 마지막 변경 이후에 작성한 경우다. 이 승인 형식은 현재 관찰용이며 병합 권한을 주지 않는다. 구현 Agent와 관리자가 같은 GitHub 인증을 공유하면 이 댓글이 실제 사람의 판단이라는 것을 기술적으로 증명할 수 없다.
+
+같은 PR 상태에서는 이벤트가 중복되거나 순서가 바뀌어도 같은 결과가 나온다. Summary의 `새 요청 가능/불가`는 같은 head 중복·응답 대기·상한·한도 초과를 계산한 참고값이며 Codex를 실제로 호출하지 않는다.
+
+지원하지 않는 응답: 진행 중·지적 있음 상태 댓글의 새 형식, P0·P3 배지, 보안 리뷰(`security_review`) 결과는 실제 응답을 아직 관찰하지 못해 기존 관찰 형식에서 파생한 테스트만 있다. 봇 댓글 생성·수정은 게이트 실행을 일으키지 않으므로 Summary는 다음 게이트 실행 시점의 상태다.
