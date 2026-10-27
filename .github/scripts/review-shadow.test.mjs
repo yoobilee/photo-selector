@@ -172,7 +172,13 @@ test('위험도별 자동 판정 후보 조건', () => {
   const pass = [{ name: 'verify', state: 'success' }];
   const clean = { status: 'clean', findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 } };
   const withFindings = findings => ({ status: 'findings', findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0, ...findings } });
-  const decide = (change = {}) => decideShadow({ risk: 'medium', meta: meta(), checks: pass, codex: clean, approval: { state: 'none' }, blocked: false, request: { requestCount: 1 }, maxReviewRequests: 3, ...change });
+  const decide = (change = {}) => decideShadow({ risk: 'medium', meta: meta(), checks: pass, codex: clean, approval: { state: 'none' }, blocked: false, request: { requestCount: 1 }, maxReviewRequests: 3, baseSync: 'current', ...change });
+  // main이 앞서 나가면 head가 같아도 이전 검증·승인을 최신 base 기준으로 볼 수 없다.
+  for (const baseSync of ['behind', 'unknown']) {
+    for (const risk of ['low', 'medium']) assert.equal(decide({ risk, baseSync }).candidate, false, `${risk} ${baseSync}`);
+    assert.equal(decide({ risk: 'high', approval: { state: 'approved' }, baseSync }).candidate, false, baseSync);
+    assert.match(decide({ baseSync }).blockers.join(), /최신 base/);
+  }
   assert.equal(decide({ risk: 'low', codex: { status: 'missing', reason: '없음' } }).candidate, true);
   assert.equal(decide({ risk: 'low', checks: [{ name: 'verify', state: 'failure' }] }).candidate, false);
   assert.equal(decide().candidate, true);
@@ -192,7 +198,7 @@ test('위험도별 자동 판정 후보 조건', () => {
 
 // GitHub API를 호출하지 않는 runGate 통합 실행. 기존 게이트 확인 댓글과 Codex 응답을 함께 둔다.
 const admin = { id: 102342597, login: 'yoobilee', type: 'User' };
-async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewComments = false, extraComments = [], body, lastEditedAt = null, checkRuns } = {}) {
+async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewComments = false, extraComments = [], body, lastEditedAt = null, checkRuns, behindBy = 0 } = {}) {
   const metadata = '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->';
   const pr = { number: 7, title: 'fix: 권한 확인 누락 수정', body: body ?? metadata, state: 'open', changed_files: 1, head: { sha: head }, base: { sha: 'b'.repeat(40) } };
   const files = [{ filename: '.github/scripts/review-gate.mjs', status: 'modified' }];
@@ -219,7 +225,14 @@ async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewCom
         listReviewComments: async () => { if (failReviewComments) throw new Error('sensitive raw response'); return { data: [] }; },
       },
       issues: { listComments: async () => ({ data: comments }) },
-      repos: { getCollaboratorPermissionLevel: async () => ({ data: { permission: 'admin' } }) },
+      repos: {
+        getCollaboratorPermissionLevel: async () => ({ data: { permission: 'admin' } }),
+        compareCommitsWithBasehead: async ({ basehead }) => {
+          if (behindBy === 'error') throw new Error('sensitive raw response');
+          assert.equal(basehead, `${'b'.repeat(40)}...${head}`);
+          return { data: { behind_by: behindBy } };
+        },
+      },
       checks: {
         create: async value => { calls.push(['create', value.name]); return { data: { id: 99 } }; },
         update: async value => { calls.push(['update', value.conclusion]); },
@@ -302,7 +315,7 @@ test('완료 상태의 두 지적 값이 누락·모순이면 판단 불가', ()
 
 test('Codex 구현 PR은 Codex GitHub 리뷰를 독립 리뷰로 인정하지 않음', () => {
   const clean = { status: 'clean', findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 } };
-  const decide = (agent, risk) => decideShadow({ risk, meta: meta('medium', 'no', agent), checks: [{ name: 'verify', state: 'success' }], codex: clean, approval: { state: 'approved' }, blocked: false, request: { requestCount: 1 }, maxReviewRequests: 3 });
+  const decide = (agent, risk) => decideShadow({ risk, meta: meta('medium', 'no', agent), checks: [{ name: 'verify', state: 'success' }], codex: clean, approval: { state: 'approved' }, blocked: false, request: { requestCount: 1 }, maxReviewRequests: 3, baseSync: 'current' });
   for (const risk of ['medium', 'high']) {
     assert.equal(decide('codex', risk).candidate, false, risk);
     assert.match(decide('codex', risk).blockers.join(), /독립/);
@@ -320,4 +333,15 @@ test('본문 수정 이전의 승인 댓글은 무효이고 이후 승인은 유
   const fresh = await runWithShadow({ body: `${metadata}\n수정`, extraComments: [approve], lastEditedAt: '2026-10-27T15:30:00Z' });
   assert.match(fresh.summary, /사용자 승인: approved/);
   assert.match(fresh.summary, /차이: 기존 게이트 실패, Shadow 후보/);
+});
+
+test('main이 앞서 나간 PR은 이전 승인이 있어도 후보가 아니고 기존 판정은 그대로', async () => {
+  const approve = { id: 50, user: admin, body: `/merge-approve ${head.slice(0, 7)}`, created_at: '2026-10-27T16:00:00Z' };
+  for (const behindBy of [1, 'error']) {
+    const r = await runWithShadow({ extraComments: [approve], behindBy });
+    assert.deepEqual(r.calls, [['create', 'independent-review'], ['update', 'success']], String(behindBy));
+    assert.match(r.summary, /자동 판정 후보\(high\): 아니오 — .*최신 base/, String(behindBy));
+    assert.doesNotMatch(r.summary, /sensitive raw response/);
+  }
+  assert.match((await runWithShadow({ behindBy: 1 })).summary, /최신 base 반영: behind/);
 });

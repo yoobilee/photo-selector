@@ -16,6 +16,17 @@ async function lastChangedAt({ github, repo, number }) {
   return times.length ? times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) : null;
 }
 
+// PR head가 최신 base를 포함하는지 확인한다. 조회 실패는 알 수 없음으로 남긴다.
+async function baseSyncState({ github, repo, base, head }) {
+  try {
+    const { data } = await github.rest.repos.compareCommitsWithBasehead({ ...repo, basehead: `${base}...${head}` });
+    if (!Number.isSafeInteger(data?.behind_by)) return 'unknown';
+    return data.behind_by === 0 ? 'current' : 'behind';
+  } catch {
+    return 'unknown';
+  }
+}
+
 // 기존 게이트 평가가 끝난 뒤 같은 PR 상태로 관찰용 판정을 계산한다. GitHub에 아무것도 쓰지 않는다.
 export async function evaluateShadow({ github, repo, pr, config, evaluation, canConfirm }) {
   const shadow = config?.shadow;
@@ -45,6 +56,7 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
     approval = findApproval({ head, comments, confirmers, lastChangedAt: changedAt });
   }
 
-  const shadowDecision = decideShadow({ risk: risk.risk, meta: description.meta, checks, codex, approval, blocked, request, maxReviewRequests: shadow.maxReviewRequests });
-  return { risk, checks, codex, approval, request, decision: shadowDecision, comparison: compareWithGate(shadowDecision, decision), fingerprint: description.fingerprint };
+  const baseSync = await baseSyncState({ github, repo, base: description.base, head });
+  const shadowDecision = decideShadow({ risk: risk.risk, meta: description.meta, checks, codex, approval, blocked, request, maxReviewRequests: shadow.maxReviewRequests, baseSync });
+  return { risk, checks, codex, approval, request, baseSync, decision: shadowDecision, comparison: compareWithGate(shadowDecision, decision), fingerprint: description.fingerprint };
 }

@@ -141,8 +141,10 @@ export function planReviewRequest({ comments, codex, bot, maxReviewRequests }) {
 }
 
 // 기존 게이트와 별개로 자동 판정 후보인지 계산한다. 후보가 아니면 사유를 모두 남긴다.
-export function decideShadow({ risk, meta, checks, codex, approval, blocked, request, maxReviewRequests }) {
+export function decideShadow({ risk, meta, checks, codex, approval, blocked, request, maxReviewRequests, baseSync }) {
   const blockers = [];
+  // head가 그대로여도 main이 앞서 나가면 CI·리뷰·승인은 이전 base 기준이다. strict 보호와 같은 조건을 요구한다.
+  if (baseSync !== 'current') blockers.push(`최신 base 반영: ${baseSync}`);
   for (const check of checks) if (check.state !== 'success') blockers.push(`필수 CI ${check.name}: ${check.state}`);
   if (blocked) blockers.push('해제되지 않은 변경 요청 리뷰');
   if (risk !== 'low') {
@@ -168,12 +170,13 @@ export function compareWithGate(shadowDecision, gateDecision) {
 
 export function formatShadowSummary({ number, shadow }) {
   if (shadow.error) return `\n#### Shadow 판정 PR #${number} (관찰용, 병합에 영향 없음)\n\n- 판단 불가: ${shadow.error}\n`;
-  const { risk, checks, codex, approval, request, decision, comparison, fingerprint } = shadow;
+  const { risk, checks, codex, approval, request, decision, comparison, fingerprint, baseSync } = shadow;
   const findings = codex.findings ? ` (critical ${codex.findings.critical}·high ${codex.findings.high}·medium ${codex.findings.medium}·low ${codex.findings.low}·unknown ${codex.findings.unknown})` : '';
   return [
     `\n#### Shadow 판정 PR #${number} (관찰용, 병합에 영향 없음)\n`,
     `- 위험도: ${risk.risk} — ${risk.reasons.join('; ')}`,
     `- 필수 CI: ${checks.map(check => `${check.name} ${check.state}`).join(', ')}`,
+    `- 최신 base 반영: ${baseSync}`,
     `- Codex GitHub 리뷰: ${codex.status} — ${codex.reason}${findings}${codex.ignoredUntrusted ? ` / 신뢰하지 않는 리뷰 형식 댓글 ${codex.ignoredUntrusted}개 무시` : ''}`,
     `- 리뷰 요청: ${request.requestCount}회, 새 요청 ${request.allowed ? '가능' : `불가(${request.reason})`}`,
     `- 사용자 승인: ${approval.state}${approval.reason ? ` — ${approval.reason}` : ''}`,
