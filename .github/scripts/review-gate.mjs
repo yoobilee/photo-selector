@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, parseConfirmation, decide, sha256, validateConfig, blockingReviews } from './review-gate-core.mjs';
+import { describe, parseConfirmation, decide, validateConfig, blockingReviews, isReportBody, normalizeNewlines, reportHash } from './review-gate-core.mjs';
 
 export async function evaluatePR({ github, repo, pr, config, summary }) {
   validateConfig(config);
@@ -21,9 +21,10 @@ export async function evaluatePR({ github, repo, pr, config, summary }) {
   const description = describe(pr,files,config);
   summary?.addHeading(`PR #${pr.number}: ${description.risk}`).addRaw(`\nHEAD: ${description.head}\n\nBASE: ${description.base}\n\n`).addCodeBlock(description.fingerprint,'text');
   const comments = await github.paginate(github.rest.issues.listComments,{...repo,issue_number:pr.number,per_page:100});
-  for (const report of comments.filter(comment => (comment.body ?? '').startsWith('# 독립 리뷰 보고서\n'))) {
-    if (report.body.includes(description.head) && report.body.includes(description.base) && await canConfirm(report.user)) {
-      summary?.addRaw(`\n보고서 댓글 ID: ${report.id}\n\n보고서 SHA-256: ${sha256(report.body)}\n\n`);
+  for (const report of comments.filter(comment => isReportBody(comment.body))) {
+    const reportBody = normalizeNewlines(report.body);
+    if (reportBody.includes(description.head) && reportBody.includes(description.base) && await canConfirm(report.user)) {
+      summary?.addRaw(`\n보고서 댓글 ID: ${report.id}\n\n보고서 SHA-256: ${reportHash(reportBody)}\n\n`);
     }
   }
   let confirmation;
@@ -36,8 +37,9 @@ export async function evaluatePR({ github, repo, pr, config, summary }) {
     const url=confirmation.evidence;
     if (typeof url!=='string' || !url.startsWith(prefix) || !/^\d+$/.test(url.slice(prefix.length))) throw new Error('다른 PR 또는 잘못된 근거 링크');
     const report=comments.find(comment=>String(comment.id)===url.slice(prefix.length));
-    if (!report || !report.body.startsWith('# 독립 리뷰 보고서\n') || !await canConfirm(report.user)) throw new Error('유효한 관리자 보고서 없음');
-    evidence={body:report.body,hash:sha256(report.body)};
+    if (!report || !isReportBody(report.body) || !await canConfirm(report.user)) throw new Error('유효한 관리자 보고서 없음');
+    const reportBody=normalizeNewlines(report.body);
+    evidence={body:reportBody,hash:reportHash(reportBody)};
   }
   let decision=decide(description,confirmation,evidence);
   const reviews=await github.paginate(github.rest.pulls.listReviews,{...repo,pull_number:pr.number,per_page:100});

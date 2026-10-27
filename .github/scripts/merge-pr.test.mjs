@@ -69,6 +69,11 @@ function run(mode) {
 }
 const linuxTest=process.platform==='linux'?test:test.skip;
 
+// 로컬 Windows·macOS에서는 건너뛰지만 CI에서 건너뛰면 병합 도구가 검증되지 않은 채 통과하므로 실패시킨다.
+test('CI에서는 병합 도구 테스트를 Linux에서 실행',()=>{
+  if(process.env.CI) assert.equal(process.platform,'linux','CI에서 병합 도구 테스트가 건너뛰어졌습니다.');
+});
+
 linuxTest('한글·셸 기호·Issue 본문과 예상 head를 보존',()=>{
   const {result,calls}=run('success');
   assert.equal(result.status,0,result.stderr);

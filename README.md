@@ -49,7 +49,7 @@ npm run dev                              # 개발 서버
 | `npm run test` | Vitest 단위 테스트 |
 | `npm run build` | 프로덕션 빌드 (`dist/`) |
 | `npm run test:e2e` | Playwright E2E. 빌드 결과물을 대상으로 하므로 먼저 `npm run build`가 필요합니다 |
-| `npm run test:gate` | GitHub 리뷰 게이트 스크립트 테스트 |
+| `npm run test:gate` | GitHub 리뷰 게이트와 병합 도구 테스트. 병합 도구 테스트는 Linux 전용이라 다른 OS에서는 건너뛰고, CI에서 건너뛰면 실패합니다 |
 | `npm run verify` | 위 검사를 모두 순서대로 실행 |
 
 GitHub Actions의 [CI 워크플로우](.github/workflows/ci.yml)가 모든 PR과 `main` push에서 Node 24.15.0으로 `npm ci`와 `npm run verify`를 실행합니다.
