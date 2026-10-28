@@ -75,6 +75,8 @@ Claude Code로 구현한 변경은 [Codex plugin for Claude Code](https://github
 
 기본 `independent-review` 게이트는 **AI를 호출하지 않고**, 최신 변경에 대한 리뷰 근거와 관리자의 확인 기록을 검사합니다. Codex 리뷰 실행과는 별개의 검사입니다. 자동 병합은 사용하지 않습니다.
 
+게이트는 같은 실행에서 위험도별 **Shadow 판정**도 계산해 Actions Summary에만 남깁니다. Low·Medium·High 자동 판정 후보 여부, 필수 CI, Codex GitHub 리뷰 결과, 사용자 승인, 기존 게이트와의 차이를 보여 주며 병합 조건에는 쓰이지 않습니다. 설정과 판정 기준은 [리뷰 게이트 설정](.ai/checklists/review-gate-setup.md#6-shadow-판정관찰용)에 있습니다.
+
 - [리뷰 게이트 설정과 확인 댓글 형식](.ai/checklists/review-gate-setup.md)
 - [위험도와 독립 검증 기준](.ai/policies/verification.md)
 - [리뷰 자동화 정책](.ai/policies/review-automation.md)
