@@ -155,6 +155,64 @@ test('두 번째 점검 도중 base·head·제목·본문·draft·닫힘 변경�
   }
 });
 
+// Codex 리뷰 P1(PR #7 5회차): 두 번째 점검이 댓글을 모은 뒤 실행 전까지 바뀐 승인·요청 근거를 다시 확인해야 한다.
+// check-suites는 두 번째 점검에서 댓글을 모은 뒤 조회된다. 브랜치 보호는 Shadow의 승인 판정 뒤에 조회된다(병합 모드). 둘 다 두 번째(nth 2) 점검 시점이다.
+const afterSecondCollect = change => ({ commentChangeAt: { at: '/check-suites', nth: 2, change } });
+const afterSecondApproval = change => ({ commentChangeAt: { at: '/protection', nth: 2, change } });
+
+test('High 승인 댓글 삭제·본문 수정·수정 이력·작성자 권한 변경은 실행 직전 재확인에서 병합 차단', async () => {
+  for (const change of ['delete-approval', 'edit-approval', 'touch-approval', 'demote-approver']) {
+    const r = await run(afterSecondApproval(change));
+    assert.equal(r.status, 1, change);
+    assert.equal(r.merges.length, 0, change);
+    assert.deepEqual(r.effects, [], change);
+    assert.match(r.err, /재확인에서 조건이 바뀌었습니다/, change);
+  }
+});
+
+test('리뷰 요청 직전 같은 head 요청 추가·PR당 상한 도달은 요청하지 않음', async () => {
+  const request = options => run({ risk: 'medium', codex: 'none', approval: 'none', ...options }, ['--request-review']);
+  const duplicate = await request({ requests: 0, ...afterSecondCollect('add-request') });
+  assert.equal(duplicate.status, 1);
+  assert.deepEqual(duplicate.store.posted, []);
+  // 이전 head 요청 2회(head가 처음 보인 시각 이전) + 실행 중 요청 1회 = 상한 3회.
+  const cap = await request({ requests: 2, headSeenAt: '2026-10-27T15:00:00Z', ...afterSecondCollect('add-request') });
+  assert.equal(cap.status, 1);
+  assert.deepEqual(cap.store.posted, []);
+  // 같은 조건에서 실행 중 요청이 없으면 이전 head 요청 2회로는 막지 않는다.
+  const allowed = await request({ requests: 2, headSeenAt: '2026-10-27T15:00:00Z' });
+  assert.equal(allowed.status, 0, allowed.err);
+  assert.deepEqual(allowed.store.posted, ['body=@codex review']);
+});
+
+test('실행 중 추가된 무관한 봇 댓글만으로는 병합·리뷰 요청을 막지 않음', async () => {
+  const merge = await run(afterSecondCollect('add-bot'));
+  assert.equal(merge.status, 0, merge.err);
+  assert.equal(merge.merges.length, 1);
+  const request = await run({ risk: 'medium', codex: 'none', approval: 'none', requests: 0, ...afterSecondCollect('add-bot') }, ['--request-review']);
+  assert.equal(request.status, 0, request.err);
+  assert.deepEqual(request.store.posted, ['body=@codex review']);
+});
+
+test('실행 직전 댓글 재조회 실패·불완전한 목록은 병합·리뷰 요청하지 않음', async () => {
+  const requestOptions = { risk: 'medium', codex: 'none', approval: 'none', requests: 0 };
+  // 세 번째 조회가 실행 직전 재확인이다.
+  for (const [options, flags, label] of [
+    [{ failAt: { at: '/issues/1/comments', nth: 3 } }, [], '병합: 댓글 재조회 실패'],
+    [{ ...requestOptions, failAt: { at: '/issues/1/comments', nth: 3 } }, ['--request-review'], '요청: 댓글 재조회 실패'],
+    [{ ...requestOptions, failAt: { at: '/pulls/1/reviews', nth: 3 } }, ['--request-review'], '요청: 리뷰 재조회 실패'],
+    // 일반 댓글 목록을 받은 뒤 PR 정보를 다시 받기 전에 새 요청이 생기면 목록이 불완전하다.
+    [{ ...requestOptions, commentChangeAt: { at: '/pulls/1/comments', nth: 3, change: 'add-request' } }, ['--request-review'], '요청: 재조회 중 새 댓글'],
+  ]) {
+    const r = await run(options, flags);
+    assert.equal(r.status, 1, label);
+    assert.deepEqual(r.effects, [], label);
+    assert.deepEqual(r.store.posted, [], label);
+    assert.match(r.err, /재확인에서 조건이 바뀌었습니다/, label);
+    assert.doesNotMatch(r.out + r.err, /server error|HTTP 5/, label);
+  }
+});
+
 test('중복 실행: 잠금이 있으면 아무 조회·병합도 하지 않고, 이미 병합된 PR은 다시 병합하지 않음', async () => {
   const locked = await run({}, [], { locked: true });
   assert.equal(locked.status, 1);

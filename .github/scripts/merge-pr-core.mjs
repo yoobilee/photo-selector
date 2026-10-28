@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { assertPullRequestUnchanged, pullRequestSnapshot, validTitle } from './review-gate-core.mjs';
 import { evaluatePR } from './review-gate.mjs';
 import { verifyGateSource } from './review-gate-source.mjs';
-import { approvalText, latestCheckRun } from './review-shadow-core.mjs';
-import { evaluateShadow } from './review-shadow.mjs';
+import { approvalText, evaluateCodexReview, latestCheckRun, planReviewRequest } from './review-shadow-core.mjs';
+import { evaluateApproval, evaluateShadow } from './review-shadow.mjs';
 
 // 사용자가 명시적으로 실행하는 병합 도구의 판정과 실행. workflow에서는 호출하지 않는다.
 // gh·git 실행 함수를 주입받으므로 실제 CLI 없이 같은 흐름을 테스트할 수 있다.
@@ -212,6 +212,11 @@ export async function assessMerge({ gh, git, repo, number, mode, expectedHead = 
     return finish();
   }
   assessment.shadow = shadow;
+  // 실행 직전 재확인에 쓰는 근거: 승인에 사용한 댓글 원본, 같은 권한 확인 함수, 기본 브랜치 정책.
+  Object.assign(assessment, {
+    config, canConfirm: evaluation.canConfirm,
+    approvalComment: evaluation.comments.find(comment => shadow.approval.state === 'approved' && comment.id === shadow.approval.commentId) ?? null,
+  });
   const risk = shadow.risk.risk;
 
   if (mode === 'request-review') {
@@ -411,6 +416,33 @@ function postReviewRequest({ gh, repo, number, out, err }) {
   return 0;
 }
 
+// 실행 직전 마지막 확인. 두 번째 점검이 댓글을 모은 뒤 바뀐 PR과 댓글 근거를 다시 조회해 같은 판정 함수로 다시 계산한다.
+// 댓글 목록을 모두 조회한 **뒤에** PR을 다시 읽어 목록이 완전한지 확인하므로, 무관한 새 댓글은 막지 않고 누락된 목록은 막는다.
+async function finalEvidenceHolds({ github, repo, number, mode, first, again }) {
+  const { shadow } = again;
+  const [owner, name] = repo.split('/');
+  const repoRef = { owner, repo: name };
+  const comments = github.list(`repos/${repo}/issues/${number}/comments`);
+  const requesting = mode === 'request-review';
+  const reviews = requesting ? github.list(`repos/${repo}/pulls/${number}/reviews`) : [];
+  const reviewComments = requesting ? github.list(`repos/${repo}/pulls/${number}/comments`) : [];
+  const latest = github.api(`repos/${repo}/pulls/${number}`);
+  assertPullRequestUnchanged(first.source, latest);
+  if (comments.length !== latest.comments || (requesting && reviewComments.length !== latest.review_comments)) return false;
+  if (requesting) {
+    // 같은 head 요청·대기·상한·한도 초과를 Shadow와 같은 함수로 다시 계산한다. 결과는 commit_sha로만 head에 연결된다.
+    const codex = evaluateCodexReview({ head: again.head, comments, reviews, reviewComments, bot: again.config.shadow.codexReviewer });
+    return planReviewRequest({ comments, codex, maxReviewRequests: again.config.shadow.maxReviewRequests, headSeenAt: shadow.headSeenAt }).allowed;
+  }
+  if (shadow.risk.risk !== 'high') return true;
+  // 같은 승인 댓글이 그대로 남아 있고(ID·작성자·본문·수정 시각), 지금도 같은 함수로 승인으로 판정돼야 한다(권한·head·fingerprint·변경 시각).
+  const used = again.approvalComment;
+  const now = comments.find(comment => comment.id === used?.id);
+  if (!used || !now || now.user?.id !== used.user?.id || now.body !== used.body || now.updated_at !== used.updated_at) return false;
+  const approval = await evaluateApproval({ github, repo: repoRef, number, head: again.head, fingerprint: again.fingerprint, comments, canConfirm: again.canConfirm });
+  return approval.state === 'approved' && approval.commentId === used.id;
+}
+
 export async function runMergeTool({ argv, gh, git, out = console.log, err = console.error, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), lock = fileLock }) {
   const options = parseArgs(argv);
   if (!options) { err(usage); return 1; }
@@ -434,21 +466,18 @@ export async function runMergeTool({ argv, gh, git, out = console.log, err = con
     if (!first.ok) return 1;
     // 실행 직전에 모든 조건을 다시 조회한다. 그 사이 head·본문·파일·정책·판정이 바뀌면 진행하지 않는다.
     const again = await assess();
-    const changed = () => {
-      // 두 점검의 시작 PR과, 두 번째 점검이 끝난 뒤 다시 받은 PR이 모두 첫 점검을 시작한 PR과 같아야 한다.
-      // 점검 도중의 PR 재지정·제목·본문·draft·닫힘 변경도 기존 게이트와 같은 공용 기준으로 감지한다.
+    const changed = async () => {
       try {
         assertPullRequestUnchanged(first.source, again.source);
-        assertPullRequestUnchanged(first.source, createGitHub({ gh, repo }).api(`repos/${repo}/pulls/${number}`));
-        return false;
+        return !await finalEvidenceHolds({ github: createGitHub({ gh, repo }), repo, number, mode, first, again });
       } catch { return true; }
     };
-    if (!again.ok || again.head !== first.head || again.fingerprint !== first.fingerprint || again.shadow.risk.risk !== first.shadow.risk.risk || changed()) {
+    if (!again.ok || again.head !== first.head || again.fingerprint !== first.fingerprint || again.shadow.risk.risk !== first.shadow.risk.risk || await changed()) {
       err('실행 직전 재확인에서 조건이 바뀌었습니다. 진행하지 않습니다. dry-run으로 다시 점검하세요.');
       return 1;
     }
     // 여기서부터 GitHub 쓰기 호출까지의 경합은 병합 API의 --match-head-commit(head)과 브랜치 보호(strict·필수 검사)만 막는다.
-    // base·제목·본문을 병합 API가 원자적으로 고정하지는 않는다.
+    // base·제목·본문과 승인·요청 댓글을 병합·댓글 API가 원자적으로 고정하지는 않는다.
     if (mode === 'request-review') return postReviewRequest({ gh, repo, number, out, err });
     return await mergeAndCleanup({ gh, git, repo, number, assessment: again, out, err, sleep });
   } finally {

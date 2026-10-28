@@ -167,7 +167,12 @@ node .github/scripts/merge-pr.mjs owner/repo PR번호 --request-review          
 
 PR 변경 감지는 `review-gate-core.mjs`의 `assertPullRequestUnchanged` 하나로 한다. 기존 게이트(`evaluatePR`), Shadow의 목록 조회 뒤 재조회, 병합 도구의 두 번째 점검 시작 PR과 최종 재조회가 모두 첫 점검을 시작한 PR과 비교한다. 비교 값은 PR 번호, state(open), draft(false), 제목, 본문, head·base의 SHA·브랜치·저장소, 변경 파일 수다. 값이 하나라도 없으면 차단한다. 댓글 수처럼 판정 근거가 아닌 값의 변화는 허용한다.
 
-남는 경합: 최종 재조회와 병합 API 호출 사이의 변경은 도구가 감지할 수 없다. head는 `--match-head-commit`이 GitHub에서 거부하고, 최신 base 반영은 기본 브랜치 보호의 strict 필수 검사가 막는다. 그 사이 base를 다른 브랜치로 재지정하거나 제목·본문을 바꾸는 것은 병합 API가 원자적으로 고정하지 않는다. 다른 브랜치로 재지정되면 그 브랜치의 보호 설정이 적용된다. 병합 뒤 실제 병합 커밋 제목은 검증하지만 base 브랜치는 사후 확인하지 않는다. 이 경합을 해결했다고 표현하지 않는다. 병합 명령이 실패하면 실제 PR 상태만 다시 조회하고 재병합하지 않는다. 관리자 우회(`--admin`), GitHub auto-merge, `gh`의 `--delete-branch`는 사용하지 않는다.
+최종 재조회에서는 PR 메타데이터와 함께 댓글 근거도 다시 확인한다. 일반 댓글(리뷰 요청 시 리뷰·인라인 댓글 포함)을 모두 조회한 뒤 PR을 다시 읽어 목록 수가 맞는지 본다. 실행 중 추가된 무관한 봇 댓글은 막지 않고, 목록이 불완전하거나 조회에 실패하면 차단한다.
+
+- High 병합: 두 번째 점검이 승인에 사용한 `/merge-approve` 댓글이 ID·작성자·본문·수정 시각 그대로 남아 있어야 한다. Shadow와 같은 `evaluateApproval`(`findApproval`)로 다시 판정해 권한·head·fingerprint·PR 변경 시각 조건을 통과해야 한다. 삭제·수정·권한 변경이면 병합하지 않는다.
+- 리뷰 요청: 같은 `evaluateCodexReview`·`planReviewRequest`로 같은 head 요청·응답 대기·PR당 상한·한도 초과를 다시 계산하고, 요청 불가면 작성하지 않는다. head가 처음 보인 시각은 두 번째 점검 값을 쓰며 head 불변은 공용 PR 비교로 확인한다.
+
+남는 경합: 최종 재조회와 병합·댓글 API 호출 사이의 변경은 도구가 감지할 수 없다. 이 사이 승인 댓글 삭제·권한 변경이나 다른 리뷰 요청은 GitHub가 원자적으로 막지 않는다. head는 `--match-head-commit`이 GitHub에서 거부하고, 최신 base 반영은 기본 브랜치 보호의 strict 필수 검사가 막는다. 그 사이 base를 다른 브랜치로 재지정하거나 제목·본문을 바꾸는 것은 병합 API가 원자적으로 고정하지 않는다. 다른 브랜치로 재지정되면 그 브랜치의 보호 설정이 적용된다. 병합 뒤 실제 병합 커밋 제목은 검증하지만 base 브랜치는 사후 확인하지 않는다. 이 경합을 해결했다고 표현하지 않는다. 병합 명령이 실패하면 실제 PR 상태만 다시 조회하고 재병합하지 않는다. 관리자 우회(`--admin`), GitHub auto-merge, `gh`의 `--delete-branch`는 사용하지 않는다.
 
 브랜치 정리(병합과 제목 검증 성공 후에만):
 

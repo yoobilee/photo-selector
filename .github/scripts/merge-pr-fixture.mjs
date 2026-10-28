@@ -97,7 +97,19 @@ export function createFake(options = {}, store = {}) {
     valid: approvalText(head, original.fingerprint), 'old-head': approvalText('9'.repeat(40), original.fingerprint),
     'old-fingerprint': approvalText(head, '0'.repeat(64)), short: `/merge-approve ${head.slice(0, 7)}`,
   };
-  if (approvals[o.approval]) comments.push({ id: 40, user: admin, created_at: '2026-10-28T01:00:00Z', body: approvals[o.approval] });
+  if (approvals[o.approval]) comments.push({ id: 40, user: admin, created_at: '2026-10-28T01:00:00Z', updated_at: '2026-10-28T01:00:00Z', body: approvals[o.approval] });
+  // store.commentChange: 점검 도중 댓글이 바뀐 상황. 목록과 PR 정보의 댓글 수가 함께 바뀐다.
+  const liveComments = () => {
+    switch (store.commentChange) {
+      case 'delete-approval': return comments.filter(comment => comment.id !== 40);
+      case 'edit-approval': return comments.map(comment => comment.id === 40 ? { ...comment, body: `${comment.body}\n수정`, updated_at: '2026-10-28T02:00:00Z' } : comment);
+      // 본문은 그대로 두고 수정만 한 경우(수정 이력)도 승인 근거가 바뀐 것으로 본다.
+      case 'touch-approval': return comments.map(comment => comment.id === 40 ? { ...comment, updated_at: '2026-10-28T02:00:00Z' } : comment);
+      case 'add-request': return [...comments, { id: 60, user: admin, created_at: '2026-10-28T03:00:00Z', body: '@codex review' }];
+      case 'add-bot': return [...comments, { ...clone(real.photoSelectorPr5.environmentNotice), created_at: '2026-10-28T03:00:00Z' }];
+      default: return comments;
+    }
+  };
 
   const gateProof = { pr: 1, fingerprint: o.gateCheck === 'stale' ? 'stale' : original.fingerprint, runId: '42', attempt: '1' };
   const checkRuns = () => [
@@ -114,6 +126,13 @@ export function createFake(options = {}, store = {}) {
   function route(path) {
     const p = path.replace(/[?&]per_page=100$/, '');
     if (o.apiError && path.includes(o.apiError)) throw failure('server error');
+    // o.failAt: { at, nth } — 해당 경로의 n번째 조회만 실패한다.
+    if (o.failAt && path.includes(o.failAt.at) && (store.failHits = (store.failHits ?? 0) + 1) === o.failAt.nth) throw failure('server error');
+    // o.commentChangeAt: { at: 경로 일부, nth: 몇 번째 조회, change } — 해당 조회 직후부터 댓글·승인자 권한이 바뀐다.
+    if (o.commentChangeAt && path.includes(o.commentChangeAt.at)) {
+      store.commentChangeHits = (store.commentChangeHits ?? 0) + 1;
+      if (store.commentChangeHits === o.commentChangeAt.nth) store.commentChange = o.commentChangeAt.change;
+    }
     // o.prChangeAt: { at: 경로 일부, nth: 몇 번째 조회, change } — 해당 조회 직후부터 PR 정보가 바뀐다.
     if (o.prChangeAt && path.includes(o.prChangeAt.at)) {
       store.prChangeHits = (store.prChangeHits ?? 0) + 1;
@@ -124,18 +143,18 @@ export function createFake(options = {}, store = {}) {
       }
     }
     if (p === `repos/${repo}`) return { default_branch: 'main', delete_branch_on_merge: o.deleteOnMerge };
-    if (p === `repos/${repo}/pulls/1`) return { ...prAt(store.head), comments: comments.length, review_comments: reviewComments.length };
+    if (p === `repos/${repo}/pulls/1`) return { ...prAt(store.head), comments: liveComments().length, review_comments: reviewComments.length };
     if (p.startsWith(`repos/${repo}/pulls?state=open&head=`)) return [o.otherHeadPr ? [{ number: 2 }] : []];
     if (p.startsWith(`repos/${repo}/pulls?state=open&base=`)) return [o.otherBasePr ? [{ number: 3 }] : []];
     if (p === `repos/${repo}/pulls?state=open`) return [store.merged || o.state !== 'open' ? [] : [prAt(store.head)]];
     if (p === `repos/${repo}/pulls/1/files`) return [files];
     if (p === `repos/${repo}/pulls/1/reviews`) return [reviews];
     if (p === `repos/${repo}/pulls/1/comments`) return [reviewComments];
-    if (p === `repos/${repo}/issues/1/comments`) return [comments];
-    if (p === `repos/${repo}/collaborators/owner/permission`) return { permission: 'admin' };
+    if (p === `repos/${repo}/issues/1/comments`) return [liveComments()];
+    if (p === `repos/${repo}/collaborators/owner/permission`) return { permission: store.commentChange === 'demote-approver' ? 'read' : 'admin' };
     if (p === `repos/${repo}/contents/.ai/review-config.json?ref=main`) return { encoding: 'base64', content: Buffer.from(JSON.stringify(config)).toString('base64') };
     if (p === `repos/${repo}/commits/${store.head}/check-runs?filter=all` || p === `repos/${repo}/commits/${store.head}/check-runs`) return [{ check_runs: checkRuns() }];
-    if (p === `repos/${repo}/commits/${store.head}/check-suites`) return [{ check_suites: [{ id: 500, head_sha: store.head, created_at: '2026-10-27T14:00:00Z' }] }];
+    if (p === `repos/${repo}/commits/${store.head}/check-suites`) return [{ check_suites: [{ id: 500, head_sha: store.head, created_at: o.headSeenAt ?? '2026-10-27T14:00:00Z' }] }];
     if (p === `repos/${repo}/compare/${base}...${store.head}?per_page=1`) {
       if (o.behindBy === 'error') throw failure('compare failed');
       return { behind_by: o.behindBy };
