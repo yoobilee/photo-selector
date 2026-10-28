@@ -429,7 +429,7 @@ test('main이 앞서 나간 PR은 이전 승인이 있어도 후보가 아니고
 });
 
 // 실제 PR #7(2026-10-28): 게이트 실행 중 Codex 봇 안내 댓글이 추가돼 PR 정보(0개)와 댓글 목록(1개)이 달라졌고 Shadow가 판단 불가였다.
-test('실행 중 새 댓글은 허용하고 조회 전보다 적거나 조회 후보다 많은 목록은 전체 조회 실패', async () => {
+test('목록 수는 목록 조회 뒤 PR 정보와 같아야 하며, 실행 중 목록에 포함된 새 댓글은 허용', async () => {
   const total = 5; // runWithShadow 기본 댓글 수
   const arrived = await runWithShadow({ prCounts: [{ comments: total - 1 }] });
   assert.deepEqual(arrived.calls, [['create', 'independent-review'], ['update', 'success']]);
@@ -437,10 +437,12 @@ test('실행 중 새 댓글은 허용하고 조회 전보다 적거나 조회 �
   assert.match(arrived.summary, /Codex GitHub 리뷰: clean/);
   const inline = { id: 1, user: { id: 1, login: 'someone', type: 'User' }, pull_request_review_id: 9, body: '의견' };
   for (const [prCounts, label] of [
-    [[{ comments: total + 1 }, { comments: total + 1 }], '조회 전보다 적음(누락·삭제)'],
-    [[{}, { comments: total - 1 }], '조회 후보다 많음'],
-    [[{}, {}, { review_comments: 0 }], '인라인 조회 후보다 많음'],
-    [[{}, { review_comments: 2 }, { review_comments: 2 }], '인라인 조회 전보다 적음'],
+    [[{ comments: total + 1 }, { comments: total + 1 }], '목록 누락'],
+    // Codex 리뷰 P2: 조회 전·목록 수가 같아도 조회 뒤 새 댓글이 생기면 목록이 그 댓글(예: 새 리뷰 요청)을 놓친 것이다.
+    [[{}, { comments: total + 1 }], '목록 조회 뒤 새 댓글'],
+    [[{}, { comments: total - 1 }], '조회 뒤 수보다 많음'],
+    [[{}, {}, { review_comments: 0 }], '인라인 조회 뒤 수보다 많음'],
+    [[{}, {}, { review_comments: 2 }], '인라인 목록 조회 뒤 새 지적'],
     [[{}, {}, { head: { sha: 'f'.repeat(40) } }], '인라인 조회 중 head 변경'],
   ]) {
     const r = await runWithShadow({ prCounts, reviewComments: [inline] });
