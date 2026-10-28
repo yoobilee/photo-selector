@@ -180,6 +180,20 @@ test('원격 브랜치: 자동 삭제가 안 됐을 때만 조건을 모두 확�
   }
 });
 
+test('원격의 push URL이 하나라도 다른 저장소면 그 원격으로 삭제하지 않음', async () => {
+  const fetch = 'origin\thttps://github.com/owner/repo.git (fetch)\n';
+  const mixed = `${fetch}origin\thttps://github.com/owner/repo.git (push)\norigin\thttps://github.com/someone/fork.git (push)\n`;
+  const r = await run({ remoteAfterMerge: 'exists', local: { remotes: mixed } });
+  assert.equal(r.status, 0);
+  assert.match(r.out, /원격 feature\/safe-merge: 삭제하지 않음 — 대상 저장소를 가리키는 로컬 원격 없음/);
+  assert.match(r.out, /로컬 feature\/safe-merge: 건너뜀 — 현재 위치가 대상 저장소의 로컬 Git 저장소가 아님/);
+  assert.deepEqual(r.effects, r.merges);
+  // 대상 저장소만 가리키는 다른 원격이 있으면 그 원격을 사용한다.
+  const alongside = await run({ remoteAfterMerge: 'exists', local: { remotes: `${mixed}upstream\tgit@github.com:owner/repo.git (push)\n` } });
+  const push = alongside.effects.find(([tool, command]) => tool === 'git' && command === 'push');
+  assert.equal(push?.[3], 'upstream');
+});
+
 test('로컬 브랜치: 미커밋 변경·다른 worktree·체크아웃 중·SHA 불일치·저장소 아님이면 삭제하지 않음', async () => {
   for (const [local, pattern] of [
     [{ dirty: true }, /커밋하지 않은 변경/], [{ otherWorktree: true }, /다른 worktree/], [{ current: 'feature/safe-merge' }, /현재 체크아웃 중/],

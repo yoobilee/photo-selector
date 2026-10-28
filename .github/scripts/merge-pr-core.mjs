@@ -117,12 +117,16 @@ function protectionProblems({ protection, gateAppId, requiredChecks }) {
 const tryGit = (git, args) => { try { return git(args); } catch { return null; } };
 
 // 로컬 저장소가 대상 GitHub 저장소를 가리키는 원격 이름. 없으면 로컬 작업을 하지 않는다.
+// push는 원격의 모든 push URL로 전달되므로, push URL이 하나라도 다른 저장소면 그 원격은 쓰지 않는다.
 export function findRemote(git, repo) {
   const output = tryGit(git, ['remote', '-v']);
   if (output === null) return null;
   const urls = ['https://github.com/', 'git@github.com:', 'ssh://git@github.com/'].flatMap(prefix => [`${prefix}${repo}`, `${prefix}${repo}.git`].map(url => url.toLowerCase()));
-  const names = output.split('\n').map(line => line.trim().split(/\s+/))
-    .filter(([name, url, kind]) => name && kind === '(push)' && urls.includes(String(url).toLowerCase())).map(([name]) => name);
+  const pushUrls = new Map();
+  for (const [name, url, kind] of output.split('\n').map(line => line.trim().split(/\s+/))) {
+    if (name && kind === '(push)') pushUrls.set(name, [...(pushUrls.get(name) ?? []), String(url).toLowerCase()]);
+  }
+  const names = [...pushUrls].filter(([, list]) => list.every(url => urls.includes(url))).map(([name]) => name);
   return names.includes('origin') ? 'origin' : names[0] ?? null;
 }
 

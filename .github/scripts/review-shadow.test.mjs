@@ -268,7 +268,8 @@ const approveFor = (body = gateMetadata, created_at = '2026-10-27T16:00:00Z') =>
   const { fingerprint } = describePR({ title: 'fix: 권한 확인 누락 수정', body, head: { sha: head }, base: { sha: 'b'.repeat(40) } }, files, config);
   return { id: 50, user: admin, body: approvalText(head, fingerprint), created_at };
 };
-async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewComments = false, extraComments = [], body, lastEditedAt = null, checkRuns, behindBy = 0 } = {}) {
+// prCounts: pulls.get 호출 순서(runGate 시작 → evaluatePR 재확인 → Shadow 인라인 조회 후)별로 PR 정보를 바꾼다.
+async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewComments = false, extraComments = [], body, lastEditedAt = null, checkRuns, behindBy = 0, prCounts = [], reviewComments = [] } = {}) {
   const metadata = '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->';
   const pr = { number: 7, title: 'fix: 권한 확인 누락 수정', body: body ?? metadata, state: 'open', changed_files: 1, head: { sha: head }, base: { sha: 'b'.repeat(40) } };
   const files = [{ filename: '.github/scripts/review-gate.mjs', status: 'modified' }];
@@ -283,16 +284,17 @@ async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewCom
     real.photoSelectorPr5.reviewSummaryCompleted, real.photoSelectorPr5.reviewReceipt, ...extraComments,
   ];
   if (reverse) comments = [...comments].reverse();
-  const current = { ...pr, comments: comments.length, review_comments: 0 };
+  const current = { ...pr, comments: comments.length, review_comments: reviewComments.length };
+  let gets = 0;
   const calls = [];
   const summary = [];
   let failed = false;
   const github = {
     rest: {
       pulls: {
-        list: async () => ({ data: [current] }), get: async () => ({ data: current }),
+        list: async () => ({ data: [current] }), get: async () => ({ data: { ...current, ...prCounts[gets++] } }),
         listFiles: async () => ({ data: files }), listReviews: async () => ({ data: [] }),
-        listReviewComments: async () => { if (failReviewComments) throw new Error('sensitive raw response'); return { data: [] }; },
+        listReviewComments: async () => { if (failReviewComments) throw new Error('sensitive raw response'); return { data: reviewComments }; },
       },
       issues: { listComments: async () => ({ data: comments }) },
       repos: {
@@ -424,4 +426,26 @@ test('main이 앞서 나간 PR은 이전 승인이 있어도 후보가 아니고
     assert.doesNotMatch(r.summary, /sensitive raw response/);
   }
   assert.match((await runWithShadow({ behindBy: 1 })).summary, /최신 base 반영: behind/);
+});
+
+// 실제 PR #7(2026-10-28): 게이트 실행 중 Codex 봇 안내 댓글이 추가돼 PR 정보(0개)와 댓글 목록(1개)이 달라졌고 Shadow가 판단 불가였다.
+test('실행 중 새 댓글은 허용하고 조회 전보다 적거나 조회 후보다 많은 목록은 전체 조회 실패', async () => {
+  const total = 5; // runWithShadow 기본 댓글 수
+  const arrived = await runWithShadow({ prCounts: [{ comments: total - 1 }] });
+  assert.deepEqual(arrived.calls, [['create', 'independent-review'], ['update', 'success']]);
+  assert.doesNotMatch(arrived.summary, /판단 불가/);
+  assert.match(arrived.summary, /Codex GitHub 리뷰: clean/);
+  const inline = { id: 1, user: { id: 1, login: 'someone', type: 'User' }, pull_request_review_id: 9, body: '의견' };
+  for (const [prCounts, label] of [
+    [[{ comments: total + 1 }, { comments: total + 1 }], '조회 전보다 적음(누락·삭제)'],
+    [[{}, { comments: total - 1 }], '조회 후보다 많음'],
+    [[{}, {}, { review_comments: 0 }], '인라인 조회 후보다 많음'],
+    [[{}, { review_comments: 2 }, { review_comments: 2 }], '인라인 조회 전보다 적음'],
+    [[{}, {}, { head: { sha: 'f'.repeat(40) } }], '인라인 조회 중 head 변경'],
+  ]) {
+    const r = await runWithShadow({ prCounts, reviewComments: [inline] });
+    assert.match(r.summary, /판단 불가: 조회·형식·설정 오류/, label);
+  }
+  // 인라인 댓글이 조회 중 추가된 경우는 허용한다.
+  assert.doesNotMatch((await runWithShadow({ prCounts: [{}, { review_comments: 0 }, { review_comments: 1 }], reviewComments: [inline] })).summary, /판단 불가/);
 });

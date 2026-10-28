@@ -34,9 +34,14 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
   if (!shadow.enabled) return null;
   const { description, decision, files, comments, reviews, blocked } = evaluation;
   const head = description.head;
-  if (comments.length !== pr.comments) throw new Error('PR 댓글 전체 조회 실패');
+  // 조회 수는 조회 전 PR 정보 이상, 조회 후 PR 정보 이하여야 한다. 실행 중 새 댓글(예: PR 생성 직후 봇 안내)은 허용하고,
+  // 일부 페이지 누락·삭제처럼 조회 전보다 적거나 조회 후보다 많은 경우는 전체 조회 실패로 본다.
+  const within = (count, before, after) => Number.isSafeInteger(before) && Number.isSafeInteger(after) && before <= count && count <= after;
+  // evaluatePR의 current는 댓글 목록 조회 뒤에 다시 받은 PR 정보다.
+  if (!within(comments.length, pr.comments, evaluation.current?.comments)) throw new Error('PR 댓글 전체 조회 실패');
   const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, { ...repo, pull_number: pr.number, per_page: 100 });
-  if (reviewComments.length !== pr.review_comments) throw new Error('인라인 리뷰 댓글 전체 조회 실패');
+  const after = (await github.rest.pulls.get({ ...repo, pull_number: pr.number })).data;
+  if (after.head?.sha !== head || !within(reviewComments.length, evaluation.current?.review_comments, after.review_comments)) throw new Error('인라인 리뷰 댓글 전체 조회 실패');
   const checkRuns = await github.paginate(github.rest.checks.listForRef, { ...repo, ref: head, filter: 'all', per_page: 100 });
   // head push로 생긴 check suite 중 가장 이른 생성 시각을 그 head가 처음 보인 시각으로 쓴다. 조회 실패는 알 수 없음이다.
   let headSeenAt = null;

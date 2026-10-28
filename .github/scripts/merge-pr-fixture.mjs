@@ -180,7 +180,7 @@ export function createFake(options = {}, store = {}) {
     if (!local.repo) throw new Error('not a git repository');
     const [command, ...rest] = args;
     const ref = `refs/heads/${branch}`;
-    if (command === 'remote') return `origin\thttps://github.com/${repo}.git (fetch)\norigin\thttps://github.com/${repo}.git (push)\n`;
+    if (command === 'remote') return local.remotes ?? `origin\thttps://github.com/${repo}.git (fetch)\norigin\thttps://github.com/${repo}.git (push)\n`;
     if (command === 'rev-parse') {
       if (rest.at(-1) !== ref || !store.localSha) throw new Error('missing ref');
       return `${store.localSha}\n`;
@@ -195,7 +195,7 @@ export function createFake(options = {}, store = {}) {
     }
     if (command === 'config') return '';
     if (command === 'push') {
-      if (rest[0] !== `--force-with-lease=${ref}:${head}` || rest[1] !== 'origin' || rest[2] !== `:${ref}`) throw new Error('unexpected push');
+      if (rest[0] !== `--force-with-lease=${ref}:${head}` || !['origin', 'upstream'].includes(rest[1]) || rest[2] !== `:${ref}`) throw new Error('unexpected push');
       if (!store.remote.exists || store.remote.sha !== head) throw new Error('stale info');
       store.remote = { exists: false };
       return '';

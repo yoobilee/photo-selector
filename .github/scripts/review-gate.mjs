@@ -52,7 +52,7 @@ export async function evaluatePR({ github, repo, pr, config, summary }) {
   const now=(await github.rest.pulls.get({...repo,pull_number:pr.number})).data;
   if (now.state!=='open' || now.draft || now.head.sha!==pr.head.sha || now.base.sha!==pr.base.sha || now.title!==pr.title || now.body!==pr.body) throw new Error('검증 중 PR 변경 또는 검토 준비 전 상태');
   // 판정 이외의 값은 Shadow 판정이 같은 조회 결과를 재사용하기 위한 것이다.
-  return {description,decision,files,comments,reviews,blocked,canConfirm};
+  return {description,decision,files,comments,reviews,blocked,canConfirm,current:now};
 }
 
 // Shadow 판정은 Summary에만 기록한다. 오류가 나도 기존 check와 실행 결과에 영향을 주지 않는다.
