@@ -53,17 +53,17 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
   const checks = evaluateRequiredChecks({ head, checkRuns, requiredChecks: shadow.requiredChecks });
   const request = planReviewRequest({ comments, codex, maxReviewRequests: shadow.maxReviewRequests, headSeenAt });
 
+  // High 병합 승인은 기존 `/review-gate` 리뷰 확인과 별개의 명시적 명령으로만 인정한다.
   let approval = { state: 'none' };
-  if (decision.state === 'success' && risk.risk === 'high') approval = { state: 'approved', reason: '기존 관리자 확인 통과' };
-  else if (comments.some(comment => isApprovalComment(comment.body))) {
+  if (comments.some(comment => isApprovalComment(comment.body))) {
     const confirmers = new Set();
     for (const comment of comments) if (isApprovalComment(comment.body) && await canConfirm(comment.user)) confirmers.add(comment.id);
     let changedAt;
     try { changedAt = await lastChangedAt({ github, repo, number: pr.number }); } catch { changedAt = 'unknown'; }
-    approval = findApproval({ head, comments, confirmers, lastChangedAt: changedAt });
+    approval = findApproval({ head, fingerprint: description.fingerprint, comments, confirmers, lastChangedAt: changedAt });
   }
 
   const baseSync = await baseSyncState({ github, repo, base: description.base, head });
   const shadowDecision = decideShadow({ risk: risk.risk, meta: description.meta, checks, codex, approval, blocked, request, maxReviewRequests: shadow.maxReviewRequests, baseSync });
-  return { risk, checks, codex, approval, request, baseSync, decision: shadowDecision, comparison: compareWithGate(shadowDecision, decision), fingerprint: description.fingerprint };
+  return { head, meta: description.meta, risk, checks, codex, approval, request, baseSync, decision: shadowDecision, comparison: compareWithGate(shadowDecision, decision), fingerprint: description.fingerprint };
 }

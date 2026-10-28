@@ -175,6 +175,7 @@
 - 로컬 자동 리뷰: Codex 플러그인 Stop 리뷰 게이트와 Codex GitHub Automatic reviews 모두 사용 안 함
 - 게이트 완료 기준: 최신 fingerprint·보고서 근거·관리자 확인, critical/high/medium 미해결 0건
 - Shadow 판정(관찰용): `.ai/review-config.json`의 `shadow` 설정으로 위험도별 자동 판정 후보를 Actions Summary에만 기록한다. 기존 `independent-review` 결론·병합에 영향이 없고 별도 check를 게시하지 않는다. 신뢰할 Codex GitHub 리뷰 작성자는 `chatgpt-codex-connector[bot]`(사용자 ID 199175422, 앱 ID 1144995)이다. 구현 Agent와 관리자가 같은 GitHub 인증을 공유하므로 관리자 댓글만으로 사람의 판단을 증명할 수 없다는 위험은 해결되지 않았다.
+- 병합 도구: `.github/scripts/merge-pr.mjs`(squash만, 로컬에서 명시적으로 실행). 병합 전 `--dry-run`으로 판정을 확인한다. High는 `/review-gate` 확인과 별개로 관리자가 직접 작성한 `/merge-approve <head SHA> <fingerprint>`가 필요하다. Agent는 이 승인 댓글과 `/review-gate` 확인 댓글을 대신 작성하지 않는다. 위험도 기준 자동 병합(`--auto`)은 `.ai/review-config.json`의 `autoMerge.enabled: false`로 비활성이며, 활성화는 사용자 승인을 받은 별도 높은 위험 PR로만 한다.
 - AI 요청 방식: 프로젝트에서 확정, 게이트에서 자동 호출하지 않음
 - AI 자동 재시도: 기본 0회, 실패·한도 초과는 사람 확인
 - 동일 리뷰 식별: 저장소·PR·base/head SHA·위험도·구현 Agent·설정 fingerprint

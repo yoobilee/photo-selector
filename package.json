@@ -15,7 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:gate": "node --test .github/scripts/review-gate.test.mjs .github/scripts/review-shadow.test.mjs .github/scripts/merge-pr.test.mjs",
+    "test:gate": "node --test .github/scripts/review-gate.test.mjs .github/scripts/review-shadow.test.mjs .github/scripts/merge-pr-core.test.mjs .github/scripts/merge-pr.test.mjs",
     "verify": "npm run lint && npm run typecheck && npm run test && npm run build && npm run test:e2e && npm run test:gate"
   },
   "dependencies": {
