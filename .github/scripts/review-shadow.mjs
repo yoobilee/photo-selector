@@ -1,3 +1,4 @@
+import { assertPullRequestUnchanged } from './review-gate-core.mjs';
 import {
   classifyRisk, compareWithGate, decideShadow, evaluateCodexReview, evaluateRequiredChecks, findApproval,
   isApprovalComment, planReviewRequest, validateShadowConfig,
@@ -39,7 +40,9 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
   // 댓글(예: PR 생성 직후 봇 안내)로 실패하고, 조회 뒤 수와 다르면 목록이 새 댓글(리뷰 요청·인라인 지적)을 놓친 것이다.
   const after = (await github.rest.pulls.get({ ...repo, pull_number: pr.number })).data;
   const complete = (count, total) => Number.isSafeInteger(total) && count === total;
-  if (after.head?.sha !== head || !complete(comments.length, after.comments) || !complete(reviewComments.length, after.review_comments)) {
+  // 목록 조회 사이 PR 재지정·제목·본문 변경 등도 기존 게이트와 같은 기준으로 감지한다.
+  assertPullRequestUnchanged(pr, after);
+  if (!complete(comments.length, after.comments) || !complete(reviewComments.length, after.review_comments)) {
     throw new Error('PR 댓글 전체 조회 실패');
   }
   const checkRuns = await github.paginate(github.rest.checks.listForRef, { ...repo, ref: head, filter: 'all', per_page: 100 });

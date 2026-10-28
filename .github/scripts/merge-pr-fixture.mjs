@@ -57,11 +57,15 @@ export function createFake(options = {}, store = {}) {
   const profile = profiles[o.risk];
   const files = [{ filename: profile.filename, status: 'modified' }];
   const body = o.body ?? `<!-- ai-review\nimplemented-by: ${o.implementedBy}\nrisk: ${o.risk}\nsensitive-change: ${profile.sensitive}\n-->\nCloses #7`;
-  const prAt = sha => ({
-    number: 1, title, body, state: store.merged ? 'closed' : o.state === 'merged' ? 'closed' : o.state, draft: o.draft, merged: store.merged,
-    merge_commit_sha: store.merged ? mergeSha : null, changed_files: files.length,
-    head: { sha, ref: branch, repo: { full_name: o.headRepo } }, base: { sha: base, ref: 'main', repo: { full_name: repo } },
-  });
+  // store.prChange: 점검 도중 PR이 바뀐 상황(재지정·제목·본문·draft·닫힘)을 흉내 낸다. 바뀐 base SHA는 compare 조회가 실패한다.
+  const prAt = sha => {
+    const change = store.prChange ?? {};
+    return {
+      number: 1, title: change.title ?? title, body: change.body ?? body, state: store.merged ? 'closed' : o.state === 'merged' ? 'closed' : change.state ?? o.state,
+      draft: change.draft ?? o.draft, merged: store.merged, merge_commit_sha: store.merged ? mergeSha : null, changed_files: files.length,
+      head: { sha, ref: branch, repo: { full_name: o.headRepo } }, base: { sha: change.baseSha ?? base, ref: change.baseRef ?? 'main', repo: { full_name: repo } },
+    };
+  };
   // 관리자 확인과 승인은 원래 head 기준으로 작성된 것으로 둔다. head가 바뀌면 둘 다 무효가 돼야 한다.
   const original = describe(prAt(head), files, config);
   const comments = [];
@@ -110,6 +114,15 @@ export function createFake(options = {}, store = {}) {
   function route(path) {
     const p = path.replace(/[?&]per_page=100$/, '');
     if (o.apiError && path.includes(o.apiError)) throw failure('server error');
+    // o.prChangeAt: { at: 경로 일부, nth: 몇 번째 조회, change } — 해당 조회 직후부터 PR 정보가 바뀐다.
+    if (o.prChangeAt && path.includes(o.prChangeAt.at)) {
+      store.prChangeHits = (store.prChangeHits ?? 0) + 1;
+      if (store.prChangeHits === o.prChangeAt.nth) {
+        const { headSha, ...change } = o.prChangeAt.change;
+        if (headSha) store.head = headSha;
+        store.prChange = change;
+      }
+    }
     if (p === `repos/${repo}`) return { default_branch: 'main', delete_branch_on_merge: o.deleteOnMerge };
     if (p === `repos/${repo}/pulls/1`) return { ...prAt(store.head), comments: comments.length, review_comments: reviewComments.length };
     if (p.startsWith(`repos/${repo}/pulls?state=open&head=`)) return [o.otherHeadPr ? [{ number: 2 }] : []];
@@ -155,7 +168,8 @@ export function createFake(options = {}, store = {}) {
     if (args[0] === 'pr' && args[1] === 'merge') {
       const value = flag => args[args.indexOf(flag) + 1];
       if (!args.includes('--squash') || ['--admin', '--auto', '--delete-branch', '--merge', '--rebase'].some(flag => args.includes(flag))) throw failure('unexpected merge flags');
-      // GitHub의 --match-head-commit 거부를 흉내 낸다.
+      // 마지막 확인과 병합 API 호출 사이 push(남는 경합)와 GitHub의 --match-head-commit 거부를 흉내 낸다.
+      if (o.headChangeAtMerge) store.head = newHead;
       if (value('--match-head-commit') !== store.head) throw failure('head changed', 409);
       if (value('--subject') !== title || readFileSync(value('--body-file'), 'utf8') !== body) throw failure('message mismatch', 422);
       if (o.merge === 'fail') throw failure('merge failed', 405);

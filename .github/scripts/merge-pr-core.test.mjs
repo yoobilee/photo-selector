@@ -116,16 +116,43 @@ test('PR 상태·대상 오류와 지정한 head 불일치는 차단', async () 
   blocked(await run({ headRepo: 'someone/fork' }), /다른 저장소\(fork\)의 PR/);
 });
 
-test('점검과 재확인 사이 head 변경은 병합하지 않고, 재확인 이후 변경은 GitHub가 거부하며 재시도하지 않음', async () => {
-  const between = await run({ headChangeAtChecks: 1 });
-  assert.equal(between.status, 1);
-  assert.equal(between.merges.length, 0);
-  assert.match(between.err, /재확인에서 조건이 바뀌었습니다/);
-  const beforeMerge = await run({ headChangeAtChecks: 2 });
+test('점검 중 head 변경은 병합하지 않고, 마지막 확인 이후 변경은 GitHub가 거부하며 재시도하지 않음', async () => {
+  for (const nth of [1, 2]) {
+    const between = await run({ headChangeAtChecks: nth });
+    assert.equal(between.status, 1, String(nth));
+    assert.equal(between.merges.length, 0, String(nth));
+    assert.match(between.err, /재확인에서 조건이 바뀌었습니다/);
+  }
+  // 마지막 확인과 병합 API 호출 사이의 push는 도구가 감지할 수 없고 --match-head-commit이 막는다.
+  const beforeMerge = await run({ headChangeAtMerge: true });
   assert.equal(beforeMerge.status, 1);
   assert.equal(beforeMerge.merges.length, 1);
   assert.match(beforeMerge.err, /자동으로 다시 시도하지 않습니다/);
   assert.deepEqual(beforeMerge.effects, beforeMerge.merges);
+});
+
+// Codex 리뷰 P1(PR #7 4회차): 두 번째 점검 도중 PR이 바뀌어도 첫 점검 결과로 병합하면 안 된다.
+// Shadow 인라인 목록 조회 중(마지막 PR 재조회 전)과 브랜치 보호 조회 중(마지막 PR 재조회 뒤) 두 시점에서 바꾼다.
+test('두 번째 점검 도중 base·head·제목·본문·draft·닫힘 변경은 병합·요청하지 않음', async () => {
+  const changes = {
+    'base SHA': { baseSha: 'a'.repeat(40) }, 'base 브랜치': { baseRef: 'release' }, 'head SHA': { headSha: newHead },
+    '제목': { title: 'fix: 바뀐 제목' }, '본문': { body: '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->\n바뀐 본문' },
+    'draft 전환': { draft: true }, 'closed 전환': { state: 'closed' },
+  };
+  // check-suites는 Shadow의 마지막 PR 재조회 뒤에 두 모드 모두 거친다. 브랜치 보호 조회는 병합 모드에만 있다.
+  for (const at of ['pulls/1/comments', '/check-suites', 'branches/main/protection']) {
+    for (const [label, change] of Object.entries(changes)) {
+      for (const flags of at.includes('protection') ? [[]] : [[], ['--request-review']]) {
+        const options = { prChangeAt: { at, nth: 2, change }, ...(flags.length ? { risk: 'medium', codex: 'none', requests: 0, approval: 'none' } : {}) };
+        const r = await run(options, flags);
+        const name = `${at} ${label} ${flags.join(' ')}`;
+        assert.equal(r.status, 1, name);
+        assert.equal(r.merges.length, 0, name);
+        assert.deepEqual(r.store.posted, [], name);
+        assert.deepEqual(r.effects, [], name);
+      }
+    }
+  }
 });
 
 test('중복 실행: 잠금이 있으면 아무 조회·병합도 하지 않고, 이미 병합된 PR은 다시 병합하지 않음', async () => {

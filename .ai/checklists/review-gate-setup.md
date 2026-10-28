@@ -163,7 +163,11 @@ node .github/scripts/merge-pr.mjs owner/repo PR번호 --request-review          
 
 공통 조건: PR open·draft 아님, 제목 규칙, 기본 브랜치 대상, `--head` 지정 시 일치, 필수 CI(`verify`)가 현재 head에서 성공하고 기본 브랜치에 승인된 `.github/workflows/ci.yml`의 `pull_request` 실행에서 나옴(PR에서 workflow가 바뀌었으면 High만 허용), head가 최신 base 포함, 해제되지 않은 변경 요청 없음, `gh pr checks --required` 통과, 기본 브랜치 보호의 strict·필수 검사 앱 고정·관리자 포함 적용 확인. 조회 실패·형식 오류·설정 누락은 모두 차단이다.
 
-실행 순서: 같은 PR의 잠금 파일 생성(동시 실행 차단) → 전체 점검 → 실행 직전 전체 재점검(head·fingerprint·위험도 불변 확인) → `gh pr merge --squash --match-head-commit <head>` → 실제 병합 커밋 제목 검증 → 브랜치 정리. 병합 명령이 실패하면 실제 PR 상태만 다시 조회하고 재병합하지 않는다. 관리자 우회(`--admin`), GitHub auto-merge, `gh`의 `--delete-branch`는 사용하지 않는다.
+실행 순서: 같은 PR의 잠금 파일 생성(동시 실행 차단) → 전체 점검 → 실행 직전 전체 재점검(head·fingerprint·위험도 불변 확인) → PR 최종 재조회 → `gh pr merge --squash --match-head-commit <head>` → 실제 병합 커밋 제목 검증 → 브랜치 정리.
+
+PR 변경 감지는 `review-gate-core.mjs`의 `assertPullRequestUnchanged` 하나로 한다. 기존 게이트(`evaluatePR`), Shadow의 목록 조회 뒤 재조회, 병합 도구의 두 번째 점검 시작 PR과 최종 재조회가 모두 첫 점검을 시작한 PR과 비교한다. 비교 값은 PR 번호, state(open), draft(false), 제목, 본문, head·base의 SHA·브랜치·저장소, 변경 파일 수다. 값이 하나라도 없으면 차단한다. 댓글 수처럼 판정 근거가 아닌 값의 변화는 허용한다.
+
+남는 경합: 최종 재조회와 병합 API 호출 사이의 변경은 도구가 감지할 수 없다. head는 `--match-head-commit`이 GitHub에서 거부하고, 최신 base 반영은 기본 브랜치 보호의 strict 필수 검사가 막는다. 그 사이 base를 다른 브랜치로 재지정하거나 제목·본문을 바꾸는 것은 병합 API가 원자적으로 고정하지 않는다. 다른 브랜치로 재지정되면 그 브랜치의 보호 설정이 적용된다. 병합 뒤 실제 병합 커밋 제목은 검증하지만 base 브랜치는 사후 확인하지 않는다. 이 경합을 해결했다고 표현하지 않는다. 병합 명령이 실패하면 실제 PR 상태만 다시 조회하고 재병합하지 않는다. 관리자 우회(`--admin`), GitHub auto-merge, `gh`의 `--delete-branch`는 사용하지 않는다.
 
 브랜치 정리(병합과 제목 검증 성공 후에만):
 

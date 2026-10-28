@@ -57,6 +57,31 @@ export function describe(pr, files, config) {
   return { meta, risk, needsReview, reviewer, fingerprint, head: pr.head.sha, base: pr.base.sha };
 }
 
+// 판정과 병합의 근거가 되는 PR 상태. 게이트·Shadow·병합 도구가 같은 기준으로 PR 변경을 감지한다.
+// 값이 하나라도 없거나 형식이 다르면 비교할 수 없으므로 오류다. 본문 null은 fingerprint와 같이 빈 문자열로 본다.
+export function pullRequestSnapshot(pr) {
+  const text = value => typeof value === 'string' && value.length > 0;
+  const side = value => ({ sha: value?.sha, ref: value?.ref, repo: value?.repo?.full_name });
+  const snapshot = {
+    number: pr?.number, state: pr?.state, draft: pr?.draft, title: pr?.title, body: pr?.body ?? '',
+    head: side(pr?.head), base: side(pr?.base), changedFiles: pr?.changed_files,
+  };
+  if (!Number.isSafeInteger(snapshot.number) || !text(snapshot.state) || typeof snapshot.draft !== 'boolean'
+      || typeof snapshot.title !== 'string' || typeof snapshot.body !== 'string' || !Number.isSafeInteger(snapshot.changedFiles)
+      || [snapshot.head, snapshot.base].some(item => !shaPattern.test(item.sha ?? '') || !text(item.ref) || !text(item.repo))) {
+    throw new Error('PR 상태 값 누락 또는 형식 오류');
+  }
+  return snapshot;
+}
+
+// 검증을 시작한 PR(expected)과 지금 PR(current)이 같고 검토 가능한 상태인지 확인한다. 다르면 이전 판정을 쓰지 않는다.
+export function assertPullRequestUnchanged(expected, current) {
+  const before = pullRequestSnapshot(expected);
+  const now = pullRequestSnapshot(current);
+  if (now.state !== 'open' || now.draft || JSON.stringify(now) !== JSON.stringify(before)) throw new Error('검증 중 PR 변경 또는 검토 준비 전 상태');
+  return now;
+}
+
 export function parseConfirmation(body) {
   const match = /^\/review-gate\s*\n```json\s*\n([\s\S]*?)\n```\s*$/.exec(normalizeNewlines(body));
   if (!match) return null;

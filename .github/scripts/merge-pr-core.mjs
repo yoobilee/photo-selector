@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validTitle } from './review-gate-core.mjs';
+import { assertPullRequestUnchanged, pullRequestSnapshot, validTitle } from './review-gate-core.mjs';
 import { evaluatePR } from './review-gate.mjs';
 import { verifyGateSource } from './review-gate-source.mjs';
 import { approvalText, latestCheckRun } from './review-shadow-core.mjs';
@@ -184,7 +184,10 @@ export async function assessMerge({ gh, git, repo, number, mode, expectedHead = 
   Object.assign(assessment, {
     defaultBranch, autoMerge: config.autoMerge?.enabled === true ? '활성' : '비활성',
     pr: { title: pr.title, body: pr.body ?? '', head: pr.head?.sha, headRef: pr.head?.ref },
+    // 병합 직전 변경 감지의 기준이 되는 원본 PR 응답.
+    source: pr,
   });
+  try { pullRequestSnapshot(pr); } catch { blockers.add('PR 상태 값 누락 또는 형식 오류'); return finish(); }
   if (pr.state !== 'open') { blockers.add(`PR 상태: ${pr.merged ? '이미 병합됨' : pr.state}`); return finish(); }
   if (pr.draft) blockers.add('PR 상태: draft');
   if (!validTitle(pr.title)) blockers.add('PR 제목 규칙 오류');
@@ -431,10 +434,21 @@ export async function runMergeTool({ argv, gh, git, out = console.log, err = con
     if (!first.ok) return 1;
     // 실행 직전에 모든 조건을 다시 조회한다. 그 사이 head·본문·파일·정책·판정이 바뀌면 진행하지 않는다.
     const again = await assess();
-    if (!again.ok || again.head !== first.head || again.fingerprint !== first.fingerprint || again.shadow.risk.risk !== first.shadow.risk.risk) {
+    const changed = () => {
+      // 두 점검의 시작 PR과, 두 번째 점검이 끝난 뒤 다시 받은 PR이 모두 첫 점검을 시작한 PR과 같아야 한다.
+      // 점검 도중의 PR 재지정·제목·본문·draft·닫힘 변경도 기존 게이트와 같은 공용 기준으로 감지한다.
+      try {
+        assertPullRequestUnchanged(first.source, again.source);
+        assertPullRequestUnchanged(first.source, createGitHub({ gh, repo }).api(`repos/${repo}/pulls/${number}`));
+        return false;
+      } catch { return true; }
+    };
+    if (!again.ok || again.head !== first.head || again.fingerprint !== first.fingerprint || again.shadow.risk.risk !== first.shadow.risk.risk || changed()) {
       err('실행 직전 재확인에서 조건이 바뀌었습니다. 진행하지 않습니다. dry-run으로 다시 점검하세요.');
       return 1;
     }
+    // 여기서부터 GitHub 쓰기 호출까지의 경합은 병합 API의 --match-head-commit(head)과 브랜치 보호(strict·필수 검사)만 막는다.
+    // base·제목·본문을 병합 API가 원자적으로 고정하지는 않는다.
     if (mode === 'request-review') return postReviewRequest({ gh, repo, number, out, err });
     return await mergeAndCleanup({ gh, git, repo, number, assessment: again, out, err, sleep });
   } finally {

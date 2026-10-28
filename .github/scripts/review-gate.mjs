@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, parseConfirmation, decide, validateConfig, blockingReviews, isReportBody, normalizeNewlines, reportHash } from './review-gate-core.mjs';
+import { describe, parseConfirmation, decide, validateConfig, blockingReviews, isReportBody, normalizeNewlines, reportHash, assertPullRequestUnchanged } from './review-gate-core.mjs';
 import { formatShadowSummary } from './review-shadow-core.mjs';
 import { evaluateShadow } from './review-shadow.mjs';
 
@@ -50,7 +50,8 @@ export async function evaluatePR({ github, repo, pr, config, summary }) {
     if (['admin','maintain','write'].includes(await permission(review.user))) {blocked=true;decision={state:'failure',reason:'해제되지 않은 변경 요청 리뷰가 남아 있습니다.'};}
   }
   const now=(await github.rest.pulls.get({...repo,pull_number:pr.number})).data;
-  if (now.state!=='open' || now.draft || now.head.sha!==pr.head.sha || now.base.sha!==pr.base.sha || now.title!==pr.title || now.body!==pr.body) throw new Error('검증 중 PR 변경 또는 검토 준비 전 상태');
+  // state·draft·head·base·제목·본문·파일 수를 공용 기준으로 비교한다. Shadow와 병합 도구도 같은 함수를 쓴다.
+  assertPullRequestUnchanged(pr,now);
   // 판정 이외의 값은 Shadow 판정이 같은 조회 결과를 재사용하기 위한 것이다.
   return {description,decision,files,comments,reviews,blocked,canConfirm,current:now};
 }

@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validTitle, parseMetadata, describe, decide, sha256, parseConfirmation, blockingReviews, normalizeNewlines, reportHash } from './review-gate-core.mjs';
+import { validTitle, parseMetadata, describe, decide, sha256, parseConfirmation, blockingReviews, normalizeNewlines, reportHash, assertPullRequestUnchanged, pullRequestSnapshot } from './review-gate-core.mjs';
 import { runGate } from './review-gate.mjs';
 
 const config = JSON.parse(readFileSync(new URL('../../.ai/review-config.json', import.meta.url)));
 const metadata = (agent = 'claude', risk = 'high', sensitive = 'yes') => `<!-- ai-review\nimplemented-by: ${agent}\nrisk: ${risk}\nsensitive-change: ${sensitive}\n-->`;
-const pr = (body = metadata()) => ({ number: 1, title: 'fix: 권한 확인 누락 수정', body, state: 'open', changed_files: 1, head: { sha: 'a'.repeat(40) }, base: { sha: 'b'.repeat(40) } });
+// 실제 PR API 응답처럼 draft·ref·저장소를 갖춘다. 공용 PR 변경 감지 함수는 값이 하나라도 없으면 실패한다.
+const side = (sha, ref) => ({ sha, ref, repo: { full_name: 'owner/repo' } });
+const pr = (body = metadata()) => ({ number: 1, title: 'fix: 권한 확인 누락 수정', body, state: 'open', draft: false, changed_files: 1, head: side('a'.repeat(40), 'fix/auth'), base: side('b'.repeat(40), 'main') });
 const files = [{ filename: 'src/auth.ts', status: 'modified' }];
 const reportFor = d => `# 독립 리뷰 보고서\nHEAD: ${d.head}\nBASE: ${d.base}\n독립 리뷰 완료. 인증 경계를 확인했습니다.`;
 const confirmationFor = d => ({ fingerprint: d.fingerprint, decision: 'pass', reviewer: d.reviewer, reviewComplete: true, evidence: 'https://github.com/owner/repo/pull/1#issuecomment-10', evidenceHash: sha256(reportFor(d)), findings: { critical: 0, high: 0, medium: 0, low: 0 } });
@@ -121,7 +123,7 @@ async function integration({permission='admin', role_name, type='User', changed=
   let gets=0;
   const github = {
     rest:{
-      pulls:{list:async()=>({data:duplicate?[current,{...current,number:2}]:[current]}),get:async()=>({data:changed && ++gets>1?{...current,head:{sha:'c'.repeat(40)}}:current}),listFiles:async()=>({data:partial?[]:files}),listReviews:async()=>({data:reviews})},
+      pulls:{list:async()=>({data:duplicate?[current,{...current,number:2}]:[current]}),get:async()=>({data:changed && ++gets>1?{...current,head:{...current.head,sha:'c'.repeat(40)}}:current}),listFiles:async()=>({data:partial?[]:files}),listReviews:async()=>({data:reviews})},
       issues:{listComments:async()=>{if(apiFailure)throw new Error('sensitive response');return {data:comments};}},
       repos:{getCollaboratorPermissionLevel:async args=>({data:args.username==='peer'?{permission:peerPermission}:{permission,role_name}})},
       checks:{create:async()=>({data:{id:99}}),update:async value=>{statuses.push({...value,state:value.conclusion});}},
@@ -203,7 +205,7 @@ test('프롬프트·체크리스트·내부 액션은 고위험이고 block.ts�
 
 // 정상 PR을 실패 PR 앞뒤에 배치해 판정과 후속 처리가 모두 격리되는지 확인한다.
 async function multiplePRs({invalid='draft',cleanupFailure=false,createFailure=false}={}) {
-  const prs=[1,2,3].map(number=>({...pr(),number,head:{sha:String(number).repeat(40)}}));
+  const prs=[1,2,3].map(number=>({...pr(),number,head:side(String(number).repeat(40),`fix/pr-${number}`)}));
   if (invalid==='draft') prs[1].draft=true;
   if (invalid==='title') prs[1].title='chore: automated dependency update';
   if (invalid==='metadata') prs[1].body='metadata 없음';
@@ -271,4 +273,28 @@ test('check 생성 오류도 성공으로 바꾸지 않고 이후 PR 평가를 �
   assert.equal(r.checks.get(3).conclusion,'success');
   assert.equal(r.summaryWritten,true);
   assert.equal(r.failure,true);
+});
+
+// 게이트·Shadow·병합 도구가 함께 쓰는 PR 변경 감지. 이전 게이트는 base 브랜치·저장소·파일 수를 비교하지 않았다.
+test('공용 PR 변경 감지: 판정 근거 값이 바뀌거나 검토 불가 상태면 실패', () => {
+  const original = pr();
+  assert.deepEqual(assertPullRequestUnchanged(original, structuredClone(original)), pullRequestSnapshot(original));
+  // 댓글 수 등 판정 근거가 아닌 값의 변화는 허용한다.
+  assertPullRequestUnchanged(original, { ...original, comments: 9, updated_at: '2026-10-28T00:00:00Z' });
+  assertPullRequestUnchanged({ ...original, body: null }, { ...original, body: '' });
+  const changes = {
+    'base SHA': { base: { ...original.base, sha: 'c'.repeat(40) } }, 'base 브랜치': { base: { ...original.base, ref: 'release' } },
+    'base 저장소': { base: { ...original.base, repo: { full_name: 'other/repo' } } }, 'head SHA': { head: { ...original.head, sha: 'c'.repeat(40) } },
+    'head 브랜치': { head: { ...original.head, ref: 'other' } }, 'head 저장소(fork)': { head: { ...original.head, repo: { full_name: 'someone/fork' } } },
+    '제목': { title: 'fix: 바뀐 제목' }, '본문': { body: `${metadata()}\n바뀐 본문` }, 'draft': { draft: true }, 'closed': { state: 'closed' },
+    '파일 수': { changed_files: 2 }, 'PR 번호': { number: 2 },
+  };
+  for (const [label, change] of Object.entries(changes)) assert.throws(() => assertPullRequestUnchanged(original, { ...original, ...change }), /PR 변경/, label);
+  // 시작 시점부터 검토 불가 상태면 같은 값이어도 실패한다.
+  assert.throws(() => assertPullRequestUnchanged({ ...original, draft: true }, { ...original, draft: true }), /검토 준비 전/);
+  // 값이 없으면 비교할 수 없으므로 실패한다(fork 저장소 삭제 등).
+  for (const missing of [{ draft: undefined }, { changed_files: undefined }, { head: { ...original.head, repo: null } }, { base: { ...original.base, ref: '' } }, { head: { sha: 'a'.repeat(40) } }, { title: undefined }]) {
+    assert.throws(() => assertPullRequestUnchanged(original, { ...original, ...missing }), /누락/, JSON.stringify(missing));
+    assert.throws(() => assertPullRequestUnchanged({ ...original, ...missing }, original), /누락/, JSON.stringify(missing));
+  }
 });

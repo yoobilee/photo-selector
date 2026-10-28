@@ -271,7 +271,7 @@ const approveFor = (body = gateMetadata, created_at = '2026-10-27T16:00:00Z') =>
 // prCounts: pulls.get 호출 순서(runGate 시작 → evaluatePR 재확인 → Shadow 인라인 조회 후)별로 PR 정보를 바꾼다.
 async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewComments = false, extraComments = [], body, lastEditedAt = null, checkRuns, behindBy = 0, prCounts = [], reviewComments = [] } = {}) {
   const metadata = '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->';
-  const pr = { number: 7, title: 'fix: 권한 확인 누락 수정', body: body ?? metadata, state: 'open', changed_files: 1, head: { sha: head }, base: { sha: 'b'.repeat(40) } };
+  const pr = { number: 7, title: 'fix: 권한 확인 누락 수정', body: body ?? metadata, state: 'open', draft: false, changed_files: 1, head: { sha: head, ref: 'fix/auth', repo: { full_name: 'owner/repo' } }, base: { sha: 'b'.repeat(40), ref: 'main', repo: { full_name: 'owner/repo' } } };
   const files = [{ filename: '.github/scripts/review-gate.mjs', status: 'modified' }];
   // 관리자 확인은 항상 원래 본문 기준으로 작성된 것으로 둔다. 본문이 바뀌면 fingerprint가 달라져야 한다.
   const d = describePR({ ...pr, body: metadata }, files, config);
@@ -444,7 +444,9 @@ test('목록 수는 목록 조회 뒤 PR 정보와 같아야 하며, 실행 중 
     [[{}, {}, { comments: total - 1 }], '조회 뒤 수보다 많음'],
     [[{}, {}, { review_comments: 0 }], '인라인 조회 뒤 수보다 많음'],
     [[{}, {}, { review_comments: 2 }], '인라인 목록 조회 뒤 새 지적'],
-    [[{}, {}, { head: { sha: 'f'.repeat(40) } }], '인라인 조회 중 head 변경'],
+    [[{}, {}, { head: { sha: 'f'.repeat(40), ref: 'fix/auth', repo: { full_name: 'owner/repo' } } }], '인라인 조회 중 head 변경'],
+    [[{}, {}, { base: { sha: 'b'.repeat(40), ref: 'release', repo: { full_name: 'owner/repo' } } }], '인라인 조회 중 base 재지정'],
+    [[{}, {}, { title: 'fix: 바뀐 제목' }], '인라인 조회 중 제목 변경'],
   ]) {
     const r = await runWithShadow({ prCounts, reviewComments: [inline] });
     assert.match(r.summary, /판단 불가: 조회·형식·설정 오류/, label);
