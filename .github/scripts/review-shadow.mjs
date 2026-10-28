@@ -38,13 +38,20 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
   const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, { ...repo, pull_number: pr.number, per_page: 100 });
   if (reviewComments.length !== pr.review_comments) throw new Error('인라인 리뷰 댓글 전체 조회 실패');
   const checkRuns = await github.paginate(github.rest.checks.listForRef, { ...repo, ref: head, filter: 'all', per_page: 100 });
+  // head push로 생긴 check suite 중 가장 이른 생성 시각을 그 head가 처음 보인 시각으로 쓴다. 조회 실패는 알 수 없음이다.
+  let headSeenAt = null;
+  try {
+    const suites = await github.paginate(github.rest.checks.listSuitesForRef, { ...repo, ref: head, per_page: 100 });
+    headSeenAt = suites.filter(suite => suite.head_sha === head).map(suite => suite.created_at)
+      .filter(time => !Number.isNaN(Date.parse(time))).sort((a, b) => Date.parse(a) - Date.parse(b))[0] ?? null;
+  } catch { headSeenAt = null; }
 
   const paths = files.flatMap(file => [file.filename, file.previous_filename].filter(Boolean));
   const risk = classifyRisk({ meta: description.meta, files, gateConfig: config, shadow, dependency: paths.some(path => dependencyPattern.test(path)) });
   const bot = shadow.codexReviewer;
   const codex = evaluateCodexReview({ head, comments, reviews, reviewComments, bot });
   const checks = evaluateRequiredChecks({ head, checkRuns, requiredChecks: shadow.requiredChecks });
-  const request = planReviewRequest({ comments, codex, bot, maxReviewRequests: shadow.maxReviewRequests });
+  const request = planReviewRequest({ comments, codex, maxReviewRequests: shadow.maxReviewRequests, headSeenAt });
 
   let approval = { state: 'none' };
   if (decision.state === 'success' && risk.risk === 'high') approval = { state: 'approved', reason: '기존 관리자 확인 통과' };

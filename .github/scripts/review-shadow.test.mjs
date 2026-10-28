@@ -31,11 +31,13 @@ function stateComment(change = {}, sha = head) {
 // worky #50의 실제 지적 리뷰를 현재 head 기준으로 옮긴다.
 function findingReview(sha = head) {
   const { review, comments } = clone(real.workyFindings);
+  review.body = review.body.replace(`\`${review.commit_id.slice(0, 10)}\``, `\`${sha.slice(0, 10)}\``);
   review.commit_id = sha;
   for (const comment of comments) comment.commit_id = sha;
   return { reviews: [review], reviewComments: comments };
 }
-const badge = level => `**<sub><sub>![${level} Badge](https://img.shields.io/badge/${level}-red?style=flat)</sub></sub>  제목\n\n본문`;
+// 실제 인라인 지적 66건의 첫 줄은 모두 `**<sub><sub>![Pn Badge](…)</sub></sub>  제목**` 형식이다.
+const badge = level => `**<sub><sub>![${level} Badge](https://img.shields.io/badge/${level}-red?style=flat)</sub></sub>  제목**\n\n본문`;
 const codexFor = input => evaluateCodexReview({ head, comments: [], reviews: [], reviewComments: [], bot, ...input });
 
 test('현재 shadow 설정이 유효하고 잘못된 설정은 거부', () => {
@@ -88,6 +90,58 @@ test('P0·P3와 심각도 없는 지적을 구분', () => {
   const make = bodies => bodies.map((body, index) => ({ ...reviewComments[0], id: 900 + index, body }));
   const codex = codexFor({ comments: [stateComment({ has_any_findings: true, has_unresolved_findings: true })], reviews, reviewComments: make([badge('P0'), badge('P3'), '배지 없는 지적', '본문 중간의 ![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)']) });
   assert.deepEqual(codex.findings, { critical: 1, high: 0, medium: 0, low: 1, unknown: 2 });
+});
+
+// 실제 리뷰 본문 안내문 앞에 지적 줄을 넣는다. 본문 지적은 실측하지 못해 인라인 지적 형식에서 파생한다.
+const bodyWith = (review, lines) => ({ ...review, body: review.body.replace('<details>', `${lines.join('\n\n')}\n\n<details>`) });
+const titledBadge = (level, title) => `**<sub><sub>![${level} Badge](https://img.shields.io/badge/${level}-orange?style=flat)</sub></sub>  ${title}**`;
+
+test('리뷰 본문의 P0~P3 지적도 집계하고 인라인과 같은 지적은 한 번만 셈', () => {
+  const { reviews: [review], reviewComments } = findingReview();
+  const inline = { ...reviewComments[0], id: 950, body: `${titledBadge('P3', '사소한 이름 정리')}\n\n설명` };
+  const state = [stateComment({ has_any_findings: true, has_unresolved_findings: true })];
+  const withBodyP1 = codexFor({ comments: state, reviews: [bodyWith(review, [titledBadge('P1', '권한 확인 누락')])], reviewComments: [inline] });
+  assert.equal(withBodyP1.status, 'findings');
+  assert.deepEqual(withBodyP1.findings, { critical: 0, high: 1, medium: 0, low: 1, unknown: 0 });
+  const decision = decideShadow({ risk: 'medium', meta: meta(), checks: [{ name: 'verify', state: 'success' }], codex: withBodyP1, approval: { state: 'none' }, blocked: false, request: { requestCount: 1 }, maxReviewRequests: 3, baseSync: 'current' });
+  assert.equal(decision.candidate, false);
+  const duplicate = codexFor({ comments: state, reviews: [bodyWith(review, [titledBadge('P3', '사소한 이름 정리')])], reviewComments: [inline] });
+  assert.deepEqual(duplicate.findings, { critical: 0, high: 0, medium: 0, low: 1, unknown: 0 });
+  // 본문만으로 지적이 전달된 경우도 집계한다.
+  const bodyOnly = codexFor({ comments: state, reviews: [bodyWith(review, [titledBadge('P2', '경계 조건')])], reviewComments: [] });
+  assert.equal(bodyOnly.status, 'findings');
+  assert.equal(bodyOnly.findings.medium, 1);
+});
+
+test('리뷰 본문 형식이 불명확하거나 지적 수가 상태와 맞지 않으면 판단 불가', () => {
+  const { reviews: [review], reviewComments } = findingReview();
+  const state = change => [stateComment({ has_any_findings: true, has_unresolved_findings: true, ...change })];
+  const cases = [
+    [{ comments: state(), reviews: [bodyWith(review, ['추가로 확인이 필요한 부분이 있습니다.'])], reviewComments }, '알 수 없는 본문'],
+    [{ comments: state(), reviews: [{ ...review, body: review.body.replace(/`[0-9a-f]{10}`/, '`0000000000`') }], reviewComments }, '다른 커밋 본문'],
+    [{ comments: state({ has_any_findings: false, has_unresolved_findings: false }), reviews: [bodyWith(review, [titledBadge('P1', '본문 지적')])], reviewComments: [] }, '지적 없음인데 본문 지적'],
+  ];
+  for (const [input, label] of cases) assert.equal(codexFor(input).status, 'indeterminate', label);
+  // 실제 안내문만 있는 리뷰 본문은 지적 0건으로 본다.
+  assert.equal(codexFor({ comments: state(), ...findingReview() }).status, 'findings');
+});
+
+test('리뷰 요청은 head가 처음 보인 시각 이후 요청만 그 head에 연결', () => {
+  const H1 = 'a'.repeat(40);
+  const request = (id, created_at) => ({ id, body: '@codex review', created_at, user: { id: 102342597, type: 'User' } });
+  // H1 리뷰 요청 → H2 push → H2 요청 → 늦게 끝난 H1 요약 갱신. H2 결과는 아직 없다.
+  const lateOldHead = { ...stateComment({}, H1), updated_at: '2026-10-27T14:50:00Z' };
+  const comments = [request(1, '2026-10-27T14:00:00Z'), request(2, '2026-10-27T14:40:00Z'), lateOldHead];
+  const codex = codexFor({ comments });
+  assert.equal(codex.status, 'missing');
+  const plan = (input, headSeenAt = '2026-10-27T14:30:00Z') => planReviewRequest({ comments: input, codex: codexFor({ comments: input }), maxReviewRequests: 3, headSeenAt });
+  assert.equal(plan(comments).allowed, false);
+  assert.match(plan(comments).reason, /같은 head.*응답 대기/);
+  // 이전 head에 대한 요청만 있으면 새 head 요청은 가능하다.
+  assert.equal(plan([request(1, '2026-10-27T14:00:00Z'), lateOldHead]).allowed, true);
+  // head가 처음 보인 시각을 모르면 연결 근거가 없으므로 요청하지 않는다.
+  assert.equal(plan(comments, null).allowed, false);
+  assert.equal(plan([], 'not-a-time').allowed, false);
 });
 
 test('미완료·형식 오류·값 누락·세부 결과 누락은 통과로 보지 않음', () => {
@@ -159,11 +213,11 @@ test('관리자 승인은 최신 head를 명시하고 변경 이후에 작성돼
 
 test('같은 head 중복 요청·대기 중 요청·상한 초과·한도 초과면 새 요청 불가', () => {
   const request = (id, created_at) => ({ id, body: '@codex review', created_at, user: { id: 102342597, type: 'User' } });
-  const plan = (comments, codexStatus) => planReviewRequest({ comments, codex: { status: codexStatus }, bot, maxReviewRequests: 3 });
+  const plan = (comments, codexStatus) => planReviewRequest({ comments, codex: { status: codexStatus }, maxReviewRequests: 3, headSeenAt: '2026-10-27T13:00:00Z' });
   assert.equal(plan([], 'missing').allowed, true);
   assert.equal(plan([request(1, '2026-10-27T14:00:00Z'), real.photoSelectorPr5.reviewSummaryCompleted], 'clean').allowed, false);
   assert.equal(plan([request(1, '2026-10-27T14:00:00Z'), request(2, '2026-10-27T14:10:00Z'), request(3, '2026-10-27T14:20:00Z')], 'missing').reason, 'PR당 요청 상한 3회 도달');
-  assert.equal(plan([real.photoSelectorPr5.reviewSummaryCompleted, request(99, '2026-10-27T15:00:00Z')], 'missing').reason, '응답 대기 중인 요청 있음');
+  assert.equal(plan([real.photoSelectorPr5.reviewSummaryCompleted, request(99, '2026-10-27T15:00:00Z')], 'missing').reason, '같은 head에 대한 요청이 응답 대기 중');
   assert.equal(plan([real.workyUsageLimit], 'limit').allowed, false);
   assert.equal(plan([{ ...request(1, '2026-10-27T14:00:00Z'), body: '@codex review this please' }], 'missing').requestCount, 0);
 });
@@ -237,6 +291,8 @@ async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewCom
         create: async value => { calls.push(['create', value.name]); return { data: { id: 99 } }; },
         update: async value => { calls.push(['update', value.conclusion]); },
         listForRef: async () => ({ data: checkRuns ?? [{ id: 1, name: 'verify', head_sha: head, status: 'completed', conclusion: 'success', app: { id: 15368 } }] }),
+        // PR #5 head가 push된 직후 생긴 check suite 시각(요청 14:21:52Z보다 이전).
+        listSuitesForRef: async () => ({ data: [{ id: 2, head_sha: head, created_at: '2026-10-27T14:19:40Z' }, { id: 3, head_sha: head, created_at: '2026-10-27T14:20:00Z' }] }),
       },
     },
     graphql: async () => ({ repository: { pullRequest: { lastEditedAt, timelineItems: { nodes: [] } } } }),

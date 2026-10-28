@@ -59,10 +59,31 @@ export function parseReviewState(body) {
   return { valid: true, commitSha: review.commit_sha, status: review.status, hasAnyFindings: review.has_any_findings, hasUnresolvedFindings: review.has_unresolved_findings };
 }
 
+const badgeLine = /^\*\*<sub><sub>!\[(P[0-3]) Badge\]\(https:\/\/img\.shields\.io\/badge\/(P[0-3])-[a-z]+\?style=flat\)<\/sub><\/sub>\s*(.*?)\*\*\s*$/;
+// 실제 리뷰 본문 안내문. 안내문 밖의 내용은 지적 배지 줄만 허용한다.
+const reviewBodyHeading = /^### 💡 Codex Review\n+Here are some automated review suggestions for this pull request\.\n+\*\*Reviewed commit:\*\* `([a-f0-9]{7,40})`$/;
+const aboutDetails = /<details> <summary>ℹ️ About Codex in GitHub<\/summary>[\s\S]*?<\/details>/g;
+
+function parseBadge(line) {
+  const match = badgeLine.exec(line.trim());
+  return match && match[1] === match[2] ? { severity: severityLevels[match[1]], title: match[3].trim() } : null;
+}
+
 // 실제 인라인 지적의 첫 줄 형식만 인정한다. 형식이 바뀌면 심각도 불명으로 남겨 자동 통과시키지 않는다.
 export function parseSeverity(body) {
-  const match = /^\*\*<sub><sub>!\[(P[0-3]) Badge\]\(https:\/\/img\.shields\.io\/badge\/(P[0-3])-[a-z]+\?style=flat\)<\/sub><\/sub>/.exec(normalizeNewlines(body));
-  return match && match[1] === match[2] ? severityLevels[match[1]] : null;
+  return parseBadge(normalizeNewlines(body).split('\n')[0])?.severity ?? null;
+}
+
+// 리뷰 본문은 실제 안내문과 지적 배지 줄로만 구성돼야 한다. 그 밖의 내용이나 다른 커밋 표시는 형식 불명이다.
+export function parseReviewBody(body, commitId) {
+  const lines = normalizeNewlines(body).replace(aboutDetails, '').split('\n');
+  const findings = lines.map(parseBadge).filter(Boolean);
+  // 안내문 안에 숨은 배지나 해석하지 못한 배지가 있으면 전체 지적을 확인했다고 볼 수 없다.
+  const badgeCount = (normalizeNewlines(body).match(/!\[P[0-3] Badge\]/g) ?? []).length;
+  if (badgeCount !== findings.length) return { valid: false, findings };
+  const rest = lines.filter(line => !parseBadge(line)).join('\n').replace(/\n[ \t]+\n/g, '\n\n').trim();
+  const heading = reviewBodyHeading.exec(rest);
+  return { valid: Boolean(heading && commitId.startsWith(heading[1])), findings };
 }
 
 export const isReviewRequest = body => normalizeNewlines(body).trim() === reviewRequest;
@@ -94,13 +115,24 @@ export function evaluateCodexReview({ head, comments, reviews, reviewComments, b
   const reviewIds = new Set(headReviews.map(review => review.id));
   const findingComments = reviewComments.filter(comment => isTrustedBotUser(comment.user, bot) && reviewIds.has(comment.pull_request_review_id));
   const evidence = { stateCommentId: headStates[0].comment.id, reviewIds: [...reviewIds].sort() };
+  const bodies = headReviews.map(review => parseReviewBody(review.body, review.commit_id));
+  if (bodies.some(body => !body.valid)) return result('indeterminate', '리뷰 본문 형식을 확인할 수 없음', { ...base, evidence });
+  // 같은 리뷰의 본문과 인라인에 같은 지적(심각도·제목)이 있으면 한 번만 센다.
+  const inlineKeys = new Set(findingComments.map(comment => {
+    const badge = parseBadge(normalizeNewlines(comment.body).split('\n')[0]);
+    return badge && `${comment.pull_request_review_id}/${badge.severity}/${badge.title}`;
+  }).filter(Boolean));
+  const bodyFindings = headReviews.flatMap((review, index) => bodies[index].findings
+    .filter(finding => !inlineKeys.has(`${review.id}/${finding.severity}/${finding.title}`)));
+  const total = findingComments.length + bodyFindings.length;
   if (!hasAnyFindings) {
-    if (findingComments.length) return result('indeterminate', '지적 없음 상태와 인라인 지적이 함께 있음', { ...base, evidence });
+    if (total) return result('indeterminate', '지적 없음 상태와 실제 지적이 함께 있음', { ...base, evidence });
     return result('clean', '지적 없음', { ...base, evidence, hasUnresolvedFindings, findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 } });
   }
-  if (!findingComments.length) return result('indeterminate', '지적 있음이지만 세부 지적을 찾지 못함', { ...base, evidence });
+  if (!total) return result('indeterminate', '지적 있음이지만 세부 지적을 찾지 못함', { ...base, evidence });
   const findings = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
   for (const comment of findingComments) findings[parseSeverity(comment.body) ?? 'unknown'] += 1;
+  for (const finding of bodyFindings) findings[finding.severity] += 1;
   // 해결 처리(resolve)는 같은 계정으로 누구나 할 수 있으므로 집계를 줄이는 근거로 쓰지 않는다.
   return result('findings', '지적 있음', { ...base, evidence, hasUnresolvedFindings, findings });
 }
@@ -127,17 +159,19 @@ export function findApproval({ head, comments, confirmers, lastChangedAt }) {
   return valid.length ? { state: 'approved', commentId: valid.sort(byId).at(-1).id } : { state: 'invalid', reason: '최신 head·변경 이후의 관리자 승인 없음' };
 }
 
-export function planReviewRequest({ comments, codex, bot, maxReviewRequests }) {
+// 요청 댓글에는 대상 SHA가 없으므로 head가 처음 보인 시각(push로 생긴 check suite) 이후 요청만 그 head 요청으로 본다.
+// 리뷰 결과는 상태 댓글의 commit_sha로만 head에 연결하므로 이전 head의 늦은 결과가 새 head 요청을 해소하지 않는다.
+export function planReviewRequest({ comments, codex, maxReviewRequests, headSeenAt }) {
   const requests = comments.filter(comment => isReviewRequest(comment.body)).sort(byId);
-  const latestState = comments.filter(comment => isTrustedBotComment(comment, bot) && normalizeNewlines(comment.body).includes(summaryMarker))
-    .map(comment => Date.parse(comment.updated_at)).filter(Number.isFinite).sort((a, b) => a - b).at(-1) ?? 0;
-  const unanswered = requests.some(request => Date.parse(request.created_at) > latestState);
-  let allowed = true, reason = '요청 가능';
-  if (requests.length >= maxReviewRequests) [allowed, reason] = [false, `PR당 요청 상한 ${maxReviewRequests}회 도달`];
-  else if (['clean', 'findings', 'pending', 'indeterminate'].includes(codex.status)) [allowed, reason] = [false, '같은 head에 이미 리뷰 결과·진행 기록 있음'];
-  else if (unanswered) [allowed, reason] = [false, '응답 대기 중인 요청 있음'];
-  else if (codex.status === 'limit') [allowed, reason] = [false, '사용량 한도 초과'];
-  return { requestCount: requests.length, allowed, reason };
+  const plan = (allowed, reason, headRequestCount = null) => ({ requestCount: requests.length, headRequestCount, allowed, reason });
+  if (!isIsoTime(headSeenAt)) return plan(false, '최신 head push 시각을 확인할 수 없음');
+  if (requests.some(request => !isIsoTime(request.created_at))) return plan(false, '요청 시각을 확인할 수 없음');
+  const headRequests = requests.filter(request => Date.parse(request.created_at) >= Date.parse(headSeenAt)).length;
+  if (requests.length >= maxReviewRequests) return plan(false, `PR당 요청 상한 ${maxReviewRequests}회 도달`, headRequests);
+  if (['clean', 'findings', 'pending', 'indeterminate'].includes(codex.status)) return plan(false, '같은 head에 이미 리뷰 결과·진행 기록 있음', headRequests);
+  if (headRequests) return plan(false, '같은 head에 대한 요청이 응답 대기 중', headRequests);
+  if (codex.status === 'limit') return plan(false, '사용량 한도 초과', headRequests);
+  return plan(true, '요청 가능', headRequests);
 }
 
 // 기존 게이트와 별개로 자동 판정 후보인지 계산한다. 후보가 아니면 사유를 모두 남긴다.
@@ -178,7 +212,7 @@ export function formatShadowSummary({ number, shadow }) {
     `- 필수 CI: ${checks.map(check => `${check.name} ${check.state}`).join(', ')}`,
     `- 최신 base 반영: ${baseSync}`,
     `- Codex GitHub 리뷰: ${codex.status} — ${codex.reason}${findings}${codex.ignoredUntrusted ? ` / 신뢰하지 않는 리뷰 형식 댓글 ${codex.ignoredUntrusted}개 무시` : ''}`,
-    `- 리뷰 요청: ${request.requestCount}회, 새 요청 ${request.allowed ? '가능' : `불가(${request.reason})`}`,
+    `- 리뷰 요청: PR ${request.requestCount}회(최신 head ${request.headRequestCount ?? '알 수 없음'}회), 새 요청 ${request.allowed ? '가능' : `불가(${request.reason})`}`,
     `- 사용자 승인: ${approval.state}${approval.reason ? ` — ${approval.reason}` : ''}`,
     `- 자동 판정 후보(${risk.risk}): ${decision.candidate ? '예' : '아니오'}${decision.blockers.length ? ` — ${decision.blockers.join('; ')}` : ''}`,
     `- 기존 게이트 비교: ${comparison}`,
