@@ -113,7 +113,7 @@ test('PR 상태·대상 오류와 지정한 head 불일치는 차단', async () 
   blocked(await run({ draft: true }), /PR 상태: draft/);
   blocked(await run({ state: 'closed' }), /PR 상태: closed/);
   blocked(await run({}, ['--head', newHead]), /지정한 --head와 현재 PR head 불일치/);
-  blocked(await run({ headRepo: 'someone/fork' }), /필수 CI verify 출처/);
+  blocked(await run({ headRepo: 'someone/fork' }), /다른 저장소\(fork\)의 PR/);
 });
 
 test('점검과 재확인 사이 head 변경은 병합하지 않고, 재확인 이후 변경은 GitHub가 거부하며 재시도하지 않음', async () => {
@@ -227,6 +227,7 @@ test('리뷰 요청: 같은 head 대기·상한·한도 초과·Low·Codex 구�
   for (const [options, pattern] of [
     [{ requests: 1 }, /응답 대기/], [{ requests: 3 }, /상한 3회/], [{ codex: 'limit' }, /사용량 한도/], [{ codex: 'clean', requests: 1 }, /이미 리뷰 결과/],
     [{ risk: 'low' }, /Low는 Codex 리뷰 요청 대상 아님/], [{ implementedBy: 'codex' }, /Codex 구현 PR/], [{ draft: true }, /draft/],
+    [{ headRepo: 'someone/fork' }, /다른 저장소\(fork\)의 PR/],
   ]) {
     const r = await request(options);
     blocked(r, pattern, JSON.stringify(options));

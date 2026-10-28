@@ -437,10 +437,11 @@ test('목록 수는 목록 조회 뒤 PR 정보와 같아야 하며, 실행 중 
   assert.match(arrived.summary, /Codex GitHub 리뷰: clean/);
   const inline = { id: 1, user: { id: 1, login: 'someone', type: 'User' }, pull_request_review_id: 9, body: '의견' };
   for (const [prCounts, label] of [
-    [[{ comments: total + 1 }, { comments: total + 1 }], '목록 누락'],
-    // Codex 리뷰 P2: 조회 전·목록 수가 같아도 조회 뒤 새 댓글이 생기면 목록이 그 댓글(예: 새 리뷰 요청)을 놓친 것이다.
-    [[{}, { comments: total + 1 }], '목록 조회 뒤 새 댓글'],
-    [[{}, { comments: total - 1 }], '조회 뒤 수보다 많음'],
+    // pulls.get 세 번째(모든 목록 조회 뒤) PR 정보가 기준이다.
+    [[{ comments: total + 1 }, { comments: total + 1 }, { comments: total + 1 }], '목록 누락'],
+    // Codex 리뷰 P2: 목록 조회 뒤 새 일반 댓글(예: 새 `@codex review`)이 생기면 목록이 그 댓글을 놓친 것이다.
+    [[{}, {}, { comments: total + 1 }], '목록 조회 뒤 새 일반 댓글'],
+    [[{}, {}, { comments: total - 1 }], '조회 뒤 수보다 많음'],
     [[{}, {}, { review_comments: 0 }], '인라인 조회 뒤 수보다 많음'],
     [[{}, {}, { review_comments: 2 }], '인라인 목록 조회 뒤 새 지적'],
     [[{}, {}, { head: { sha: 'f'.repeat(40) } }], '인라인 조회 중 head 변경'],

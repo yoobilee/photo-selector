@@ -189,6 +189,8 @@ export async function assessMerge({ gh, git, repo, number, mode, expectedHead = 
   if (pr.draft) blockers.add('PR 상태: draft');
   if (!validTitle(pr.title)) blockers.add('PR 제목 규칙 오류');
   if (pr.base?.ref !== defaultBranch || pr.base?.repo?.full_name !== repo) blockers.add('기본 브랜치 대상 PR이 아님');
+  // fork PR은 리뷰 요청(구독 사용량)과 이 도구의 병합 대상에서 제외한다.
+  if (pr.head?.repo?.full_name !== repo) blockers.add('다른 저장소(fork)의 PR');
   if (expectedHead && pr.head?.sha !== expectedHead) blockers.add('지정한 --head와 현재 PR head 불일치');
 
   let evaluation;
