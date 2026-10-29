@@ -3,12 +3,14 @@ import EmptyState from './components/EmptyState.tsx'
 import ImportStatus from './components/ImportStatus.tsx'
 import PhotoGallery from './components/PhotoGallery.tsx'
 import { usePhotoLibrary } from './hooks/usePhotoLibrary.ts'
+import { usePhotoSharpness } from './hooks/usePhotoSharpness.ts'
 import { IMAGE_INPUT_ACCEPT } from './photos/imageFormat.ts'
 
 // 시각적 방향은 디자인 방향 확정 전까지 중립적인 기본 스타일을 사용한다.
 function App() {
   const { photos, progress, lastImport, addFiles, removePhoto, dismissImportSummary } =
     usePhotoLibrary()
+  const sharpness = usePhotoSharpness(photos)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pickerButtonRef = useRef<HTMLButtonElement>(null)
   const galleryHeadingRef = useRef<HTMLHeadingElement>(null)
@@ -76,6 +78,7 @@ function App() {
         ) : (
           <PhotoGallery
             photos={photos}
+            sharpness={sharpness}
             headingRef={galleryHeadingRef}
             pickerButtonRef={pickerButtonRef}
             isImporting={isImporting}
