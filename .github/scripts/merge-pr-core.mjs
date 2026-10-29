@@ -1,38 +1,61 @@
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertPullRequestUnchanged, pullRequestSnapshot, validTitle } from './review-gate-core.mjs';
-import { evaluatePR } from './review-gate.mjs';
+import { collectReviewBasis, evaluatePR, permissionReader } from './review-gate.mjs';
 import { verifyGateSource } from './review-gate-source.mjs';
-import { approvalText, evaluateCodexReview, latestCheckRun, planReviewRequest } from './review-shadow-core.mjs';
+import { approvalText, latestCheckRun } from './review-shadow-core.mjs';
 import { evaluateApproval, evaluateShadow } from './review-shadow.mjs';
 
-// 사용자가 명시적으로 실행하는 병합 도구의 판정과 실행. workflow에서는 호출하지 않는다.
+// 사용자가 명시적으로 실행하는 수동 squash 병합 도구의 판정과 실행. workflow에서는 호출하지 않는다.
 // gh·git 실행 함수를 주입받으므로 실제 CLI 없이 같은 흐름을 테스트할 수 있다.
 const shaPattern = /^[a-f0-9]{40}$/;
 const gateCheckName = 'independent-review';
-const reviewRequestBody = '@codex review';
 // GitHub 자동 브랜치 삭제는 병합 직후 비동기로 일어난다. 짧게 몇 번만 확인하고 무한 대기하지 않는다.
 const remoteDeleteChecks = 3;
 const remoteDeleteWaitMs = 2000;
 
-export const usage = '사용법: node .github/scripts/merge-pr.mjs owner/repo PR번호 [squash] [--dry-run] [--auto | --request-review] [--head <40자리 SHA>]';
+export const usage = '사용법: node .github/scripts/merge-pr.mjs owner/repo PR번호 [squash] [--dry-run] [--head <40자리 SHA>]';
 
 export function parseArgs(argv) {
   const [repo, number, ...rest] = argv;
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo ?? '') || !/^[1-9][0-9]*$/.test(number ?? '')) return null;
-  const options = { repo, number: Number(number), dryRun: false, auto: false, requestReview: false, head: null };
+  const options = { repo, number: Number(number), dryRun: false, head: null };
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
     // 기존 사용법의 `squash` 인수는 그대로 받는다. 다른 병합 방식은 지원하지 않는다.
     if (arg === 'squash') continue;
     if (arg === '--dry-run') options.dryRun = true;
-    else if (arg === '--auto') options.auto = true;
-    else if (arg === '--request-review') options.requestReview = true;
     else if (arg === '--head' && shaPattern.test(rest[index + 1] ?? '')) { options.head = rest[index + 1]; index += 1; }
     else return null;
   }
-  return options.auto && options.requestReview ? null : options;
+  return options;
+}
+
+// 병합 도구가 실행하는 판정 코드. 실제 병합 전에 기본 브랜치에 승인된 내용과 같은지 확인한다.
+// 이 목록과 실제 import 관계가 같은지는 테스트가 확인한다.
+export const trustedModules = ['merge-pr.mjs', 'merge-pr-core.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-gate-source.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
+// Git blob SHA. 작업 트리의 CRLF 변환(core.autocrlf)만 되돌려 저장소에 기록된 LF 내용과 비교한다.
+export function gitBlobSha(text) {
+  const content = Buffer.from(text.replace(/\r\n/g, '\n'), 'utf8');
+  return createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
+}
+
+// 지금 실행 중인 파일과 기본 브랜치의 같은 파일이 다르면 그 이름을 돌려준다. 조회 실패(404 제외)는 그대로 던진다.
+// 예외 옵션은 두지 않는다. 새 코드는 dry-run 출력과 테스트로 확인하되, 기본 브랜치에 병합되기 전에는 실제 병합을 할 수 없다.
+function changedTrustedModules({ github, repo, defaultBranch }) {
+  const changed = [];
+  for (const name of trustedModules) {
+    const local = gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'));
+    let approved;
+    try { approved = github.api(`repos/${repo}/contents/.github/scripts/${name}?ref=${encodeURIComponent(defaultBranch)}`).sha; } catch (error) {
+      if (error.status !== 404) throw error;
+      approved = null;
+    }
+    if (local !== approved) changed.push(name);
+  }
+  return changed;
 }
 
 const segments = path => path.split('/').map(encodeURIComponent).join('/');
@@ -159,13 +182,20 @@ export function planCleanup({ git, repo, pr, defaultBranch, deleteBranchOnMerge 
   return { branch, remote, local: local.action === 'delete' ? '삭제 예정(SHA 조건부)' : `건너뜀 — ${local.reason}` };
 }
 
-export async function assessMerge({ gh, git, repo, number, mode, expectedHead = null }) {
+// 게이트 검사 확인 실패 중 사람이 할 조치가 정해진 경우의 안내.
+const gateSourceLabels = {
+  'proof-v1': '기존 게이트 검사가 proof v1이라 판정 근거가 기록돼 있지 않음. 게이트를 다시 실행해 proof v2를 받아야 함',
+  'evidence-changed': '기존 게이트 판정 이후 리뷰 근거(확인 댓글·보고서·High 승인·작성자 권한·변경 요청 리뷰)가 바뀜. 근거를 확인하고 게이트를 다시 실행해야 함',
+};
+const latestGateCheck = checkRuns => checkRuns.filter(run => run.name === gateCheckName).sort((a, b) => b.id - a.id)[0];
+
+export async function assessMerge({ gh, git, repo, number, expectedHead = null }) {
   const github = createGitHub({ gh, repo });
   const [owner, name] = repo.split('/');
   const repoRef = { owner, repo: name };
   // 같은 사유가 여러 조건에서 나와도 한 번만 보고한다.
   const blockers = new Set();
-  const assessment = { repo, number, mode };
+  const assessment = { repo, number };
   const finish = () => ({ ...assessment, blockers: [...blockers], ok: blockers.size === 0 });
 
   let repository; let pr; let config;
@@ -182,7 +212,7 @@ export async function assessMerge({ gh, git, repo, number, mode, expectedHead = 
   }
   const defaultBranch = repository.default_branch;
   Object.assign(assessment, {
-    defaultBranch, autoMerge: config.autoMerge?.enabled === true ? '활성' : '비활성',
+    defaultBranch,
     pr: { title: pr.title, body: pr.body ?? '', head: pr.head?.sha, headRef: pr.head?.ref },
     // 병합 직전 변경 감지의 기준이 되는 원본 PR 응답.
     source: pr,
@@ -192,7 +222,7 @@ export async function assessMerge({ gh, git, repo, number, mode, expectedHead = 
   if (pr.draft) blockers.add('PR 상태: draft');
   if (!validTitle(pr.title)) blockers.add('PR 제목 규칙 오류');
   if (pr.base?.ref !== defaultBranch || pr.base?.repo?.full_name !== repo) blockers.add('기본 브랜치 대상 PR이 아님');
-  // fork PR은 리뷰 요청(구독 사용량)과 이 도구의 병합 대상에서 제외한다.
+  // fork PR은 이 도구의 병합 대상에서 제외한다.
   if (pr.head?.repo?.full_name !== repo) blockers.add('다른 저장소(fork)의 PR');
   if (expectedHead && pr.head?.sha !== expectedHead) blockers.add('지정한 --head와 현재 PR head 불일치');
 
@@ -203,7 +233,10 @@ export async function assessMerge({ gh, git, repo, number, mode, expectedHead = 
   }
   const { description, decision } = evaluation;
   const head = description.head;
-  Object.assign(assessment, { head, fingerprint: description.fingerprint, gate: { state: decision.state, reason: decision.reason, source: '확인 안 함' } });
+  Object.assign(assessment, {
+    head, fingerprint: description.fingerprint, evidenceDigest: evaluation.evidence.digest,
+    gate: { state: decision.state, reason: decision.reason, source: '확인 안 함' },
+  });
 
   let shadow = null;
   try { shadow = await evaluateShadow({ github, repo: repoRef, pr, config, evaluation, canConfirm: evaluation.canConfirm }); } catch { shadow = null; }
@@ -211,33 +244,22 @@ export async function assessMerge({ gh, git, repo, number, mode, expectedHead = 
     blockers.add('위험도 판정 불가: 설정 비활성 또는 조회·형식 오류');
     return finish();
   }
-  assessment.shadow = shadow;
-  // 실행 직전 재확인에 쓰는 근거: 승인에 사용한 댓글 원본, 같은 권한 확인 함수, 기본 브랜치 정책.
-  Object.assign(assessment, {
-    config, canConfirm: evaluation.canConfirm,
-    approvalComment: evaluation.comments.find(comment => shadow.approval.state === 'approved' && comment.id === shadow.approval.commentId) ?? null,
-  });
+  // 실행 직전 재확인은 기본 브랜치 정책으로 같은 판정을 다시 계산한다.
+  Object.assign(assessment, { shadow, config });
   const risk = shadow.risk.risk;
 
-  if (mode === 'request-review') {
-    if (risk === 'low') blockers.add('Low는 Codex 리뷰 요청 대상 아님');
-    if (shadow.meta['implemented-by'] === 'codex') blockers.add('Codex 구현 PR은 Codex 리뷰로 독립 검증 불가');
-    if (!shadow.request.allowed) blockers.add(`리뷰 요청 불가: ${shadow.request.reason}`);
-    return finish();
-  }
-
-  // 현재 필수 검사인 기존 게이트는 모든 병합 방식에서 통과해야 한다.
+  // 현재 필수 검사인 기존 게이트는 통과해야 하고, 그 성공이 지금과 같은 근거로 판정된 것이어야 한다(proof v2).
   if (decision.state !== 'success') blockers.add(`기존 게이트(${gateCheckName}): ${decision.reason}`);
   let checkRuns = [];
   try { checkRuns = github.list(`repos/${repo}/commits/${head}/check-runs?filter=all`, 'check_runs'); } catch { blockers.add('조회 실패: head의 check run'); }
-  const gateCheck = checkRuns.filter(run => run.name === gateCheckName).sort((a, b) => b.id - a.id)[0];
+  const gateCheck = latestGateCheck(checkRuns);
   if (decision.state === 'success') {
     try {
-      await verifyGateSource({ check: gateCheck, pr, fingerprint: description.fingerprint, repository: repo, defaultBranch, api: github.api });
-      assessment.gate.source = '확인됨';
-    } catch {
+      await verifyGateSource({ check: gateCheck, pr, fingerprint: description.fingerprint, evidenceDigest: evaluation.evidence.digest, repository: repo, defaultBranch, api: github.api });
+      assessment.gate.source = '확인됨(proof v2, 근거 일치)';
+    } catch (error) {
       assessment.gate.source = '확인 실패';
-      blockers.add(`기존 게이트 검사의 출처·최신성 확인 실패`);
+      blockers.add(gateSourceLabels[error?.code] ?? '기존 게이트 검사의 출처·최신성 확인 실패');
     }
   }
 
@@ -268,26 +290,24 @@ export async function assessMerge({ gh, git, repo, number, mode, expectedHead = 
   }
   try { gh(['pr', 'checks', String(number), '--repo', repo, '--required']); } catch { blockers.add('필수 검사(gh pr checks --required) 미통과·진행 중·조회 실패'); }
 
-  if (mode === 'auto') {
-    if (config.autoMerge?.enabled !== true) blockers.add('자동 병합 비활성(기본 브랜치 .ai/review-config.json의 autoMerge.enabled)');
-    for (const blocker of shadow.decision.blockers) blockers.add(blocker);
+  // 이 판정을 계산한 코드가 기본 브랜치에 승인된 코드인지 확인한다. dry-run도 같은 기준으로 병합 가능 여부를 보고한다.
+  try {
+    assessment.changedCode = changedTrustedModules({ github, repo, defaultBranch });
+    if (assessment.changedCode.length) blockers.add(`판정 코드가 기본 브랜치와 다름(${assessment.changedCode.join(', ')}). 이 결과는 참고용이며 실제 병합은 기본 브랜치 코드로만 함`);
+  } catch {
+    assessment.changedCode = null;
+    blockers.add('조회 실패: 기본 브랜치의 판정 코드');
   }
   assessment.cleanup = planCleanup({ git, repo, pr, defaultBranch, deleteBranchOnMerge: repository.delete_branch_on_merge === true });
   return finish();
 }
 
-const modeLabels = {
-  manual: '수동 병합(사용자 지시로 실행, 기존 게이트 + 공통 안전 조건)',
-  auto: '자동 병합(위험도 기준)',
-  'request-review': 'Codex GitHub 리뷰 요청',
-};
-
 export function formatAssessment(assessment, { dryRun }) {
   const { shadow, gate, pr } = assessment;
-  const lines = [`PR #${assessment.number} 점검 — ${modeLabels[assessment.mode]}${dryRun ? ' [dry-run: 병합·댓글·브랜치 삭제 없음]' : ''}`];
+  const lines = [`PR #${assessment.number} 점검 — 수동 squash 병합(사용자 지시로 실행, 기존 게이트 + 공통 안전 조건)${dryRun ? ' [dry-run: 병합·댓글·브랜치 삭제 없음]' : ''}`];
   if (pr) lines.push(`- 대상: ${pr.title} (head ${pr.head ?? '알 수 없음'} → ${assessment.defaultBranch})`);
   if (shadow) {
-    const { risk, codex, request, approval, decision } = shadow;
+    const { risk, codex, approval, decision } = shadow;
     const sources = new Map((assessment.checkSources ?? []).map(item => [item.name, sourceLabels[item.source]]));
     const findings = codex.findings ? ` (critical ${codex.findings.critical}·high ${codex.findings.high}·medium ${codex.findings.medium}·low ${codex.findings.low}·unknown ${codex.findings.unknown})` : '';
     lines.push(
@@ -295,19 +315,21 @@ export function formatAssessment(assessment, { dryRun }) {
       `- 필수 CI: ${shadow.checks.map(check => `${check.name} ${check.state}${sources.has(check.name) ? `(${sources.get(check.name)})` : ''}`).join(', ')}`,
       `- 최신 base 반영: ${shadow.baseSync}`,
       `- 독립 리뷰(Codex GitHub): ${codex.status} — ${codex.reason}${findings}`,
-      `- 리뷰 요청: PR ${request.requestCount}회(최신 head ${request.headRequestCount ?? '알 수 없음'}회), 새 요청 ${request.allowed ? '가능' : `불가(${request.reason})`}`,
       `- 사용자 승인: ${risk.risk === 'high' ? `필요 — ${approval.state}${approval.reason ? ` (${approval.reason})` : ''}` : '불필요'}`,
     );
     if (risk.risk === 'high' && approval.state !== 'approved' && assessment.head) {
       lines.push(`  승인 명령(변경을 확인한 관리자가 직접 PR 댓글로 작성): ${approvalText(assessment.head, assessment.fingerprint)}`);
     }
-    lines.push(`- 자동 병합 판정(위험도 기준): ${decision.candidate ? '후보' : `후보 아님 — ${decision.blockers.join('; ')}`} / 자동 병합 설정: ${assessment.autoMerge}`);
+    lines.push(`- Shadow 자동 판정 후보(관찰용, 병합 조건 아님): ${decision.candidate ? '예' : `아니오 — ${decision.blockers.join('; ')}`}`);
   }
   if (gate) lines.push(`- 기존 게이트(${gateCheckName}, 현재 필수): ${gate.state} — ${gate.reason} / 검사 출처: ${gate.source}`);
+  if (assessment.evidenceDigest) lines.push(`- 판정 근거 digest: ${assessment.evidenceDigest}`);
+  if (assessment.changedCode !== undefined) {
+    lines.push(`- 판정 코드: ${assessment.changedCode === null ? '기본 브랜치와 비교 실패' : assessment.changedCode.length ? `기본 브랜치와 다름 — ${assessment.changedCode.join(', ')} (참고용 결과, 실제 병합 불가)` : '기본 브랜치와 같음'}`);
+  }
   if (assessment.fingerprint) lines.push(`- 기준 fingerprint: ${assessment.fingerprint}`);
-  const action = assessment.mode === 'request-review' ? '리뷰 요청' : '병합';
-  lines.push(`- 현재 ${action} 가능: ${assessment.ok ? '예' : '아니오'}`);
-  if (!assessment.ok) lines.push(`- ${action}을 막는 이유:`, ...assessment.blockers.map(blocker => `  - ${blocker}`));
+  lines.push(`- 현재 병합 가능: ${assessment.ok ? '예' : '아니오'}`);
+  if (!assessment.ok) lines.push('- 병합을 막는 이유:', ...assessment.blockers.map(blocker => `  - ${blocker}`));
   if (assessment.cleanup) {
     lines.push('- 병합 후 브랜치 정리 예정:', `  - 원격 ${assessment.cleanup.branch}: ${assessment.cleanup.remote}`, `  - 로컬 ${assessment.cleanup.branch}: ${assessment.cleanup.local}`);
   }
@@ -361,6 +383,21 @@ function cleanupLocal({ git, repo, branch, head, defaultBranch }) {
   return `로컬 ${branch}: 삭제함(${head.slice(0, 10)} 조건부)`;
 }
 
+// 병합 직후 게이트 근거를 다시 조회해 병합 직전 재확인의 digest와 비교한다. 같으면 true, 다르면 false, 확인할 수 없으면 오류.
+// 병합된 PR에는 기존 게이트 평가(열린 PR 전용)를 쓸 수 없으므로 근거 수집 함수만 같은 것을 쓴다.
+async function evidenceUnchangedAfterMerge({ github, repo, number, expectedDigest }) {
+  const [owner, name] = repo.split('/');
+  const repoRef = { owner, repo: name };
+  const comments = github.list(`repos/${repo}/issues/${number}/comments`);
+  const reviews = github.list(`repos/${repo}/pulls/${number}/reviews`);
+  // 목록을 모두 받은 뒤 다시 읽은 PR의 댓글 수와 같아야 목록이 완전하다.
+  const now = github.api(`repos/${repo}/pulls/${number}`);
+  if (!Number.isSafeInteger(now.comments) || comments.length !== now.comments) throw new Error('댓글 전체 조회 실패');
+  const { permission, canConfirm } = permissionReader({ github, repo: repoRef });
+  const basis = await collectReviewBasis({ repo: repoRef, number, comments, reviews, permission, canConfirm });
+  return basis.gateEvidence.digest === expectedDigest;
+}
+
 async function mergeAndCleanup({ gh, git, repo, number, assessment, out, err, sleep }) {
   const github = createGitHub({ gh, repo });
   const { pr, head, defaultBranch } = assessment;
@@ -398,57 +435,58 @@ async function mergeAndCleanup({ gh, git, repo, number, assessment, out, err, sl
   } finally {
     if (directory) rmSync(directory, { recursive: true, force: true });
   }
-  // 병합과 제목 검증이 끝난 뒤에만 정리한다. 정리 실패는 이미 끝난 병합을 바꾸지 않고 보고만 한다.
+  // 병합 후 감사: 마지막 재확인과 병합 API 사이의 근거 변경은 막을 수 없으므로 사후에 감지한다.
+  // 다르거나 확인할 수 없으면 되돌리지 않고, 사람이 조사할 수 있도록 브랜치 정리도 하지 않는다.
+  let unchanged;
+  try { unchanged = await evidenceUnchangedAfterMerge({ github, repo, number, expectedDigest: assessment.evidenceDigest }); } catch { unchanged = null; }
+  if (unchanged !== true) {
+    err(unchanged === false
+      ? '[심각] 병합 후 감사: 게이트 근거(확인 댓글·보고서·High 승인·작성자 권한·변경 요청 리뷰)가 병합 직전 재확인과 다릅니다. 마지막 재확인과 병합 사이에 근거가 바뀌었을 수 있습니다.'
+      : '[심각] 병합 후 감사: 게이트 근거를 다시 조회하지 못해 병합 직전과 같은지 확인할 수 없습니다.');
+    err('병합은 이미 완료됐고 자동으로 되돌리지 않습니다. PR 댓글·리뷰·권한 기록을 사람이 확인하세요. 브랜치 정리는 하지 않습니다.');
+    return 1;
+  }
+  out('병합 후 감사: 게이트 근거가 병합 직전 재확인과 같음');
+  // 병합과 제목 검증·감사가 끝난 뒤에만 정리한다. 정리 실패는 이미 끝난 병합을 바꾸지 않고 보고만 한다.
   out('브랜치 정리:');
   out(`- ${await cleanupRemote({ github, git, repo, pr: after, head, defaultBranch, sleep })}`);
   out(`- ${cleanupLocal({ git, repo, branch: after.head?.ref, head, defaultBranch })}`);
   return 0;
 }
 
-function postReviewRequest({ gh, repo, number, out, err }) {
-  let created;
-  try { created = JSON.parse(gh(['api', `repos/${repo}/issues/${number}/comments`, '-f', `body=${reviewRequestBody}`])); } catch { created = null; }
-  if (!Number.isSafeInteger(created?.id)) {
-    err('리뷰 요청 댓글 작성 결과를 확인하지 못했습니다. 자동으로 다시 요청하지 않습니다. PR 댓글을 직접 확인하세요.');
-    return 1;
-  }
-  out(`Codex 리뷰 요청 댓글 작성: ${created.id}. 결과는 다음 dry-run 또는 게이트 Summary에서 확인합니다.`);
-  return 0;
-}
-
-// 실행 직전 마지막 확인. 두 번째 점검이 댓글을 모은 뒤 바뀐 PR과 댓글 근거를 다시 조회해 같은 판정 함수로 다시 계산한다.
-// 댓글 목록을 모두 조회한 **뒤에** PR을 다시 읽어 목록이 완전한지 확인하므로, 무관한 새 댓글은 막지 않고 누락된 목록은 막는다.
-async function finalEvidenceHolds({ github, repo, number, mode, first, again }) {
-  const { shadow } = again;
+// 실행 직전 마지막 확인. 기존 게이트 판정 전체(PR·파일·댓글·리뷰·권한)를 다시 계산해 첫 점검·두 번째 점검과 같은지 본다.
+// 근거는 댓글 수가 아니라 gateEvidence digest로 비교한다. 무관한 새 댓글은 digest를 바꾸지 않고, 누락된 목록은 막는다.
+async function finalRecheck({ github, repo, number, first, again }) {
   const [owner, name] = repo.split('/');
   const repoRef = { owner, repo: name };
-  const comments = github.list(`repos/${repo}/issues/${number}/comments`);
-  const requesting = mode === 'request-review';
-  const reviews = requesting ? github.list(`repos/${repo}/pulls/${number}/reviews`) : [];
-  const reviewComments = requesting ? github.list(`repos/${repo}/pulls/${number}/comments`) : [];
   const latest = github.api(`repos/${repo}/pulls/${number}`);
   assertPullRequestUnchanged(first.source, latest);
-  if (comments.length !== latest.comments || (requesting && reviewComments.length !== latest.review_comments)) return false;
-  if (requesting) {
-    // 같은 head 요청·대기·상한·한도 초과를 Shadow와 같은 함수로 다시 계산한다. 결과는 commit_sha로만 head에 연결된다.
-    const codex = evaluateCodexReview({ head: again.head, comments, reviews, reviewComments, bot: again.config.shadow.codexReviewer });
-    return planReviewRequest({ comments, codex, maxReviewRequests: again.config.shadow.maxReviewRequests, headSeenAt: shadow.headSeenAt }).allowed;
+  const evaluation = await evaluatePR({ github, repo: repoRef, pr: latest, config: again.config });
+  // current는 모든 목록을 조회한 뒤 다시 읽은 PR이다. 댓글 수가 다르면 목록이 불완전하다.
+  assertPullRequestUnchanged(first.source, evaluation.current);
+  if (!Number.isSafeInteger(evaluation.current.comments) || evaluation.comments.length !== evaluation.current.comments) return false;
+  const { description, decision, evidence } = evaluation;
+  if (decision.state !== 'success' || description.head !== first.head || description.fingerprint !== first.fingerprint) return false;
+  if (evidence.digest !== first.evidenceDigest || evidence.digest !== again.evidenceDigest) return false;
+  // 게이트 검사가 지금도 같은 근거의 성공(proof v2)이고, 필수 CI가 지금 head에서 성공인지 다시 본다.
+  const checkRuns = github.list(`repos/${repo}/commits/${first.head}/check-runs?filter=all`, 'check_runs');
+  await verifyGateSource({ check: latestGateCheck(checkRuns), pr: evaluation.current, fingerprint: description.fingerprint, evidenceDigest: evidence.digest,
+    repository: repo, defaultBranch: again.defaultBranch, api: github.api });
+  for (const required of again.config.shadow.requiredChecks) {
+    const check = latestCheckRun({ head: first.head, checkRuns, name: required.name, appId: required.appId });
+    if (check?.status !== 'completed' || check.conclusion !== 'success') return false;
   }
-  if (shadow.risk.risk !== 'high') return true;
-  // 같은 승인 댓글이 그대로 남아 있고(ID·작성자·본문·수정 시각), 지금도 같은 함수로 승인으로 판정돼야 한다(권한·head·fingerprint·변경 시각).
-  const used = again.approvalComment;
-  const now = comments.find(comment => comment.id === used?.id);
-  if (!used || !now || now.user?.id !== used.user?.id || now.body !== used.body || now.updated_at !== used.updated_at) return false;
-  const approval = await evaluateApproval({ github, repo: repoRef, number, head: again.head, fingerprint: again.fingerprint, comments, canConfirm: again.canConfirm });
-  return approval.state === 'approved' && approval.commentId === used.id;
+  if (again.shadow.risk.risk !== 'high') return true;
+  // 승인 댓글 내용·작성자 권한은 digest가 고정한다. 여기서는 같은 함수로 head·fingerprint·PR 변경 시각 조건을 다시 판정한다.
+  const approval = await evaluateApproval({ github, repo: repoRef, number, head: first.head, fingerprint: first.fingerprint, comments: evaluation.comments, canConfirm: evaluation.canConfirm });
+  return approval.state === 'approved' && approval.commentId === again.shadow.approval.commentId;
 }
 
 export async function runMergeTool({ argv, gh, git, out = console.log, err = console.error, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), lock = fileLock }) {
   const options = parseArgs(argv);
   if (!options) { err(usage); return 1; }
   const { repo, number } = options;
-  const mode = options.requestReview ? 'request-review' : options.auto ? 'auto' : 'manual';
-  const assess = () => assessMerge({ gh, git, repo, number, mode, expectedHead: options.head });
+  const assess = () => assessMerge({ gh, git, repo, number, expectedHead: options.head });
   if (options.dryRun) {
     // dry-run은 조회만 한다. 잠금 파일도 만들지 않는다.
     const assessment = await assess();
@@ -464,21 +502,21 @@ export async function runMergeTool({ argv, gh, git, out = console.log, err = con
     const first = await assess();
     out(formatAssessment(first, { dryRun: false }));
     if (!first.ok) return 1;
-    // 실행 직전에 모든 조건을 다시 조회한다. 그 사이 head·본문·파일·정책·판정이 바뀌면 진행하지 않는다.
+    // 실행 직전에 모든 조건을 다시 조회한다. 그 사이 head·본문·파일·정책·판정·근거가 바뀌면 진행하지 않는다.
     const again = await assess();
     const changed = async () => {
       try {
         assertPullRequestUnchanged(first.source, again.source);
-        return !await finalEvidenceHolds({ github: createGitHub({ gh, repo }), repo, number, mode, first, again });
+        return !await finalRecheck({ github: createGitHub({ gh, repo }), repo, number, first, again });
       } catch { return true; }
     };
-    if (!again.ok || again.head !== first.head || again.fingerprint !== first.fingerprint || again.shadow.risk.risk !== first.shadow.risk.risk || await changed()) {
+    if (!again.ok || again.head !== first.head || again.fingerprint !== first.fingerprint || again.evidenceDigest !== first.evidenceDigest
+        || again.shadow.risk.risk !== first.shadow.risk.risk || await changed()) {
       err('실행 직전 재확인에서 조건이 바뀌었습니다. 진행하지 않습니다. dry-run으로 다시 점검하세요.');
       return 1;
     }
-    // 여기서부터 GitHub 쓰기 호출까지의 경합은 병합 API의 --match-head-commit(head)과 브랜치 보호(strict·필수 검사)만 막는다.
-    // base·제목·본문과 승인·요청 댓글을 병합·댓글 API가 원자적으로 고정하지는 않는다.
-    if (mode === 'request-review') return postReviewRequest({ gh, repo, number, out, err });
+    // 여기서부터 병합 API 호출까지의 경합은 --match-head-commit(head)과 브랜치 보호(strict·필수 검사)만 막는다.
+    // base·제목·본문과 확인·보고서·승인 댓글, 작성자 권한을 병합 API가 원자적으로 고정하지는 않는다. 근거 변경은 병합 후 감사로 감지만 한다.
     return await mergeAndCleanup({ gh, git, repo, number, assessment: again, out, err, sleep });
   } finally {
     held.release();

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, runMergeTool } from './merge-pr-core.mjs';
+import { readFileSync } from 'node:fs';
+import { parseArgs, runMergeTool, trustedModules } from './merge-pr-core.mjs';
 import { createFake, sideEffects, head, newHead } from './merge-pr-fixture.mjs';
 
 // 가짜 gh·git을 직접 주입하므로 Windows·macOS·Linux 모두에서 실행한다.
@@ -21,28 +22,32 @@ async function run(options = {}, flags = [], { locked = false, store = {} } = {}
 const blocked = (result, pattern, label) => {
   assert.equal(result.status, 1, label);
   assert.deepEqual(result.effects, [], label);
+  assert.deepEqual(result.store.posted, [], label);
   if (pattern) assert.match(result.out, pattern, label);
 };
 
-test('인수: squash만 허용하고 모드 조합·SHA 형식을 검증', () => {
-  assert.deepEqual(parseArgs(['owner/repo', '7']), { repo: 'owner/repo', number: 7, dryRun: false, auto: false, requestReview: false, head: null });
+test('인수: squash만 허용하고 제거된 자동 병합·리뷰 요청 옵션과 잘못된 SHA는 거부', () => {
+  assert.deepEqual(parseArgs(['owner/repo', '7']), { repo: 'owner/repo', number: 7, dryRun: false, head: null });
   assert.equal(parseArgs(['owner/repo', '7', 'squash', '--dry-run', '--head', head]).head, head);
-  for (const argv of [['owner/repo', '7', 'merge'], ['owner/repo', '7', 'rebase'], ['owner/repo', '0'], ['repo', '7'], ['owner/repo', '7', '--auto', '--request-review'], ['owner/repo', '7', '--head', head.slice(0, 7)], ['owner/repo', '7', '--admin']]) {
+  for (const argv of [['owner/repo', '7', 'merge'], ['owner/repo', '7', 'rebase'], ['owner/repo', '0'], ['repo', '7'], ['owner/repo', '7', '--auto'], ['owner/repo', '7', '--request-review'],
+    ['owner/repo', '7', '--head', head.slice(0, 7)], ['owner/repo', '7', '--admin']]) {
     assert.equal(parseArgs(argv), null, argv.join(' '));
   }
 });
 
-test('High 정상: 승인·리뷰·CI 충족 시 squash 병합 1회와 조건부 브랜치 정리', async () => {
+test('High 정상: 승인·리뷰·CI 충족 시 squash 병합 1회, 병합 후 감사 통과, 조건부 브랜치 정리', async () => {
   const r = await run();
   assert.equal(r.status, 0, r.err);
   assert.equal(r.merges.length, 1);
   const merge = r.merges[0];
   assert.equal(merge[merge.indexOf('--match-head-commit') + 1], head);
   assert.match(r.out, /병합과 실제 제목 검증 완료/);
+  assert.match(r.out, /병합 후 감사: 게이트 근거가 병합 직전 재확인과 같음/);
   assert.match(r.out, /원격 feature\/safe-merge: GitHub 자동 삭제 확인/);
   assert.match(r.out, /로컬 feature\/safe-merge: 삭제함/);
   assert.equal(r.store.localSha, null);
   assert.equal(r.released, 1);
+  assert.deepEqual(r.store.posted, []);
 });
 
 test('Low·Medium 정상: 기존 게이트와 공통 조건을 충족하면 병합하고 사용자 승인은 요구하지 않음', async () => {
@@ -52,6 +57,8 @@ test('Low·Medium 정상: 기존 게이트와 공통 조건을 충족하면 병�
     assert.match(r.out, /사용자 승인: 불필요/);
     assert.equal(r.merges.length, 1);
   }
+  // 수동 병합은 Codex GitHub 리뷰가 없어도 기존 게이트의 관리자 확인으로 병합할 수 있다.
+  assert.equal((await run({ risk: 'medium', codex: 'none', approval: 'none' })).status, 0);
 });
 
 test('High 승인 누락·다른 head·다른 fingerprint·이전 형식·변경 이전 승인은 차단', async () => {
@@ -62,30 +69,8 @@ test('High 승인 누락·다른 head·다른 fingerprint·이전 형식·변경
   }
 });
 
-test('자동 병합은 설정이 꺼져 있으면 모든 조건을 충족해도 실행하지 않음', async () => {
-  const r = await run({}, ['--auto']);
-  blocked(r, /자동 병합 비활성/);
-  assert.match(r.out, /자동 병합 판정\(위험도 기준\): 후보 \//);
-});
-
-test('자동 병합(설정 활성): Low는 CI, Medium은 Codex 리뷰, High는 승인까지 필요', async () => {
-  const auto = (options, flags = []) => run({ autoMerge: true, ...options }, ['--auto', ...flags]);
-  assert.equal((await auto({ risk: 'low', codex: 'none', approval: 'none' })).status, 0);
-  assert.equal((await auto({ risk: 'medium', approval: 'none' })).status, 0);
-  assert.equal((await auto({})).status, 0);
-  for (const codex of ['none', 'stale', 'running', 'limit', 'spoof', 'findings']) {
-    blocked(await auto({ risk: 'medium', codex, approval: 'none' }), /Codex|차단 지적/, codex);
-  }
-  blocked(await auto({ approval: 'none' }), /사용자 승인/);
-  blocked(await auto({ risk: 'medium', implementedBy: 'codex', approval: 'none' }), /Codex 구현 PR/);
-  // 수동 모드에서는 Codex GitHub 리뷰가 없어도 기존 게이트의 관리자 확인으로 병합할 수 있다.
-  assert.equal((await run({ risk: 'medium', codex: 'none', approval: 'none' })).status, 0);
-});
-
 test('필수 CI 실패·취소·스킵·누락·진행 중과 출처 불일치는 차단', async () => {
-  for (const ci of ['failure', 'cancelled', 'skipped', 'missing', 'pending']) {
-    for (const flags of [[], ['--auto']]) blocked(await run({ ci, autoMerge: true }, flags), /필수 CI verify: /, `${ci} ${flags}`);
-  }
+  for (const ci of ['failure', 'cancelled', 'skipped', 'missing', 'pending']) blocked(await run({ ci }), /필수 CI verify: /, ci);
   blocked(await run({ ciSource: 'wrong-path' }), /verify 출처: 승인된 workflow 실행이 아님/);
   blocked(await run({ ciSource: 'other-event' }), /verify 출처: 승인된 workflow 실행이 아님/);
   blocked(await run({ risk: 'medium', approval: 'none', ciSource: 'changed' }), /verify 출처: PR에서 workflow 변경됨/);
@@ -107,6 +92,34 @@ test('기존 게이트 미통과·검사 출처 불일치·변경 요청·최신
   blocked(await run({ gateCheck: 'stale' }), /기존 게이트 검사의 출처·최신성 확인 실패/);
   blocked(await run({ behindBy: 1 }), /최신 base 반영: behind/);
   blocked(await run({ behindBy: 'error' }), /최신 base 반영: unknown/);
+});
+
+test('게이트 proof v1은 v2로 신뢰하지 않고 재실행을 안내하며, v2 근거 digest가 다르면 차단', async () => {
+  for (const risk of ['high', 'medium']) {
+    const options = risk === 'high' ? {} : { risk, approval: 'none' };
+    blocked(await run({ ...options, gateCheck: 'v1' }), /proof v1.*게이트를 다시 실행/, `${risk} v1`);
+    blocked(await run({ ...options, gateCheck: 'stale-evidence' }), /기존 게이트 판정 이후 리뷰 근거.*바뀜/, `${risk} stale-evidence`);
+  }
+  // dry-run도 같은 이유를 보여 주고 부작용이 없다.
+  blocked(await run({ gateCheck: 'v1' }, ['--dry-run']), /검사 출처: 확인 실패/);
+});
+
+test('판정 코드가 기본 브랜치와 다르거나 기본 브랜치에 없으면 실제 병합을 차단하고 dry-run은 참고용으로 표시', async () => {
+  blocked(await run({ code: 'changed' }), /판정 코드가 기본 브랜치와 다름\(review-gate-core\.mjs\)/);
+  blocked(await run({ code: 'missing' }), /판정 코드가 기본 브랜치와 다름\(merge-pr-core\.mjs\)/);
+  blocked(await run({ apiError: '/contents/.github/scripts/' }), /조회 실패: 기본 브랜치의 판정 코드/);
+  const dry = await run({ code: 'changed' }, ['--dry-run']);
+  blocked(dry, /판정 코드: 기본 브랜치와 다름 — review-gate-core\.mjs \(참고용 결과, 실제 병합 불가\)/);
+  // 코드 이외의 판정은 그대로 계산해 보여 준다.
+  assert.match(dry.out, /기존 게이트\(independent-review, 현재 필수\): success/);
+});
+
+test('판정 코드 목록은 병합 도구 진입점에서 실제로 불러오는 모든 로컬 모듈과 같음', () => {
+  const imports = name => [...readFileSync(new URL(`./${name}`, import.meta.url), 'utf8').matchAll(/from '\.\/([^']+)'/g)].map(match => match[1]);
+  const seen = new Set();
+  const visit = name => { if (seen.has(name)) return; seen.add(name); imports(name).forEach(visit); };
+  visit('merge-pr.mjs');
+  assert.deepEqual([...seen].sort(), [...trustedModules].sort());
 });
 
 test('PR 상태·대상 오류와 지정한 head 불일치는 차단', async () => {
@@ -132,33 +145,52 @@ test('점검 중 head 변경은 병합하지 않고, 마지막 확인 이후 변
 });
 
 // Codex 리뷰 P1(PR #7 4회차): 두 번째 점검 도중 PR이 바뀌어도 첫 점검 결과로 병합하면 안 된다.
-// Shadow 인라인 목록 조회 중(마지막 PR 재조회 전)과 브랜치 보호 조회 중(마지막 PR 재조회 뒤) 두 시점에서 바꾼다.
-test('두 번째 점검 도중 base·head·제목·본문·draft·닫힘 변경은 병합·요청하지 않음', async () => {
+// Shadow 인라인 목록 조회 중(마지막 PR 재조회 전), check suite 조회 중(재조회 뒤), 브랜치 보호 조회 중 세 시점에서 바꾼다.
+test('두 번째 점검 도중 base·head·제목·본문·draft·닫힘 변경은 병합하지 않음', async () => {
   const changes = {
     'base SHA': { baseSha: 'a'.repeat(40) }, 'base 브랜치': { baseRef: 'release' }, 'head SHA': { headSha: newHead },
     '제목': { title: 'fix: 바뀐 제목' }, '본문': { body: '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->\n바뀐 본문' },
     'draft 전환': { draft: true }, 'closed 전환': { state: 'closed' },
   };
-  // check-suites는 Shadow의 마지막 PR 재조회 뒤에 두 모드 모두 거친다. 브랜치 보호 조회는 병합 모드에만 있다.
   for (const at of ['pulls/1/comments', '/check-suites', 'branches/main/protection']) {
     for (const [label, change] of Object.entries(changes)) {
-      for (const flags of at.includes('protection') ? [[]] : [[], ['--request-review']]) {
-        const options = { prChangeAt: { at, nth: 2, change }, ...(flags.length ? { risk: 'medium', codex: 'none', requests: 0, approval: 'none' } : {}) };
-        const r = await run(options, flags);
-        const name = `${at} ${label} ${flags.join(' ')}`;
-        assert.equal(r.status, 1, name);
-        assert.equal(r.merges.length, 0, name);
-        assert.deepEqual(r.store.posted, [], name);
-        assert.deepEqual(r.effects, [], name);
-      }
+      const r = await run({ prChangeAt: { at, nth: 2, change } });
+      const name = `${at} ${label}`;
+      assert.equal(r.status, 1, name);
+      assert.equal(r.merges.length, 0, name);
+      assert.deepEqual(r.effects, [], name);
     }
   }
 });
 
-// Codex 리뷰 P1(PR #7 5회차): 두 번째 점검이 댓글을 모은 뒤 실행 전까지 바뀐 승인·요청 근거를 다시 확인해야 한다.
-// check-suites는 두 번째 점검에서 댓글을 모은 뒤 조회된다. 브랜치 보호는 Shadow의 승인 판정 뒤에 조회된다(병합 모드). 둘 다 두 번째(nth 2) 점검 시점이다.
-const afterSecondCollect = change => ({ commentChangeAt: { at: '/check-suites', nth: 2, change } });
+// Codex 리뷰 P1(PR #7 6회차): 실행 직전 재확인이 High 승인만 다시 판정하고, Low·Medium 근거는 댓글 수만 비교했다.
+// 두 번째 점검이 판정을 끝낸 뒤(브랜치 보호 조회 시점) 근거가 바뀐다. 수정 전 코드(e49fdd6)는 이 경우들에 병합했다.
 const afterSecondApproval = change => ({ commentChangeAt: { at: '/protection', nth: 2, change } });
+const evidenceChanges = ['edit-report', 'touch-report', 'delete-report', 'edit-confirmation', 'delete-confirmation', 'repost-confirmation', 'demote-approver', 'add-blocking'];
+
+test('실행 직전 보고서·확인 댓글 수정·삭제, 같은 본문 재작성, 확인자 권한 강등, 변경 요청 추가는 모든 위험도에서 병합 차단', async () => {
+  for (const [risk, options] of [['high', {}], ['medium', { risk: 'medium', approval: 'none' }], ['low', { risk: 'low', codex: 'none', approval: 'none' }]]) {
+    for (const change of evidenceChanges) {
+      // Low 확인 댓글에는 연결된 보고서가 없다.
+      if (risk === 'low' && change.endsWith('report')) continue;
+      const r = await run({ ...options, ...afterSecondApproval(change) });
+      const label = `${risk} ${change}`;
+      assert.equal(r.status, 1, label);
+      assert.equal(r.merges.length, 0, label);
+      assert.deepEqual(r.effects, [], label);
+      assert.match(r.err, /재확인에서 조건이 바뀌었습니다/, label);
+    }
+  }
+});
+
+test('첫 점검과 두 번째 점검 사이 근거 변경도 게이트 proof와 달라 병합 차단', async () => {
+  for (const change of ['edit-report', 'repost-confirmation', 'demote-approver']) {
+    const r = await run({ risk: 'medium', approval: 'none', commentChangeAt: { at: '/protection', nth: 1, change } });
+    assert.equal(r.status, 1, change);
+    assert.equal(r.merges.length, 0, change);
+    assert.deepEqual(r.effects, [], change);
+  }
+});
 
 test('High 승인 댓글 삭제·본문 수정·수정 이력·작성자 권한 변경은 실행 직전 재확인에서 병합 차단', async () => {
   for (const change of ['delete-approval', 'edit-approval', 'touch-approval', 'demote-approver']) {
@@ -170,47 +202,49 @@ test('High 승인 댓글 삭제·본문 수정·수정 이력·작성자 권한 
   }
 });
 
-test('리뷰 요청 직전 같은 head 요청 추가·PR당 상한 도달은 요청하지 않음', async () => {
-  const request = options => run({ risk: 'medium', codex: 'none', approval: 'none', ...options }, ['--request-review']);
-  const duplicate = await request({ requests: 0, ...afterSecondCollect('add-request') });
-  assert.equal(duplicate.status, 1);
-  assert.deepEqual(duplicate.store.posted, []);
-  // 이전 head 요청 2회(head가 처음 보인 시각 이전) + 실행 중 요청 1회 = 상한 3회.
-  const cap = await request({ requests: 2, headSeenAt: '2026-10-27T15:00:00Z', ...afterSecondCollect('add-request') });
-  assert.equal(cap.status, 1);
-  assert.deepEqual(cap.store.posted, []);
-  // 같은 조건에서 실행 중 요청이 없으면 이전 head 요청 2회로는 막지 않는다.
-  const allowed = await request({ requests: 2, headSeenAt: '2026-10-27T15:00:00Z' });
-  assert.equal(allowed.status, 0, allowed.err);
-  assert.deepEqual(allowed.store.posted, ['body=@codex review']);
+test('실행 중 추가된 무관한 봇 댓글만으로는 근거가 바뀌지 않아 병합을 막지 않음', async () => {
+  for (const at of ['/check-suites', '/protection']) {
+    const r = await run({ commentChangeAt: { at, nth: 2, change: 'add-bot' } });
+    assert.equal(r.status, 0, `${at} ${r.err}`);
+    assert.equal(r.merges.length, 1);
+  }
 });
 
-test('실행 중 추가된 무관한 봇 댓글만으로는 병합·리뷰 요청을 막지 않음', async () => {
-  const merge = await run(afterSecondCollect('add-bot'));
-  assert.equal(merge.status, 0, merge.err);
-  assert.equal(merge.merges.length, 1);
-  const request = await run({ risk: 'medium', codex: 'none', approval: 'none', requests: 0, ...afterSecondCollect('add-bot') }, ['--request-review']);
-  assert.equal(request.status, 0, request.err);
-  assert.deepEqual(request.store.posted, ['body=@codex review']);
-});
-
-test('실행 직전 댓글 재조회 실패·불완전한 목록은 병합·리뷰 요청하지 않음', async () => {
-  const requestOptions = { risk: 'medium', codex: 'none', approval: 'none', requests: 0 };
+test('실행 직전 재조회 실패·불완전한 댓글 목록은 병합하지 않음', async () => {
   // 세 번째 조회가 실행 직전 재확인이다.
-  for (const [options, flags, label] of [
-    [{ failAt: { at: '/issues/1/comments', nth: 3 } }, [], '병합: 댓글 재조회 실패'],
-    [{ ...requestOptions, failAt: { at: '/issues/1/comments', nth: 3 } }, ['--request-review'], '요청: 댓글 재조회 실패'],
-    [{ ...requestOptions, failAt: { at: '/pulls/1/reviews', nth: 3 } }, ['--request-review'], '요청: 리뷰 재조회 실패'],
-    // 일반 댓글 목록을 받은 뒤 PR 정보를 다시 받기 전에 새 요청이 생기면 목록이 불완전하다.
-    [{ ...requestOptions, commentChangeAt: { at: '/pulls/1/comments', nth: 3, change: 'add-request' } }, ['--request-review'], '요청: 재조회 중 새 댓글'],
+  for (const [options, label] of [
+    [{ failAt: { at: '/issues/1/comments', nth: 3 } }, '댓글 재조회 실패'],
+    [{ failAt: { at: '/pulls/1/reviews', nth: 3 } }, '리뷰 재조회 실패'],
+    [{ failAt: { at: '/pulls/1/files', nth: 3 } }, '파일 재조회 실패'],
+    [{ failAt: { at: '/check-runs', nth: 3 } }, 'check 재조회 실패'],
+    // 댓글 목록을 받은 뒤 PR을 다시 받기 전에 새 댓글이 생기면 목록이 불완전하다(무관한 봇 댓글이라도).
+    [{ commentChangeAt: { at: '/pulls/1/reviews', nth: 3, change: 'add-bot' } }, '재조회 중 새 댓글'],
   ]) {
-    const r = await run(options, flags);
+    const r = await run(options);
     assert.equal(r.status, 1, label);
     assert.deepEqual(r.effects, [], label);
-    assert.deepEqual(r.store.posted, [], label);
     assert.match(r.err, /재확인에서 조건이 바뀌었습니다/, label);
     assert.doesNotMatch(r.out + r.err, /server error|HTTP 5/, label);
   }
+});
+
+test('병합 후 감사: 병합 중 근거가 바뀌면 심각 경고를 내고 되돌리거나 정리하지 않으며, 무관한 댓글은 통과', async () => {
+  for (const change of ['edit-report', 'delete-confirmation', 'demote-approver', 'add-blocking']) {
+    const r = await run({ commentChangeAtMerge: change });
+    assert.equal(r.status, 1, change);
+    assert.equal(r.merges.length, 1, change);
+    assert.match(r.err, /\[심각\] 병합 후 감사: 게이트 근거.*병합 직전 재확인과 다릅니다/, change);
+    assert.match(r.err, /자동으로 되돌리지 않습니다/, change);
+    assert.deepEqual(r.effects, r.merges, `${change}: 병합 외 부작용(브랜치 정리) 없음`);
+  }
+  // 감사 조회 실패는 같다고 보지 않는다. 병합 전 세 번 + 감사 한 번.
+  const unknown = await run({ failAt: { at: '/issues/1/comments', nth: 4 } });
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.err, /\[심각\] 병합 후 감사: 게이트 근거를 다시 조회하지 못해/);
+  assert.deepEqual(unknown.effects, unknown.merges);
+  const bot = await run({ commentChangeAtMerge: 'add-bot' });
+  assert.equal(bot.status, 0, bot.err);
+  assert.match(bot.out, /병합 후 감사: 게이트 근거가 병합 직전 재확인과 같음/);
 });
 
 test('중복 실행: 잠금이 있으면 아무 조회·병합도 하지 않고, 이미 병합된 PR은 다시 병합하지 않음', async () => {
@@ -227,7 +261,7 @@ test('중복 실행: 잠금이 있으면 아무 조회·병합도 하지 않고,
 });
 
 test('GitHub API 오류는 원시 오류 없이 차단', async () => {
-  for (const path of ['/issues/1/comments', '/pulls/1/comments', '/check-runs', '/contents/.ai/review-config.json', '/actions/runs?head_sha']) {
+  for (const path of ['/issues/1/comments', '/pulls/1/comments', '/pulls/1/reviews', '/check-runs', '/contents/.ai/review-config.json', '/actions/runs?head_sha', '/collaborators/']) {
     const r = await run({ apiError: path });
     blocked(r, /조회 실패|평가 실패|판정 불가|출처/, path);
     assert.doesNotMatch(r.out + r.err, /server error|HTTP 500/, path);
@@ -292,30 +326,18 @@ test('로컬 브랜치: 미커밋 변경·다른 worktree·체크아웃 중·SHA
 });
 
 test('dry-run은 어떤 상황에서도 병합·댓글·삭제·잠금을 하지 않고 판정과 정리 계획을 보여 줌', async () => {
-  for (const [options, flags, status] of [[{}, [], 0], [{ approval: 'none' }, [], 1], [{}, ['--auto'], 1], [{ codex: 'none', requests: 0 }, ['--request-review'], 0], [{ ci: 'failure' }, [], 1]]) {
-    const r = await run(options, ['--dry-run', ...flags], { locked: true });
-    assert.equal(r.status, status, JSON.stringify({ options, flags }));
+  for (const [options, status] of [[{}, 0], [{ approval: 'none' }, 1], [{ ci: 'failure' }, 1], [{ gateCheck: 'v1' }, 1], [{ code: 'changed' }, 1]]) {
+    const r = await run(options, ['--dry-run'], { locked: true });
+    assert.equal(r.status, status, JSON.stringify(options));
     assert.deepEqual(r.effects, []);
+    assert.deepEqual(r.store.posted, []);
+    assert.equal(r.released, 0);
     assert.match(r.out, /\[dry-run: 병합·댓글·브랜치 삭제 없음\]/);
   }
   const r = await run({}, ['--dry-run']);
-  for (const pattern of [/위험도: high/, /필수 CI: verify success/, /독립 리뷰\(Codex GitHub\): clean/, /사용자 승인: 필요 — approved/, /현재 병합 가능: 예/, /병합 후 브랜치 정리 예정/, /로컬 feature\/safe-merge: 삭제 예정/]) {
+  for (const pattern of [/위험도: high/, /필수 CI: verify success/, /독립 리뷰\(Codex GitHub\): clean/, /사용자 승인: 필요 — approved/, /검사 출처: 확인됨\(proof v2, 근거 일치\)/,
+    /판정 근거 digest: [a-f0-9]{64}/, /판정 코드: 기본 브랜치와 같음/, /Shadow 자동 판정 후보\(관찰용, 병합 조건 아님\)/, /현재 병합 가능: 예/, /병합 후 브랜치 정리 예정/, /로컬 feature\/safe-merge: 삭제 예정/]) {
     assert.match(r.out, pattern);
   }
-});
-
-test('리뷰 요청: 같은 head 대기·상한·한도 초과·Low·Codex 구현은 요청하지 않고, 가능할 때 1회만 작성', async () => {
-  const request = (options, flags = []) => run({ codex: 'none', requests: 0, ...options }, ['--request-review', ...flags]);
-  const ok = await request({ risk: 'medium' });
-  assert.equal(ok.status, 0, ok.out);
-  assert.deepEqual(ok.store.posted, ['body=@codex review']);
-  for (const [options, pattern] of [
-    [{ requests: 1 }, /응답 대기/], [{ requests: 3 }, /상한 3회/], [{ codex: 'limit' }, /사용량 한도/], [{ codex: 'clean', requests: 1 }, /이미 리뷰 결과/],
-    [{ risk: 'low' }, /Low는 Codex 리뷰 요청 대상 아님/], [{ implementedBy: 'codex' }, /Codex 구현 PR/], [{ draft: true }, /draft/],
-    [{ headRepo: 'someone/fork' }, /다른 저장소\(fork\)의 PR/],
-  ]) {
-    const r = await request(options);
-    blocked(r, pattern, JSON.stringify(options));
-    assert.deepEqual(r.store.posted, []);
-  }
+  assert.doesNotMatch(r.out, /리뷰 요청|자동 병합 설정/);
 });

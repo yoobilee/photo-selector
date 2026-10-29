@@ -54,8 +54,5 @@
       "appId": 1144995
     },
     "maxReviewRequests": 3
-  },
-  "autoMerge": {
-    "enabled": false
   }
 }

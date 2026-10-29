@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { describe, sha256 } from './review-gate-core.mjs';
+import { describe, gateEvidence, sha256 } from './review-gate-core.mjs';
+import { gitBlobSha, trustedModules } from './merge-pr-core.mjs';
 import { approvalText } from './review-shadow-core.mjs';
 
 // 병합 도구 테스트용 가짜 gh·git. GitHub API 응답 형식과 실제 Codex GitHub 응답 원문을 사용한다.
@@ -16,6 +17,7 @@ export const mergeSha = 'c'.repeat(40);
 export const branch = 'feature/safe-merge';
 export const title = 'fix: 한글 제목 "인용"과 $(명령) 보존';
 const admin = { id: 1, login: 'owner', type: 'User' };
+const peer = { id: 2, login: 'peer', type: 'User' };
 const actionsApp = { id: 15368, slug: 'github-actions' };
 const profiles = {
   low: { filename: 'README.md', sensitive: 'no' },
@@ -40,7 +42,7 @@ export function createFake(options = {}, store = {}) {
   const o = {
     risk: 'high', implementedBy: 'claude', gate: true, codex: 'clean', approval: 'valid', requests: 1, lastEditedAt: null,
     ci: 'success', ciSource: 'ok', behindBy: 0, strict: true, enforceAdmins: true, verifyPinned: true, prChecks: true, gateCheck: 'ok',
-    autoMerge: false, deleteOnMerge: true, remoteAfterMerge: 'deleted', otherHeadPr: false, otherBasePr: false, branchProtected: false,
+    code: 'same', deleteOnMerge: true, remoteAfterMerge: 'deleted', otherHeadPr: false, otherBasePr: false, branchProtected: false,
     headChangeAtChecks: null, merge: 'ok', badSubject: false, apiError: null, state: 'open', draft: false, headRepo: repo, local: {},
     ...options,
   };
@@ -53,7 +55,7 @@ export function createFake(options = {}, store = {}) {
   store.localSha ??= local.exists ? local.sha : null;
   store.posted ??= [];
 
-  const config = { ...JSON.parse(approvedConfig), autoMerge: { enabled: o.autoMerge } };
+  const config = JSON.parse(approvedConfig);
   const profile = profiles[o.risk];
   const files = [{ filename: profile.filename, status: 'modified' }];
   const body = o.body ?? `<!-- ai-review\nimplemented-by: ${o.implementedBy}\nrisk: ${o.risk}\nsensitive-change: ${profile.sensitive}\n-->\nCloses #7`;
@@ -70,11 +72,11 @@ export function createFake(options = {}, store = {}) {
   const original = describe(prAt(head), files, config);
   const comments = [];
   if (o.gate) {
-    const confirm = data => ({ id: 11, user: admin, created_at: '2026-10-27T15:01:00Z', body: `/review-gate\n\`\`\`json\n${JSON.stringify({ fingerprint: original.fingerprint, ...data })}\n\`\`\`` });
+    const confirm = data => ({ id: 11, user: admin, created_at: '2026-10-27T15:01:00Z', updated_at: '2026-10-27T15:01:00Z', body: `/review-gate\n\`\`\`json\n${JSON.stringify({ fingerprint: original.fingerprint, ...data })}\n\`\`\`` });
     if (o.risk === 'low') comments.push(confirm({ decision: 'skip', reason: '문서만 변경' }));
     else {
       const report = `# 독립 리뷰 보고서\nHEAD: ${head}\nBASE: ${base}\n독립 리뷰 완료`;
-      comments.push({ id: 10, user: admin, created_at: '2026-10-27T15:00:00Z', body: report });
+      comments.push({ id: 10, user: admin, created_at: '2026-10-27T15:00:00Z', updated_at: '2026-10-27T15:00:00Z', body: report });
       comments.push(confirm({ decision: 'pass', reviewer: 'codex', reviewComplete: true, evidence: 'https://github.com/owner/repo/pull/1#issuecomment-10', evidenceHash: sha256(report), findings: { critical: 0, high: 0, medium: 0, low: 0 } }));
     }
   }
@@ -107,11 +109,32 @@ export function createFake(options = {}, store = {}) {
       case 'touch-approval': return comments.map(comment => comment.id === 40 ? { ...comment, updated_at: '2026-10-28T02:00:00Z' } : comment);
       case 'add-request': return [...comments, { id: 60, user: admin, created_at: '2026-10-28T03:00:00Z', body: '@codex review' }];
       case 'add-bot': return [...comments, { ...clone(real.photoSelectorPr5.environmentNotice), created_at: '2026-10-28T03:00:00Z' }];
+      // 기존 게이트 근거(보고서 10, 확인 11)의 수정·삭제·같은 본문 재작성.
+      case 'edit-report': return comments.map(comment => comment.id === 10 ? { ...comment, body: `${comment.body}\n추가 메모`, updated_at: '2026-10-28T02:00:00Z' } : comment);
+      case 'touch-report': return comments.map(comment => comment.id === 10 ? { ...comment, updated_at: '2026-10-28T02:00:00Z' } : comment);
+      case 'delete-report': return comments.filter(comment => comment.id !== 10);
+      case 'edit-confirmation': return comments.map(comment => comment.id === 11 ? { ...comment, body: `${comment.body}\n`, updated_at: '2026-10-28T02:00:00Z' } : comment);
+      case 'delete-confirmation': return comments.filter(comment => comment.id !== 11);
+      case 'repost-confirmation': return [...comments.filter(comment => comment.id !== 11), { ...comments.find(comment => comment.id === 11), id: 70, created_at: '2026-10-28T02:00:00Z', updated_at: '2026-10-28T02:00:00Z' }];
       default: return comments;
     }
   };
+  // store.commentChange === 'add-blocking': 쓰기 권한자의 변경 요청 리뷰가 추가된 상황.
+  const liveReviews = () => store.commentChange === 'add-blocking'
+    ? [...reviews, { id: 80, user: peer, state: 'CHANGES_REQUESTED', commit_id: head, submitted_at: '2026-10-28T02:00:00Z', body: '수정 필요' }]
+    : reviews;
 
-  const gateProof = { pr: 1, fingerprint: o.gateCheck === 'stale' ? 'stale' : original.fingerprint, runId: '42', attempt: '1' };
+  // 게이트가 처음 상태로 판정했을 때의 근거. 게이트 코드와 별개로 근거 댓글을 직접 골라 같은 digest가 나오는지 함께 확인한다.
+  const byIdOf = id => comments.find(comment => comment.id === id);
+  const initialEvidence = gateEvidence({
+    confirmation: byIdOf(11) && { comment: byIdOf(11), role: 'admin' }, report: byIdOf(10) && { comment: byIdOf(10), role: 'admin' },
+    approvals: byIdOf(40) ? [{ comment: byIdOf(40), role: 'admin' }] : [], blocking: [],
+  });
+  // o.gateCheck: 'v1'(근거 없는 이전 proof), 'stale-evidence'(다른 근거로 판정한 v2 proof), 'stale'(이전 fingerprint)
+  const gateProof = o.gateCheck === 'v1'
+    ? { pr: 1, fingerprint: original.fingerprint, runId: '42', attempt: '1' }
+    : { v: 2, pr: 1, fingerprint: o.gateCheck === 'stale' ? 'stale' : original.fingerprint,
+      evidenceDigest: o.gateCheck === 'stale-evidence' ? '0'.repeat(64) : initialEvidence.digest, runId: '42', attempt: '1' };
   const checkRuns = () => [
     { id: 99, name: 'independent-review', head_sha: head, status: 'completed', conclusion: o.gate ? 'success' : 'failure',
       app: o.gateCheck === 'wrong-app' ? { id: 1, slug: 'other' } : actionsApp, external_id: JSON.stringify(gateProof), details_url: 'https://github.com/owner/repo/actions/runs/42' },
@@ -148,9 +171,10 @@ export function createFake(options = {}, store = {}) {
     if (p.startsWith(`repos/${repo}/pulls?state=open&base=`)) return [o.otherBasePr ? [{ number: 3 }] : []];
     if (p === `repos/${repo}/pulls?state=open`) return [store.merged || o.state !== 'open' ? [] : [prAt(store.head)]];
     if (p === `repos/${repo}/pulls/1/files`) return [files];
-    if (p === `repos/${repo}/pulls/1/reviews`) return [reviews];
+    if (p === `repos/${repo}/pulls/1/reviews`) return [liveReviews()];
     if (p === `repos/${repo}/pulls/1/comments`) return [reviewComments];
     if (p === `repos/${repo}/issues/1/comments`) return [liveComments()];
+    if (p === `repos/${repo}/collaborators/peer/permission`) return { permission: 'write' };
     if (p === `repos/${repo}/collaborators/owner/permission`) return { permission: store.commentChange === 'demote-approver' ? 'read' : 'admin' };
     if (p === `repos/${repo}/contents/.ai/review-config.json?ref=main`) return { encoding: 'base64', content: Buffer.from(JSON.stringify(config)).toString('base64') };
     if (p === `repos/${repo}/commits/${store.head}/check-runs?filter=all` || p === `repos/${repo}/commits/${store.head}/check-runs`) return [{ check_runs: checkRuns() }];
@@ -166,6 +190,13 @@ export function createFake(options = {}, store = {}) {
     if (p === `repos/${repo}/contents/.github/workflows/ci.yml?ref=main`) return { sha: 'ci-approved' };
     if (p === `repos/${repo}/contents/.github/workflows/ci.yml?ref=${store.head}`) return { sha: o.ciSource === 'changed' ? 'ci-changed' : 'ci-approved' };
     if (p === `repos/${repo}/branches/main/protection`) return protection;
+    // 기본 브랜치의 판정 코드. o.code: 'same'(지금 실행 중인 파일과 같음), 'changed'(한 파일이 다름), 'missing'(기본 브랜치에 없음)
+    for (const name of trustedModules) {
+      if (p !== `repos/${repo}/contents/.github/scripts/${name}?ref=main`) continue;
+      if (o.code === 'missing' && name === 'merge-pr-core.mjs') throw failure('Not Found', 404);
+      const local = gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'));
+      return { sha: o.code === 'changed' && name === 'review-gate-core.mjs' ? '0'.repeat(40) : local };
+    }
     if (p === `repos/${repo}/commits/${mergeSha}`) return { commit: { message: o.badSubject ? 'Merge pull request #1' : `${title}\n\nCloses #7` } };
     if (p === `repos/${repo}/git/ref/heads/${branch}`) {
       if (!store.remote.exists) throw failure('Not Found', 404);
@@ -193,6 +224,8 @@ export function createFake(options = {}, store = {}) {
       if (value('--subject') !== title || readFileSync(value('--body-file'), 'utf8') !== body) throw failure('message mismatch', 422);
       if (o.merge === 'fail') throw failure('merge failed', 405);
       store.merged = true;
+      // 마지막 재확인 뒤 병합 API 처리 중 근거가 바뀐 상황(병합 후 감사 대상).
+      if (o.commentChangeAtMerge) store.commentChange = o.commentChangeAtMerge;
       if (o.remoteAfterMerge === 'deleted') store.remote = { exists: false };
       if (o.remoteAfterMerge === 'moved') store.remote = { exists: true, sha: 'f'.repeat(40) };
       if (o.merge === 'fail-after-merge') throw failure('timeout', 502);
@@ -200,10 +233,10 @@ export function createFake(options = {}, store = {}) {
     }
     if (args[0] !== 'api') throw failure('unexpected command');
     if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { lastEditedAt: o.lastEditedAt, timelineItems: { nodes: [] } } } } });
-    if (args.includes('-f')) {
-      if (args[1] !== `repos/${repo}/issues/1/comments`) throw failure('unexpected write');
-      store.posted.push(args[args.indexOf('-f') + 1]);
-      return JSON.stringify({ id: 9001 });
+    // 병합 도구는 댓글·API 쓰기를 하지 않는다. 쓰기 시도는 기록하고 실패시킨다.
+    if (args.includes('-f') || args.includes('-X')) {
+      store.posted.push(args.slice(1));
+      throw failure('unexpected write');
     }
     return JSON.stringify(route(args[1]));
   }

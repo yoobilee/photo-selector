@@ -1,4 +1,4 @@
-import { normalizeNewlines } from './review-gate-core.mjs';
+import { approvalCommand, isApprovalComment, normalizeNewlines } from './review-gate-core.mjs';
 
 // Shadow 판정은 관찰용이다. 기존 independent-review 판정과 check 게시를 바꾸지 않는다.
 const shaPattern = /^[a-f0-9]{40}$/;
@@ -7,11 +7,10 @@ const summaryMarker = '<!-- codex-pull-request-review-summary -->';
 const statePattern = /<!-- codex-review-state:v1 (\{.*\}) -->/;
 const usageLimitPrefix = 'You have reached your Codex usage limits';
 const reviewRequest = '@codex review';
-// 기존 게이트는 `/review-gate`로 시작하는 최신 관리자 댓글을 확인으로 읽는다. 승인 댓글이 기존 판정을 바꾸지 않도록 별도 명령을 쓴다.
-export const approvalCommand = '/merge-approve';
+// 승인 명령(`/merge-approve`)은 게이트 근거와 함께 쓰므로 review-gate-core.mjs에 둔다.
+export { approvalCommand, isApprovalComment };
 // 승인은 전체 head SHA와 PR fingerprint를 함께 고정한다. 본문·제목·base·파일·정책이 바뀌면 fingerprint가 달라져 이전 승인이 무효가 된다.
 const approvalPattern = /^\/merge-approve ([a-f0-9]{40}) ([a-f0-9]{64})$/;
-export const isApprovalComment = body => normalizeNewlines(body).trim().startsWith(`${approvalCommand} `);
 export const approvalText = (head, fingerprint) => `${approvalCommand} ${head} ${fingerprint}`;
 
 const matchesPrefix = (path, prefixes) => prefixes.some(prefix => path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`));

@@ -266,7 +266,7 @@ const gateMetadata = '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensit
 const approveFor = (body = gateMetadata, created_at = '2026-10-27T16:00:00Z') => {
   const files = [{ filename: '.github/scripts/review-gate.mjs', status: 'modified' }];
   const { fingerprint } = describePR({ title: 'fix: 권한 확인 누락 수정', body, head: { sha: head }, base: { sha: 'b'.repeat(40) } }, files, config);
-  return { id: 50, user: admin, body: approvalText(head, fingerprint), created_at };
+  return { id: 50, user: admin, body: approvalText(head, fingerprint), created_at, updated_at: created_at };
 };
 // prCounts: pulls.get 호출 순서(runGate 시작 → evaluatePR 재확인 → Shadow 인라인 조회 후)별로 PR 정보를 바꾼다.
 async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewComments = false, extraComments = [], body, lastEditedAt = null, checkRuns, behindBy = 0, prCounts = [], reviewComments = [] } = {}) {
@@ -278,8 +278,8 @@ async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewCom
   const report = `# 독립 리뷰 보고서\nHEAD: ${d.head}\nBASE: ${d.base}\n완료`.replace(/\n/g, lineEnding);
   const confirmation = { fingerprint: d.fingerprint, decision: 'pass', reviewer: 'codex', reviewComplete: true, evidence: 'https://github.com/owner/repo/pull/7#issuecomment-10', evidenceHash: sha256(report.replace(/\r\n?/g, '\n')), findings: { critical: 0, high: 0, medium: 0, low: 0 } };
   let comments = [
-    { id: 10, user: admin, body: report, created_at: '2026-10-27T15:00:00Z' },
-    { id: 11, user: admin, body: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\``.replace(/\n/g, lineEnding), created_at: '2026-10-27T15:01:00Z' },
+    { id: 10, user: admin, body: report, created_at: '2026-10-27T15:00:00Z', updated_at: '2026-10-27T15:00:00Z' },
+    { id: 11, user: admin, body: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\``.replace(/\n/g, lineEnding), created_at: '2026-10-27T15:01:00Z', updated_at: '2026-10-27T15:01:00Z' },
     { id: 6444483731, user: admin, body: '@codex review', created_at: '2026-10-27T14:21:52Z' },
     real.photoSelectorPr5.reviewSummaryCompleted, real.photoSelectorPr5.reviewReceipt, ...extraComments,
   ];

@@ -77,7 +77,7 @@ Claude Code로 구현한 변경은 [Codex plugin for Claude Code](https://github
 
 게이트는 같은 실행에서 위험도별 **Shadow 판정**도 계산해 Actions Summary에만 남깁니다. Low·Medium·High 자동 판정 후보 여부, 필수 CI, Codex GitHub 리뷰 결과, 사용자 승인, 기존 게이트와의 차이를 보여 주며 병합 조건에는 쓰이지 않습니다. 설정과 판정 기준은 [리뷰 게이트 설정](.ai/checklists/review-gate-setup.md#6-shadow-판정관찰용)에 있습니다.
 
-PR 병합은 개발자 컴퓨터에서 [병합 도구](.ai/checklists/review-gate-setup.md#7-병합-도구)로 squash 병합합니다. 먼저 `node .github/scripts/merge-pr.mjs yoobilee/photo-selector PR번호 --dry-run`으로 위험도, 필수 검사, 리뷰·승인 상태와 병합을 막는 이유를 확인합니다. 위험도 기준 자동 병합(`--auto`)은 구현되어 있지만 기본 브랜치 설정에서 꺼져 있습니다.
+PR 병합은 개발자 컴퓨터에서 [병합 도구](.ai/checklists/review-gate-setup.md#7-병합-도구)로 squash 병합합니다. 먼저 `node .github/scripts/merge-pr.mjs yoobilee/photo-selector PR번호 --dry-run`으로 위험도, 필수 검사, 리뷰·승인 상태와 병합을 막는 이유를 확인합니다. 병합 도구는 기본 브랜치에 승인된 판정 코드로만 병합하며, 위험도 기준 자동 병합과 Codex 리뷰 자동 요청은 제공하지 않습니다.
 
 - [리뷰 게이트 설정과 확인 댓글 형식](.ai/checklists/review-gate-setup.md)
 - [위험도와 독립 검증 기준](.ai/policies/verification.md)

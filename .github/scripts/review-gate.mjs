@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { describe, parseConfirmation, decide, validateConfig, blockingReviews, isReportBody, normalizeNewlines, reportHash, assertPullRequestUnchanged } from './review-gate-core.mjs';
+import { describe, parseConfirmation, decide, validateConfig, blockingReviews, isReportBody, normalizeNewlines, reportHash, assertPullRequestUnchanged, gateEvidence, isApprovalComment } from './review-gate-core.mjs';
 import { formatShadowSummary } from './review-shadow-core.mjs';
 import { evaluateShadow } from './review-shadow.mjs';
 
-export async function evaluatePR({ github, repo, pr, config, summary }) {
-  validateConfig(config);
+// 저장소 권한 조회. 협업자가 아님(404)만 권한 없음으로 보고 그 밖의 실패는 그대로 던진다.
+export function permissionReader({ github, repo }) {
   const permission = async user => {
     if (!user) return 'none';
     try {
@@ -16,6 +16,46 @@ export async function evaluatePR({ github, repo, pr, config, summary }) {
     }
   };
   const canConfirm = async user => user?.type === 'User' && ['admin','maintain'].includes(await permission(user));
+  return { permission, canConfirm };
+}
+
+// 확인 댓글·연결된 보고서·변경 요청 리뷰·High 승인 댓글을 골라 판정 입력과 근거 digest를 만든다.
+// 게이트 판정, 병합 도구의 실행 직전 재확인과 병합 후 감사가 같은 함수를 쓴다.
+export async function collectReviewBasis({ repo, number, comments, reviews, permission, canConfirm }) {
+  const withRole = async comment => ({ comment, role: await permission(comment.user) });
+  let confirmation; let confirmationComment = null;
+  for (const candidate of comments.filter(comment => /^\/review-gate(?:\s|$)/.test(comment.body ?? '')).sort((a,b)=>Number(b.id)-Number(a.id))) {
+    if (await canConfirm(candidate.user)) { confirmationComment=candidate; confirmation=parseConfirmation(candidate.body); break; }
+  }
+  let evidence; let reportComment = null;
+  if (confirmation?.evidence) {
+    const prefix=`https://github.com/${repo.owner}/${repo.repo}/pull/${number}#issuecomment-`;
+    const url=confirmation.evidence;
+    if (typeof url!=='string' || !url.startsWith(prefix) || !/^\d+$/.test(url.slice(prefix.length))) throw new Error('다른 PR 또는 잘못된 근거 링크');
+    const report=comments.find(comment=>String(comment.id)===url.slice(prefix.length));
+    if (!report || !isReportBody(report.body) || !await canConfirm(report.user)) throw new Error('유효한 관리자 보고서 없음');
+    const reportBody=normalizeNewlines(report.body);
+    evidence={body:reportBody,hash:reportHash(reportBody)};
+    reportComment=report;
+  }
+  let blocked=false;
+  const blocking=[];
+  for (const review of blockingReviews(reviews)) {
+    const role=await permission(review.user);
+    blocking.push({review,role});
+    if (['admin','maintain','write'].includes(role)) blocked=true;
+  }
+  const approvals=[];
+  for (const comment of comments) if (isApprovalComment(comment.body) && await canConfirm(comment.user)) approvals.push(await withRole(comment));
+  const basis=gateEvidence({
+    confirmation:confirmationComment && await withRole(confirmationComment), report:reportComment && await withRole(reportComment), approvals, blocking,
+  });
+  return {confirmation,evidence,blocked,gateEvidence:basis};
+}
+
+export async function evaluatePR({ github, repo, pr, config, summary }) {
+  validateConfig(config);
+  const { permission, canConfirm } = permissionReader({ github, repo });
   const allPrs = await github.paginate(github.rest.pulls.list, {...repo,state:'open',per_page:100});
   if (allPrs.filter(open => open.head.sha === pr.head.sha).length !== 1) throw new Error('같은 head를 공유하는 PR 또는 조회 불일치');
   const files = await github.paginate(github.rest.pulls.listFiles, {...repo,pull_number:pr.number,per_page:100});
@@ -29,31 +69,16 @@ export async function evaluatePR({ github, repo, pr, config, summary }) {
       summary?.addRaw(`\n보고서 댓글 ID: ${report.id}\n\n보고서 SHA-256: ${reportHash(reportBody)}\n\n`);
     }
   }
-  let confirmation;
-  for (const candidate of comments.filter(comment => /^\/review-gate(?:\s|$)/.test(comment.body ?? '')).sort((a,b)=>Number(b.id)-Number(a.id))) {
-    if (await canConfirm(candidate.user)) { confirmation=parseConfirmation(candidate.body); break; }
-  }
-  let evidence;
-  if (confirmation?.evidence) {
-    const prefix=`https://github.com/${repo.owner}/${repo.repo}/pull/${pr.number}#issuecomment-`;
-    const url=confirmation.evidence;
-    if (typeof url!=='string' || !url.startsWith(prefix) || !/^\d+$/.test(url.slice(prefix.length))) throw new Error('다른 PR 또는 잘못된 근거 링크');
-    const report=comments.find(comment=>String(comment.id)===url.slice(prefix.length));
-    if (!report || !isReportBody(report.body) || !await canConfirm(report.user)) throw new Error('유효한 관리자 보고서 없음');
-    const reportBody=normalizeNewlines(report.body);
-    evidence={body:reportBody,hash:reportHash(reportBody)};
-  }
-  let decision=decide(description,confirmation,evidence);
   const reviews=await github.paginate(github.rest.pulls.listReviews,{...repo,pull_number:pr.number,per_page:100});
-  let blocked=false;
-  for (const review of blockingReviews(reviews)) {
-    if (['admin','maintain','write'].includes(await permission(review.user))) {blocked=true;decision={state:'failure',reason:'해제되지 않은 변경 요청 리뷰가 남아 있습니다.'};}
-  }
+  const {confirmation,evidence,blocked,gateEvidence:basis}=await collectReviewBasis({repo,number:pr.number,comments,reviews,permission,canConfirm});
+  let decision=decide(description,confirmation,evidence);
+  if (blocked) decision={state:'failure',reason:'해제되지 않은 변경 요청 리뷰가 남아 있습니다.'};
   const now=(await github.rest.pulls.get({...repo,pull_number:pr.number})).data;
   // state·draft·head·base·제목·본문·파일 수를 공용 기준으로 비교한다. Shadow와 병합 도구도 같은 함수를 쓴다.
   assertPullRequestUnchanged(pr,now);
-  // 판정 이외의 값은 Shadow 판정이 같은 조회 결과를 재사용하기 위한 것이다.
-  return {description,decision,files,comments,reviews,blocked,canConfirm,current:now};
+  // 판정 이외의 값은 Shadow 판정과 병합 도구가 같은 조회 결과를 재사용하기 위한 것이다.
+  // current는 모든 목록을 조회한 뒤 다시 받은 PR이다. 병합 도구는 이 값의 댓글 수로 목록 완전성을 확인한다.
+  return {description,decision,files,comments,reviews,blocked,canConfirm,current:now,evidence:basis};
 }
 
 // Shadow 판정은 Summary에만 기록한다. 오류가 나도 기존 check와 실행 결과에 영향을 주지 않는다.
@@ -89,7 +114,8 @@ export async function runGate({github,context,core}) {
       check=created.data.id;
       const evaluation=await evaluatePR({github,repo,pr,config,summary:core.summary});
       const {description,decision}=evaluation;
-      const proof={pr:pr.number,fingerprint:description.fingerprint,runId:String(context.runId),attempt:String(context.runAttempt ?? process.env.GITHUB_RUN_ATTEMPT ?? '1')};
+      // proof v2: 판정한 PR 상태(fingerprint)와 판정 근거(evidenceDigest)를 함께 기록한다. 병합 도구는 v1 proof를 신뢰하지 않는다.
+      const proof={v:2,pr:pr.number,fingerprint:description.fingerprint,evidenceDigest:evaluation.evidence.digest,runId:String(context.runId),attempt:String(context.runAttempt ?? process.env.GITHUB_RUN_ATTEMPT ?? '1')};
       await github.rest.checks.update({...repo,check_run_id:check,status:'completed',conclusion:decision.state,
         external_id:JSON.stringify(proof),output:{title:decision.reason,summary:`PR #${pr.number}: ${decision.state}`,text:JSON.stringify(proof)}});
       core.summary.addRaw(`\nPR #${pr.number}: ${decision.state} — ${decision.reason}\n`);

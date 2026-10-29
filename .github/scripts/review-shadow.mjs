@@ -65,12 +65,12 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
 
   const baseSync = await baseSyncState({ github, repo, base: description.base, head });
   const shadowDecision = decideShadow({ risk: risk.risk, meta: description.meta, checks, codex, approval, blocked, request, maxReviewRequests: shadow.maxReviewRequests, baseSync });
-  // headSeenAt은 병합 도구가 리뷰 요청 직전에 같은 기준으로 요청 가능 여부를 다시 계산할 때 쓴다.
-  return { head, meta: description.meta, risk, checks, codex, approval, request, headSeenAt, baseSync, decision: shadowDecision, comparison: compareWithGate(shadowDecision, decision), fingerprint: description.fingerprint };
+  return { head, risk, checks, codex, approval, request, baseSync, decision: shadowDecision, comparison: compareWithGate(shadowDecision, decision), fingerprint: description.fingerprint };
 }
 
 // High 병합 승인은 기존 `/review-gate` 리뷰 확인과 별개의 명시적 명령으로만 인정한다.
 // Shadow 판정과 병합 도구의 실행 직전 재확인이 같은 함수로 승인자 권한·작성 시각·head·fingerprint를 확인한다.
+// 승인 댓글의 내용·작성자 권한 변경은 게이트 근거 digest(gateEvidence)가 따로 고정한다.
 export async function evaluateApproval({ github, repo, number, head, fingerprint, comments, canConfirm }) {
   if (!comments.some(comment => isApprovalComment(comment.body))) return { state: 'none' };
   const confirmers = new Set();
