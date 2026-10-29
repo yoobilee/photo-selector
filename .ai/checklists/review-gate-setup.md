@@ -220,7 +220,7 @@ node .github/scripts/merge-pr.mjs owner/repo PR번호 squash --head <SHA>       
 - 다시 계산한 값의 일치 조건
   - 게이트 판정이 성공이고, fingerprint와 근거 digest가 첫 점검·두 번째 점검과 같다.
   - 최신 게이트 check의 proof v2 digest와도 같다.
-  - 필수 CI가 현재 head에서 성공이다.
+  - 필수 CI의 최신 check가 두 번째 점검에서 출처를 확인한 check와 같은 ID이고, 같은 `requiredCheckSource`로 workflow 출처(승인된 `ci.yml`의 `pull_request` 실행)를 다시 확인해도 통과한다. 그 사이 같은 이름의 check가 새로 생기거나 바뀌었으면(정상 재실행 포함) 차단하고 dry-run부터 다시 실행한다.
 - 근거는 댓글 수가 아니라 digest로 비교한다. 그래서 다음은 모두 차단된다.
   - 보고서·확인 댓글·승인 댓글의 수정·삭제(본문이 같아도 수정 시각 변경 포함)
   - 같은 본문을 다른 ID로 재작성

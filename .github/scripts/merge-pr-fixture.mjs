@@ -135,15 +135,36 @@ export function createFake(options = {}, store = {}) {
     ? { pr: 1, fingerprint: original.fingerprint, runId: '42', attempt: '1' }
     : { v: 2, pr: 1, fingerprint: o.gateCheck === 'stale' ? 'stale' : original.fingerprint,
       evidenceDigest: o.gateCheck === 'stale-evidence' ? '0'.repeat(64) : initialEvidence.digest, runId: '42', attempt: '1' };
-  const checkRuns = () => [
-    { id: 99, name: 'independent-review', head_sha: head, status: 'completed', conclusion: o.gate ? 'success' : 'failure',
-      app: o.gateCheck === 'wrong-app' ? { id: 1, slug: 'other' } : actionsApp, external_id: JSON.stringify(gateProof), details_url: 'https://github.com/owner/repo/actions/runs/42' },
-    ...(o.ci === 'missing' ? [] : [{ id: 100, name: 'verify', head_sha: head, check_suite: { id: 500 }, app: actionsApp,
-      status: o.ci === 'pending' ? 'in_progress' : 'completed', conclusion: o.ci === 'pending' ? null : o.ci }]),
-  ];
+  // store.checkChange(또는 처음부터 o.checkChange): 같은 이름의 verify check가 새로 게시되거나 기존 check를 대체한 상황.
+  // add-*는 기존 check(100)를 두고 더 새 check(101)를 더하고, replace-*는 기존 check를 없애고 101만 남긴다.
+  store.checkChange ??= o.checkChange ?? null;
+  const verifyChanges = {
+    'add-other-workflow': { keep: true, path: '.github/workflows/other.yml' },
+    'add-other-event': { keep: true, event: 'push' },
+    'add-legit-rerun': { keep: true },
+    'replace-other-workflow': { keep: false, path: '.github/workflows/other.yml' },
+    'replace-other-app': { keep: false, app: { id: 1, slug: 'other' } },
+    'replace-other-head': { keep: false, headSha: 'd'.repeat(40) },
+  };
+  const checkRuns = () => {
+    const change = verifyChanges[store.checkChange];
+    const original = o.ci === 'missing' || change?.keep === false ? [] : [{ id: 100, name: 'verify', head_sha: head, check_suite: { id: 500 }, app: actionsApp,
+      status: o.ci === 'pending' ? 'in_progress' : 'completed', conclusion: o.ci === 'pending' ? null : o.ci }];
+    const added = change ? [{ id: 101, name: 'verify', head_sha: change.headSha ?? head, check_suite: { id: 501 }, app: change.app ?? actionsApp, status: 'completed', conclusion: 'success' }] : [];
+    return [
+      { id: 99, name: 'independent-review', head_sha: head, status: 'completed', conclusion: o.gate ? 'success' : 'failure',
+        app: o.gateCheck === 'wrong-app' ? { id: 1, slug: 'other' } : actionsApp, external_id: JSON.stringify(gateProof), details_url: 'https://github.com/owner/repo/actions/runs/42' },
+      ...original, ...added,
+    ];
+  };
   const ciRun = { id: 77, check_suite_id: 500, path: o.ciSource === 'wrong-path' ? '.github/workflows/other.yml' : '.github/workflows/ci.yml',
     event: o.ciSource === 'other-event' ? 'push' : 'pull_request', head_sha: head, status: 'completed', conclusion: o.ci === 'success' ? 'success' : 'failure',
     repository: { full_name: repo }, head_repository: { full_name: o.headRepo } };
+  // 새 verify check(101)를 게시한 workflow 실행.
+  const changedRun = () => {
+    const change = verifyChanges[store.checkChange];
+    return change ? [{ ...ciRun, id: 78, check_suite_id: 501, path: change.path ?? ciRun.path, event: change.event ?? 'pull_request', conclusion: 'success' }] : [];
+  };
   const protection = { required_status_checks: { strict: o.strict, checks: [{ context: 'independent-review', app_id: 15368 }, ...(o.verifyPinned ? [{ context: 'verify', app_id: 15368 }] : [])] }, enforce_admins: { enabled: o.enforceAdmins } };
 
   function route(path) {
@@ -155,6 +176,11 @@ export function createFake(options = {}, store = {}) {
     if (o.commentChangeAt && path.includes(o.commentChangeAt.at)) {
       store.commentChangeHits = (store.commentChangeHits ?? 0) + 1;
       if (store.commentChangeHits === o.commentChangeAt.nth) store.commentChange = o.commentChangeAt.change;
+    }
+    // o.checkChangeAt: { at: 경로 일부, nth: 몇 번째 조회, change } — 해당 조회 직후부터 verify check가 바뀐다(store.checkChange).
+    if (o.checkChangeAt && path.includes(o.checkChangeAt.at)) {
+      store.checkChangeHits = (store.checkChangeHits ?? 0) + 1;
+      if (store.checkChangeHits === o.checkChangeAt.nth) store.checkChange = o.checkChangeAt.change;
     }
     // o.prChangeAt: { at: 경로 일부, nth: 몇 번째 조회, change } — 해당 조회 직후부터 PR 정보가 바뀐다.
     if (o.prChangeAt && path.includes(o.prChangeAt.at)) {
@@ -185,9 +211,10 @@ export function createFake(options = {}, store = {}) {
     }
     if (p === `repos/${repo}/actions/workflows/independent-review.yml`) return { id: 4 };
     if (p === `repos/${repo}/actions/runs/42`) return { workflow_id: 4, path: '.github/workflows/independent-review.yml', status: 'completed', conclusion: 'success', run_attempt: 1, repository: { full_name: repo }, head_repository: { full_name: repo }, event: 'pull_request_target', head_sha: 'd'.repeat(40) };
-    if (p === `repos/${repo}/actions/runs?head_sha=${store.head}`) return [{ workflow_runs: [ciRun] }];
+    if (p === `repos/${repo}/actions/runs?head_sha=${store.head}`) return [{ workflow_runs: [ciRun, ...changedRun()] }];
     if (p.startsWith(`repos/${repo}/contents/.github/workflows/independent-review.yml?ref=`)) return { sha: 'gate-approved' };
-    if (p === `repos/${repo}/contents/.github/workflows/ci.yml?ref=main`) return { sha: 'ci-approved' };
+    // 'main-workflow-updated': 같은 check여도 기본 브랜치의 승인된 ci.yml이 바뀌어 출처가 더 이상 승인 버전이 아닌 상황.
+    if (p === `repos/${repo}/contents/.github/workflows/ci.yml?ref=main`) return { sha: store.checkChange === 'main-workflow-updated' ? 'ci-updated' : 'ci-approved' };
     if (p === `repos/${repo}/contents/.github/workflows/ci.yml?ref=${store.head}`) return { sha: o.ciSource === 'changed' ? 'ci-changed' : 'ci-approved' };
     if (p === `repos/${repo}/branches/main/protection`) return protection;
     // 기본 브랜치의 판정 코드. o.code: 'same'(지금 실행 중인 파일과 같음), 'changed'(한 파일이 다름), 'missing'(기본 브랜치에 없음)

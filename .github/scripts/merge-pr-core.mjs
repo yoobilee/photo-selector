@@ -124,6 +124,8 @@ function requiredCheckSource({ github, repo, head, defaultBranch, check, workflo
   return executed === approved ? 'verified' : 'changed';
 }
 const sourceLabels = { verified: '승인된 workflow 확인', changed: 'PR에서 workflow 변경됨', untrusted: '승인된 workflow 실행이 아님', unconfigured: '출처 workflow 설정 없음', error: '조회 실패' };
+// CI workflow 변경은 고위험 경로라 High 승인 대상이다. 그 밖의 위험도에서 보이면 분류 오류로 보고 멈춘다.
+const acceptedSource = (source, risk) => source === 'changed' ? risk === 'high' : source === 'verified';
 
 function protectionProblems({ protection, gateAppId, requiredChecks }) {
   const status = protection?.required_status_checks;
@@ -267,14 +269,12 @@ export async function assessMerge({ gh, git, repo, number, expectedHead = null }
   for (const required of config.shadow.requiredChecks) {
     const state = shadow.checks.find(check => check.name === required.name)?.state ?? 'missing';
     if (state !== 'success') { blockers.add(`필수 CI ${required.name}: ${state}`); continue; }
+    const check = latestCheckRun({ head, checkRuns, name: required.name, appId: required.appId });
     let source;
-    try {
-      source = requiredCheckSource({ github, repo, head, defaultBranch, workflow: required.workflow,
-        check: latestCheckRun({ head, checkRuns, name: required.name, appId: required.appId }) });
-    } catch { source = 'error'; }
-    assessment.checkSources.push({ name: required.name, source });
-    // CI workflow 변경은 고위험 경로라 High 승인 대상이다. 그 밖의 위험도에서 보이면 분류 오류로 보고 멈춘다.
-    if (source === 'changed' ? risk !== 'high' : source !== 'verified') blockers.add(`필수 CI ${required.name} 출처: ${sourceLabels[source]}`);
+    try { source = requiredCheckSource({ github, repo, head, defaultBranch, workflow: required.workflow, check }); } catch { source = 'error'; }
+    // 최종 재확인은 출처를 확인한 바로 이 check인지 ID로 비교한다.
+    assessment.checkSources.push({ name: required.name, source, checkId: check?.id ?? null });
+    if (!acceptedSource(source, risk)) blockers.add(`필수 CI ${required.name} 출처: ${sourceLabels[source]}`);
   }
   if (shadow.baseSync !== 'current') blockers.add(`최신 base 반영: ${shadow.baseSync}`);
   if (evaluation.blocked) blockers.add('해제되지 않은 변경 요청 리뷰');
@@ -474,7 +474,12 @@ async function finalRecheck({ github, repo, number, first, again }) {
     repository: repo, defaultBranch: again.defaultBranch, api: github.api });
   for (const required of again.config.shadow.requiredChecks) {
     const check = latestCheckRun({ head: first.head, checkRuns, name: required.name, appId: required.appId });
-    if (check?.status !== 'completed' || check.conclusion !== 'success') return false;
+    // 두 번째 점검에서 출처를 확인한 check가 여전히 최신이어야 한다. 그 사이 새 check가 생기거나 바뀌었으면(정상 재실행 포함) 조건이 바뀐 것이다.
+    const verified = again.checkSources.find(item => item.name === required.name);
+    if (!Number.isSafeInteger(check?.id) || check.id !== verified?.checkId) return false;
+    // 같은 check여도 이전 확인을 재사용하지 않고 같은 함수로 workflow 출처를 다시 확인한다. 조회 실패는 오류로 던져 차단한다.
+    const source = requiredCheckSource({ github, repo, head: first.head, defaultBranch: again.defaultBranch, workflow: required.workflow, check });
+    if (!acceptedSource(source, again.shadow.risk.risk)) return false;
   }
   if (again.shadow.risk.risk !== 'high') return true;
   // 승인 댓글 내용·작성자 권한은 digest가 고정한다. 여기서는 같은 함수로 head·fingerprint·PR 변경 시각 조건을 다시 판정한다.

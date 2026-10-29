@@ -79,6 +79,45 @@ test('필수 CI 실패·취소·스킵·누락·진행 중과 출처 불일치�
   blocked(await run({ prChecks: false }), /gh pr checks --required/);
 });
 
+// Codex 리뷰 P2(PR #7 7회차): 최종 재확인이 verify check를 이름·앱·head만으로 받아들이고 workflow 출처를 다시 확인하지 않았다.
+// 두 번째 점검이 판정을 끝낸 뒤(브랜치 보호 조회 시점) 같은 이름의 check가 새로 생기거나 기존 check를 대체한다.
+const checkChangedAfterSecond = change => ({ checkChangeAt: { at: '/protection', nth: 2, change } });
+
+test('최종 재확인 직전 다른 workflow·이벤트·앱·head의 verify check나 교체된 check는 병합·삭제·댓글 없이 차단', async () => {
+  for (const change of ['add-other-workflow', 'add-other-event', 'add-legit-rerun', 'replace-other-workflow', 'replace-other-app', 'replace-other-head']) {
+    for (const [risk, options] of [['high', {}], ['medium', { risk: 'medium', approval: 'none' }]]) {
+      const r = await run({ ...options, ...checkChangedAfterSecond(change) });
+      const label = `${risk} ${change}`;
+      assert.equal(r.status, 1, label);
+      assert.equal(r.merges.length, 0, label);
+      assert.deepEqual(r.effects, [], label);
+      assert.deepEqual(r.store.posted, [], label);
+      assert.match(r.err, /재확인에서 조건이 바뀌었습니다/, label);
+    }
+  }
+});
+
+test('최종 재확인의 CI 출처 조회 실패는 차단하고, 처음부터 정상 workflow의 새 성공 check는 그대로 인정', async () => {
+  // workflow 실행 목록 조회는 첫 점검·두 번째 점검·최종 재확인에서 한 번씩 일어난다.
+  const failed = await run({ failAt: { at: '/actions/runs?head_sha', nth: 3 } });
+  assert.equal(failed.status, 1);
+  assert.equal(failed.merges.length, 0);
+  assert.deepEqual(failed.effects, []);
+  assert.doesNotMatch(failed.out + failed.err, /server error|HTTP 5/);
+  // 점검 전부터 있던 정상 재실행 check(101)는 세 번 모두 같은 check의 출처를 확인하므로 병합한다.
+  const rerun = await run({ checkChange: 'add-legit-rerun' });
+  assert.equal(rerun.status, 0, rerun.err);
+  assert.equal(rerun.merges.length, 1);
+  // 같은 check여도 이전 출처 확인을 재사용하지 않는다. 그 사이 기본 브랜치의 ci.yml이 바뀌면 Medium은 차단한다(High는 기존 규칙대로 허용).
+  const moved = await run({ risk: 'medium', approval: 'none', ...checkChangedAfterSecond('main-workflow-updated') });
+  assert.equal(moved.status, 1);
+  assert.equal(moved.merges.length, 0);
+  assert.deepEqual(moved.effects, []);
+  assert.match(moved.err, /재확인에서 조건이 바뀌었습니다/);
+  // 점검 전부터 있던 다른 workflow의 새 check는 첫 점검에서 이미 차단된다.
+  blocked(await run({ checkChange: 'add-other-workflow' }), /verify 출처: 승인된 workflow 실행이 아님/);
+});
+
 test('브랜치 보호 미설정·조회 실패는 권한을 높이거나 생략하지 않고 차단', async () => {
   blocked(await run({ strict: false }), /strict/);
   blocked(await run({ enforceAdmins: false }), /enforce_admins/);
