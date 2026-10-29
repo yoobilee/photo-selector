@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validTitle, parseMetadata, describe, decide, sha256, parseConfirmation, blockingReviews, normalizeNewlines, reportHash } from './review-gate-core.mjs';
+import { validTitle, parseMetadata, describe, decide, sha256, parseConfirmation, blockingReviews, normalizeNewlines, reportHash, assertPullRequestUnchanged, pullRequestSnapshot, gateEvidence } from './review-gate-core.mjs';
 import { runGate } from './review-gate.mjs';
+import { verifyGateSource } from './review-gate-source.mjs';
 
 const config = JSON.parse(readFileSync(new URL('../../.ai/review-config.json', import.meta.url)));
 const metadata = (agent = 'claude', risk = 'high', sensitive = 'yes') => `<!-- ai-review\nimplemented-by: ${agent}\nrisk: ${risk}\nsensitive-change: ${sensitive}\n-->`;
-const pr = (body = metadata()) => ({ number: 1, title: 'fix: 권한 확인 누락 수정', body, state: 'open', changed_files: 1, head: { sha: 'a'.repeat(40) }, base: { sha: 'b'.repeat(40) } });
+// 실제 PR API 응답처럼 draft·ref·저장소를 갖춘다. 공용 PR 변경 감지 함수는 값이 하나라도 없으면 실패한다.
+const side = (sha, ref) => ({ sha, ref, repo: { full_name: 'owner/repo' } });
+const pr = (body = metadata()) => ({ number: 1, title: 'fix: 권한 확인 누락 수정', body, state: 'open', draft: false, changed_files: 1, head: side('a'.repeat(40), 'fix/auth'), base: side('b'.repeat(40), 'main') });
 const files = [{ filename: 'src/auth.ts', status: 'modified' }];
 const reportFor = d => `# 독립 리뷰 보고서\nHEAD: ${d.head}\nBASE: ${d.base}\n독립 리뷰 완료. 인증 경계를 확인했습니다.`;
 const confirmationFor = d => ({ fingerprint: d.fingerprint, decision: 'pass', reviewer: d.reviewer, reviewComplete: true, evidence: 'https://github.com/owner/repo/pull/1#issuecomment-10', evidenceHash: sha256(reportFor(d)), findings: { critical: 0, high: 0, medium: 0, low: 0 } });
@@ -105,7 +108,7 @@ test('CRLF·CR 확인 댓글도 같은 내용으로 해석', () => {
   for (const ending of ['\r\n', '\r']) assert.deepEqual(parseConfirmation(withLineEnding(lf, ending)), c);
 });
 
-async function integration({permission='admin', role_name, type='User', changed=false, partial=false, malformed=false, reviews=[], apiFailure=false, mutateEvidence=false, duplicate=false, peerPermission='write', newestInvalid=false, otherEvidence=false, noPR=false, push=false, lineEnding='\n', reportPrefix=''}={}) {
+async function integration({permission='admin', role_name, type='User', changed=false, partial=false, malformed=false, reviews=[], apiFailure=false, mutateEvidence=false, duplicate=false, peerPermission='write', newestInvalid=false, otherEvidence=false, noPR=false, push=false, lineEnding='\n', reportPrefix='', extraComments=[]}={}) {
   const current = pr();
   const d = describe(current, files, config);
   const c = confirmationFor(d);
@@ -113,15 +116,18 @@ async function integration({permission='admin', role_name, type='User', changed=
   const statuses = [];
   const summaryLines = [];
   const users = {login:'maintainer',id:1,type};
+  // 실제 GitHub 댓글처럼 작성·수정 시각을 둔다. 게이트 근거(gateEvidence)는 시각이 없으면 실패한다.
+  const at = {created_at:'2026-10-27T15:00:00Z',updated_at:'2026-10-27T15:00:00Z'};
   const comments = [
-    {id:10,user:users,body:withLineEnding(reportPrefix+reportFor(d)+(mutateEvidence?'변경':''),lineEnding)},
-    {id:11,user:users,body:withLineEnding(malformed?'/review-gate\n```json\n{bad}\n```':`/review-gate\n\`\`\`json\n${JSON.stringify(c)}\n\`\`\``,lineEnding)},
+    {id:10,user:users,...at,body:withLineEnding(reportPrefix+reportFor(d)+(mutateEvidence?'변경':''),lineEnding)},
+    {id:11,user:users,...at,body:withLineEnding(malformed?'/review-gate\n```json\n{bad}\n```':`/review-gate\n\`\`\`json\n${JSON.stringify(c)}\n\`\`\``,lineEnding)},
   ];
-  if (newestInvalid) comments.push({id:12,user:users,body:'/review-gate\n```json\n{invalid}\n```'});
+  comments.push(...extraComments);
+  if (newestInvalid) comments.push({id:12,user:users,...at,body:'/review-gate\n```json\n{invalid}\n```'});
   let gets=0;
   const github = {
     rest:{
-      pulls:{list:async()=>({data:duplicate?[current,{...current,number:2}]:[current]}),get:async()=>({data:changed && ++gets>1?{...current,head:{sha:'c'.repeat(40)}}:current}),listFiles:async()=>({data:partial?[]:files}),listReviews:async()=>({data:reviews})},
+      pulls:{list:async()=>({data:duplicate?[current,{...current,number:2}]:[current]}),get:async()=>({data:changed && ++gets>1?{...current,head:{...current.head,sha:'c'.repeat(40)}}:current}),listFiles:async()=>({data:partial?[]:files}),listReviews:async()=>({data:reviews})},
       issues:{listComments:async()=>{if(apiFailure)throw new Error('sensitive response');return {data:comments};}},
       repos:{getCollaboratorPermissionLevel:async args=>({data:args.username==='peer'?{permission:peerPermission}:{permission,role_name}})},
       checks:{create:async()=>({data:{id:99}}),update:async value=>{statuses.push({...value,state:value.conclusion});}},
@@ -203,7 +209,7 @@ test('프롬프트·체크리스트·내부 액션은 고위험이고 block.ts�
 
 // 정상 PR을 실패 PR 앞뒤에 배치해 판정과 후속 처리가 모두 격리되는지 확인한다.
 async function multiplePRs({invalid='draft',cleanupFailure=false,createFailure=false}={}) {
-  const prs=[1,2,3].map(number=>({...pr(),number,head:{sha:String(number).repeat(40)}}));
+  const prs=[1,2,3].map(number=>({...pr(),number,head:side(String(number).repeat(40),`fix/pr-${number}`)}));
   if (invalid==='draft') prs[1].draft=true;
   if (invalid==='title') prs[1].title='chore: automated dependency update';
   if (invalid==='metadata') prs[1].body='metadata 없음';
@@ -223,7 +229,8 @@ async function multiplePRs({invalid='draft',cleanupFailure=false,createFailure=f
       const d=describe(p,files,config);
       const c={...confirmationFor(d),evidence:`https://github.com/owner/repo/pull/${p.number}#issuecomment-10`};
       const user={id:1,login:'maintainer',type:'User'};
-      return {data:[{id:10,user,body:reportFor(d)},{id:11,user,body:`/review-gate\n\`\`\`json\n${JSON.stringify(c)}\n\`\`\``}]};
+      const at={created_at:'2026-10-27T15:00:00Z',updated_at:'2026-10-27T15:00:00Z'};
+      return {data:[{id:10,user,...at,body:reportFor(d)},{id:11,user,...at,body:`/review-gate\n\`\`\`json\n${JSON.stringify(c)}\n\`\`\``}]};
     }},
     repos:{getCollaboratorPermissionLevel:async()=>({data:{permission:'admin'}})},
     checks:{
@@ -271,4 +278,92 @@ test('check 생성 오류도 성공으로 바꾸지 않고 이후 PR 평가를 �
   assert.equal(r.checks.get(3).conclusion,'success');
   assert.equal(r.summaryWritten,true);
   assert.equal(r.failure,true);
+});
+
+// 게이트·Shadow·병합 도구가 함께 쓰는 PR 변경 감지. 이전 게이트는 base 브랜치·저장소·파일 수를 비교하지 않았다.
+test('공용 PR 변경 감지: 판정 근거 값이 바뀌거나 검토 불가 상태면 실패', () => {
+  const original = pr();
+  assert.deepEqual(assertPullRequestUnchanged(original, structuredClone(original)), pullRequestSnapshot(original));
+  // 댓글 수 등 판정 근거가 아닌 값의 변화는 허용한다.
+  assertPullRequestUnchanged(original, { ...original, comments: 9, updated_at: '2026-10-28T00:00:00Z' });
+  assertPullRequestUnchanged({ ...original, body: null }, { ...original, body: '' });
+  const changes = {
+    'base SHA': { base: { ...original.base, sha: 'c'.repeat(40) } }, 'base 브랜치': { base: { ...original.base, ref: 'release' } },
+    'base 저장소': { base: { ...original.base, repo: { full_name: 'other/repo' } } }, 'head SHA': { head: { ...original.head, sha: 'c'.repeat(40) } },
+    'head 브랜치': { head: { ...original.head, ref: 'other' } }, 'head 저장소(fork)': { head: { ...original.head, repo: { full_name: 'someone/fork' } } },
+    '제목': { title: 'fix: 바뀐 제목' }, '본문': { body: `${metadata()}\n바뀐 본문` }, 'draft': { draft: true }, 'closed': { state: 'closed' },
+    '파일 수': { changed_files: 2 }, 'PR 번호': { number: 2 },
+  };
+  for (const [label, change] of Object.entries(changes)) assert.throws(() => assertPullRequestUnchanged(original, { ...original, ...change }), /PR 변경/, label);
+  // 시작 시점부터 검토 불가 상태면 같은 값이어도 실패한다.
+  assert.throws(() => assertPullRequestUnchanged({ ...original, draft: true }, { ...original, draft: true }), /검토 준비 전/);
+  // 값이 없으면 비교할 수 없으므로 실패한다(fork 저장소 삭제 등).
+  for (const missing of [{ draft: undefined }, { changed_files: undefined }, { head: { ...original.head, repo: null } }, { base: { ...original.base, ref: '' } }, { head: { sha: 'a'.repeat(40) } }, { title: undefined }]) {
+    assert.throws(() => assertPullRequestUnchanged(original, { ...original, ...missing }), /누락/, JSON.stringify(missing));
+    assert.throws(() => assertPullRequestUnchanged({ ...original, ...missing }, original), /누락/, JSON.stringify(missing));
+  }
+});
+
+// 게이트 판정 근거(proof v2). 댓글 수가 아니라 근거 댓글·리뷰의 ID·작성자·시각·본문·현재 권한을 고정한다.
+const evidenceComment = (id, body, change = {}) => ({ id, body, user: { id: 1, login: 'maintainer', type: 'User' }, created_at: '2026-10-27T15:00:00Z', updated_at: '2026-10-27T15:00:00Z', ...change });
+
+test('근거 digest: 입력 순서와 무관하고 ID·작성자·수정 시각·본문·권한·변경 요청이 바뀌면 달라짐', () => {
+  const confirmation = { comment: evidenceComment(11, '/review-gate'), role: 'admin' };
+  const report = { comment: evidenceComment(10, '# 독립 리뷰 보고서\n완료'), role: 'admin' };
+  const approvals = [{ comment: evidenceComment(40, '/merge-approve a'), role: 'admin' }, { comment: evidenceComment(41, '/merge-approve b'), role: 'maintain' }];
+  const blocking = [{ review: { id: 5, user: { id: 2 }, state: 'CHANGES_REQUESTED' }, role: 'read' }];
+  const base = gateEvidence({ confirmation, report, approvals, blocking });
+  assert.match(base.digest, /^[a-f0-9]{64}$/);
+  assert.equal(gateEvidence({ confirmation, report, approvals: [...approvals].reverse(), blocking }).digest, base.digest);
+  const variants = {
+    '같은 본문 다른 ID': { confirmation: { ...confirmation, comment: { ...confirmation.comment, id: 12 } } },
+    '보고서 본문 수정': { report: { ...report, comment: { ...report.comment, body: `${report.comment.body}!` } } },
+    '본문 그대로 수정 시각만 변경': { report: { ...report, comment: { ...report.comment, updated_at: '2026-10-28T00:00:00Z' } } },
+    '확인자 권한 변경': { confirmation: { ...confirmation, role: 'write' } },
+    '작성자 변경': { confirmation: { ...confirmation, comment: { ...confirmation.comment, user: { id: 3, login: 'other', type: 'User' } } } },
+    '보고서 삭제': { report: null },
+    '승인 삭제': { approvals: approvals.slice(1) },
+    '변경 요청자 권한 변경': { blocking: [{ ...blocking[0], role: 'write' }] },
+    '변경 요청 추가': { blocking: [...blocking, { review: { id: 6, user: { id: 4 }, state: 'CHANGES_REQUESTED' }, role: 'write' }] },
+  };
+  for (const [label, change] of Object.entries(variants)) {
+    assert.notEqual(gateEvidence({ confirmation, report, approvals, blocking, ...change }).digest, base.digest, label);
+  }
+  // 값이 없으면 같은지 비교할 수 없으므로 실패한다.
+  for (const missing of [{ updated_at: undefined }, { created_at: 'x' }, { user: null }, { id: '11' }, { body: undefined }]) {
+    assert.throws(() => gateEvidence({ confirmation: { ...confirmation, comment: { ...confirmation.comment, ...missing } } }), /근거 댓글 형식 오류/, JSON.stringify(missing));
+  }
+  assert.throws(() => gateEvidence({ blocking: [{ review: { id: 5, user: null, state: 'CHANGES_REQUESTED' }, role: 'read' }] }), /근거 리뷰 형식 오류/);
+});
+
+test('게이트는 proof v2(fingerprint와 근거 digest)를 기록하고, 무관한 댓글은 digest를 바꾸지 않음', async () => {
+  const base = await integration();
+  const proof = JSON.parse(base.statuses.at(-1).external_id);
+  assert.equal(base.statuses.at(-1).state, 'success');
+  assert.equal(proof.v, 2);
+  assert.match(proof.evidenceDigest, /^[a-f0-9]{64}$/);
+  assert.match(proof.fingerprint, /^[a-f0-9]{64}$/);
+  const withBot = await integration({ extraComments: [{ id: 30, user: { id: 9, login: 'chatgpt-codex-connector[bot]', type: 'Bot' }, body: '안내', created_at: '2026-10-27T16:00:00Z', updated_at: '2026-10-27T16:00:00Z' }] });
+  assert.equal(JSON.parse(withBot.statuses.at(-1).external_id).evidenceDigest, proof.evidenceDigest);
+});
+
+test('게이트 검사 출처 확인: v1 proof와 근거 digest 불일치는 구분된 사유로 거부', async () => {
+  const pr = { number: 1, head: { sha: 'a'.repeat(40) } };
+  const digest = 'd'.repeat(64);
+  const check = proof => ({ name: 'independent-review', app: { slug: 'github-actions' }, status: 'completed', conclusion: 'success', head_sha: pr.head.sha,
+    external_id: JSON.stringify(proof), details_url: 'https://github.com/owner/repo/actions/runs/42' });
+  const api = path => {
+    if (path.endsWith('/actions/workflows/independent-review.yml')) return { id: 4 };
+    if (path.endsWith('/actions/runs/42')) return { workflow_id: 4, path: '.github/workflows/independent-review.yml', status: 'completed', conclusion: 'success', run_attempt: 1, repository: { full_name: 'owner/repo' }, head_repository: { full_name: 'owner/repo' }, event: 'issue_comment', head_sha: 'c'.repeat(40) };
+    return { sha: 'workflow-blob' };
+  };
+  const verify = (proof, evidenceDigest = digest) => verifyGateSource({ check: check(proof), pr, fingerprint: 'f', evidenceDigest, repository: 'owner/repo', defaultBranch: 'main', api });
+  const v2 = { v: 2, pr: 1, fingerprint: 'f', evidenceDigest: digest, runId: '42', attempt: '1' };
+  assert.deepEqual(await verify(v2), v2);
+  await assert.rejects(verify({ pr: 1, fingerprint: 'f', runId: '42', attempt: '1' }), error => error.code === 'proof-v1');
+  await assert.rejects(verify(v2, 'e'.repeat(64)), error => error.code === 'evidence-changed');
+  // 비교할 digest가 없거나 proof 형식이 다르면 통과시키지 않는다.
+  await assert.rejects(verify(v2, null), error => error.code === 'evidence-changed');
+  await assert.rejects(verify({ ...v2, v: 3 }), error => error.code === 'source');
+  await assert.rejects(verify({ ...v2, evidenceDigest: 'short' }), error => error.code === 'source');
 });

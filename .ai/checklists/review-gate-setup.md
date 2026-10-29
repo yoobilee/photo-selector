@@ -72,6 +72,20 @@ critical/high/medium이 남으면 실패다. medium을 사람이 오탐 또는 �
 
 check run의 앱 고정만으로 같은 GitHub Actions 앱을 쓰는 다른 workflow까지 구별되지는 않는다. 병합 도구는 check의 대상 fingerprint, 실행 링크·workflow ID·경로·재실행 횟수·저장소와 실제 실행한 YAML의 승인 버전 일치를 추가 확인한다. 이어서 현재 관리자 확인·보고서·리뷰를 API로 다시 평가하며 저장된 success만 신뢰하지 않는다.
 
+게이트는 check의 `external_id`에 proof v2 `{"v":2,"pr","fingerprint","evidenceDigest","runId","attempt"}`를 기록한다. `evidenceDigest`는 `review-gate-core.mjs`의 `gateEvidence`가 판정 근거를 정렬된 JSON으로 만든 SHA-256이다.
+
+- 근거에 들어가는 것:
+  - 최신 `/review-gate` 확인 댓글과 확인 댓글이 링크한 보고서: 각각 ID, 작성자 ID·login·유형, 작성·수정 시각, 본문 SHA-256, 작성자의 현재 저장소 권한
+  - `admin`·`maintain`이 작성한 `/merge-approve` 댓글: 같은 정보
+  - 해제되지 않은 변경 요청 리뷰: ID, 작성자 ID, 상태, 작성자의 현재 권한
+- 근거에 들어가지 않는 것: 봇 안내, 리뷰 요청, 일반 댓글. 따라서 이런 댓글은 digest를 바꾸지 않는다.
+- 근거 댓글에 값이 없으면 게이트 평가가 실패한다.
+- `fingerprint`(PR 상태)와 `evidenceDigest`(판정 근거)는 따로 둔다. 확인 댓글이 fingerprint를 담고 있어 근거를 fingerprint에 넣을 수 없기 때문이다. fingerprint 계산은 바뀌지 않았으므로 기존 `/review-gate` 확인과 `/merge-approve` 승인은 그대로 유효하다.
+- 병합 도구는 지금 다시 계산한 digest가 게이트 check의 digest와 같아야 기존 게이트 성공을 신뢰한다.
+  - `v`가 없는 이전 proof(v1)는 자동으로 v2로 인정하지 않는다. 게이트를 다시 실행하라고 안내하고 차단한다.
+  - 근거가 바뀌었는데 게이트가 다시 실행되지 않은 경우(확인자 권한 변경 등 게이트 이벤트가 없는 변경)에도 차단한다.
+- 게이트 재실행 방법: Actions에서 해당 PR의 최신 `Independent review gate` 실행을 다시 실행하거나, 관리자 댓글 등 게이트 이벤트를 일으킨다.
+
 브라우저 수동 병합에서는 이 추가 출처·최신성 검증을 도구가 대신 실행하지 못하므로 실제 승인된 workflow 실행과 현재 결과를 사람이 확인해야 한다. 앱 고정·strict 보호·필수 사람 승인·직접 push 및 우회 제한을 함께 적용한다. 저장소 관리자 또는 승인된 자동화·인증정보 자체가 악의적인 경우까지 보호한다고 표현하지 않는다.
 
 workflow 성공은 모든 PR이 병합 가능하다는 뜻이 아니라 평가 작업이 끝났다는 뜻이다. PR별 check run 결과를 확인한다. 조회 실패로 check를 게시하지 못하면 누락된 필수 검사를 통과로 취급하지 않는다.
@@ -96,13 +110,14 @@ draft·제목 규칙·metadata 오류 등 개별 PR 평가 실패는 해당 PR�
 ```text
 node --test .github/scripts/review-gate.test.mjs
 node --test .github/scripts/review-shadow.test.mjs
+node --test .github/scripts/merge-pr-core.test.mjs
 node --test .github/scripts/merge-pr.test.mjs
 git diff --check
 ```
 
 프로젝트 CI의 Test/Lint/Build는 기술 스택 선택 이후 별도로 구성한다. 이 게이트가 프로젝트 기능 테스트를 대체하지 않는다.
 
-병합 도구의 테스트는 Linux에서 가짜 GitHub CLI로 인수와 판정 흐름을 확인한다. 이 프로젝트는 게이트·Shadow·병합 도구 테스트를 `npm run test:gate`로 함께 실행하며 Linux CI의 `verify`에 포함된다. Windows·macOS 로컬에서는 병합 도구 테스트를 건너뛰고, `CI` 환경에서 Linux가 아니면 실패한다. 실제 원격 병합이나 Windows에서 실행한 결과를 뜻하지 않는다. Windows 최초 도입 시 사람이 실제 병합 제목을 확인한다.
+병합 도구의 판정·병합·브랜치 정리 시나리오(`merge-pr-core.test.mjs`)는 가짜 gh·git 함수를 주입해 모든 OS에서 실행한다. 실제 CLI 진입점의 인수 전달(`merge-pr.test.mjs`)은 Linux에서 가짜 실행 파일로 확인한다. 이 프로젝트는 게이트·Shadow·병합 도구 테스트를 `npm run test:gate`로 함께 실행하며 Linux CI의 `verify`에 포함된다. Windows·macOS 로컬에서는 CLI 테스트를 건너뛰고, `CI` 환경에서 Linux가 아니면 실패한다. 실제 원격 병합이나 Windows에서 실행한 결과를 뜻하지 않는다. Windows 최초 도입 시 사람이 실제 병합 제목을 확인한다.
 
 ## 6. Shadow 판정(관찰용)
 
@@ -134,12 +149,134 @@ Codex GitHub 리뷰 판정 기준:
 - `has_any_findings: true`면 같은 head의 봇 리뷰와 인라인 댓글을 모두 모아 첫 줄의 `P0`~`P3` 배지로 critical·high·medium·low를 집계한다. 세부 지적이 없거나 배지를 해석할 수 없으면 통과 후보가 아니다. 해결(resolve) 표시는 집계를 줄이지 않는다.
 - 봇 리뷰 본문도 확인한다. 본문은 실제 안내문(`### 💡 Codex Review`, 리뷰 대상 커밋, `About Codex in GitHub` 접힘 영역)과 배지 지적 줄로만 구성돼야 한다. 그 밖의 내용, 다른 커밋 표시, 해석하지 못한 배지가 있으면 판단 불가다. 본문 지적은 집계에 더하되, 같은 리뷰의 인라인 지적과 심각도·제목이 같으면 한 번만 센다. 지적 없음 상태인데 본문·인라인 지적이 있거나 지적 있음인데 하나도 없으면 판단 불가다.
 - 최신 head 결과가 없고 사용량 한도 댓글이 있으면 한도 초과, 그 밖에는 결과 없음이다. 둘 다 통과가 아니다.
-- 댓글·인라인 댓글 수가 PR 정보와 다르면 전체 조회 실패로 판단 불가다.
+- 댓글·인라인 댓글 목록 수는 목록 조회 **뒤에** 다시 받은 PR 정보의 수와 같아야 한다. 다르면(누락·목록 조회 뒤 새 댓글) 또는 조회 중 head가 바뀌면 전체 조회 실패로 판단 불가다. 실제 PR #7에서 실행 중 추가된 Codex 봇 안내 댓글 때문에 조회 **전** PR 정보와 비교하던 이전 규칙이 Shadow를 판단 불가로 만든 문제를 고쳤다.
 
-사용자 승인(High)은 기존 관리자 확인이 통과했거나, `admin`·`maintain` 사용자가 최신 head SHA(7자 이상)를 적은 `/merge-approve <SHA>` 댓글을 PR 본문·제목·base의 마지막 변경 이후에 작성한 경우다. 기존 게이트는 `/review-gate`로 시작하는 최신 관리자 댓글을 확인으로 읽으므로 승인은 이와 겹치지 않는 별도 명령을 쓴다. main이 앞서 나가면 head가 같아도 이전 승인·CI·리뷰는 이전 base 기준이므로, 모든 위험도에서 최신 base 반영 여부를 함께 요구하고 조회 실패는 알 수 없음으로 둔다. 이 승인 형식은 현재 관찰용이며 병합 권한을 주지 않는다. 구현 Agent와 관리자가 같은 GitHub 인증을 공유하면 이 댓글이 실제 사람의 판단이라는 것을 기술적으로 증명할 수 없다.
+사용자 승인(High)은 `admin`·`maintain` 사용자가 최신 head 전체 SHA와 현재 fingerprint를 적은 `/merge-approve <head SHA> <fingerprint>` 댓글을 PR 본문·제목·base의 마지막 변경 이후에 작성한 경우다. 새 커밋, 본문·제목·base·파일 목록·기본 브랜치 정책이 바뀌면 fingerprint가 달라져 이전 승인은 무효다. Summary와 병합 도구 dry-run이 현재 상태의 승인 명령을 보여 주지만, 변경을 확인한 관리자가 직접 작성한다. 기존 `/review-gate` 확인은 리뷰 근거 확인이며 병합 승인으로 대신 인정하지 않는다. 기존 게이트는 `/review-gate`로 시작하는 최신 관리자 댓글을 확인으로 읽으므로 승인은 이와 겹치지 않는 별도 명령을 쓴다. 이전 형식(`/merge-approve <짧은 SHA>`)은 승인으로 인정하지 않는다. main이 앞서 나가면 head가 같아도 이전 승인·CI·리뷰는 이전 base 기준이므로, 모든 위험도에서 최신 base 반영 여부를 함께 요구하고 조회 실패는 알 수 없음으로 둔다. 병합 도구는 High 병합에 이 승인을 요구하지만(§7), 승인 댓글 자체가 병합을 실행하거나 기존 필수 검사를 대신하지는 않는다. 구현 Agent와 관리자가 같은 GitHub 인증을 공유하면 이 댓글이 실제 사람의 판단이라는 것을 기술적으로 증명할 수 없다.
 
 같은 PR 상태에서는 이벤트가 중복되거나 순서가 바뀌어도 같은 결과가 나온다. Summary의 `새 요청 가능/불가`는 같은 head 중복·응답 대기·상한·한도 초과를 계산한 참고값이며 Codex를 실제로 호출하지 않는다.
 
 요청 댓글에는 대상 SHA가 없다. 최신 head의 check suite 중 가장 이른 생성 시각을 그 head가 처음 보인 시각으로 보고, 그 이후 요청만 최신 head 요청으로 센다. 리뷰 결과는 상태 댓글의 `commit_sha`로만 head에 연결하므로 이전 head의 늦은 결과는 최신 head 요청을 해소하지 않는다. 최신 head 요청이 있는데 결과가 없으면 응답 대기로 보고 새 요청을 막는다. head가 처음 보인 시각이나 요청 시각을 확인할 수 없으면 새 요청을 막는다. 같은 커밋이 PR 전에 다른 브랜치로 먼저 push됐다면 이 시각이 실제보다 이르지만, 그 경우 더 많은 요청을 최신 head 요청으로 세므로 중복 요청 쪽으로 틀리지 않는다.
 
 지원하지 않는 응답: 진행 중·지적 있음 상태 댓글의 새 형식, P0·P3 배지, 리뷰 본문 속 지적, 보안 리뷰(`security_review`) 결과는 실제 응답을 아직 관찰하지 못해 기존 관찰 형식에서 파생한 테스트만 있다. 봇 댓글 생성·수정은 게이트 실행을 일으키지 않으므로 Summary는 다음 게이트 실행 시점의 상태다.
+
+## 7. 병합 도구
+
+`.github/scripts/merge-pr.mjs`는 개발자 컴퓨터에서 명시적으로 실행하는 수동 squash 병합 도구다.
+
+- workflow에서 호출하지 않고, Actions에 인증정보를 전달하지 않으며, 상시 실행되는 자동 병합이 아니다.
+- 판정은 기존 게이트·Shadow 코드(`evaluatePR`, `evaluateShadow`)를 그대로 재사용하고, 정책은 기본 브랜치의 `.ai/review-config.json`만 읽는다.
+- 위험도 기준 자동 병합과 Codex 리뷰 자동 요청은 이 도구에 없다. 두 기능은 각각 인증 분리(Phase 4)와 영속적인 요청 이력 설계(Phase 3b)가 확정된 뒤 별도 PR로 다룬다.
+
+```text
+node .github/scripts/merge-pr.mjs owner/repo PR번호 --dry-run                  # 조회만: 판정·막는 이유·정리 계획
+node .github/scripts/merge-pr.mjs owner/repo PR번호 squash --head <SHA>        # 수동 병합(사용자 지시)
+```
+
+### 병합 조건
+
+조회 실패, 형식 오류, 설정 누락은 모두 차단이다.
+
+- PR 상태
+  - open이고 draft가 아니다.
+  - 제목이 규칙에 맞고, 기본 브랜치 대상이다.
+  - `--head`를 지정했으면 현재 head와 일치한다.
+  - head가 최신 base를 포함한다.
+- 기존 게이트
+  - `independent-review` 판정이 성공이다.
+  - 검사 출처와 proof v2 근거 digest가 일치한다(위 "검사 출처와 병합 직전 확인").
+  - 해제되지 않은 변경 요청이 없다.
+- 필수 CI
+  - `verify`가 현재 head에서 성공했다.
+  - 그 결과가 기본 브랜치에 승인된 `.github/workflows/ci.yml`의 `pull_request` 실행에서 나왔다. PR에서 이 workflow가 바뀌었으면 High만 허용한다.
+  - `gh pr checks --required`를 통과한다.
+- 기본 브랜치 보호: strict, 필수 검사의 게시 앱 고정, 관리자 포함 적용(`enforce_admins`)이 확인된다.
+- High: 관리자가 직접 작성한 `/merge-approve <head SHA> <fingerprint>`가 있다(§6).
+- 판정 코드 고정: 도구가 실행하는 판정 모듈이 기본 브랜치의 같은 파일과 blob SHA로 같다.
+  - 대상 모듈: `merge-pr.mjs`, `merge-pr-core.mjs`, `review-gate*.mjs`, `review-shadow*.mjs`. 작업 트리의 CRLF는 LF로 되돌려 비교한다.
+  - 다르거나 기본 브랜치에 없으면 실제 병합을 차단한다.
+  - 우회 옵션은 없다. 새 코드는 dry-run과 테스트로 확인할 수 있다. dry-run은 다른 판정을 모두 계산해 보여 주고 "판정 코드: 기본 브랜치와 다름(참고용 결과, 실제 병합 불가)"로 표시한다.
+  - 테스트는 가짜 GitHub 응답으로 기본 브랜치 파일 SHA를 흉내 낼 뿐 검사를 건너뛰지 않는다.
+  - 따라서 이 도구를 바꾸는 PR은 병합 전까지 바뀐 도구로 병합할 수 없다.
+
+### 실행 순서
+
+1. 같은 PR의 잠금 파일을 만들어 동시 실행을 막는다.
+2. 첫 점검을 한다.
+3. 실행 직전에 전체를 다시 점검한다. head, fingerprint, 근거 digest, 위험도가 그대로여야 한다.
+4. 최종 재확인을 한다.
+5. `gh pr merge --squash --match-head-commit <head>`로 병합한다.
+6. 실제 병합 커밋 제목을 검증한다.
+7. 병합 후 감사를 한다.
+8. 브랜치를 정리한다.
+
+### 최종 재확인
+
+기존 게이트 판정 전체(`evaluatePR`: PR, 파일, 댓글, 리뷰, 작성자 권한)를 다시 계산한다.
+
+- PR 변경 감지: `review-gate-core.mjs`의 `assertPullRequestUnchanged` 하나로 첫 점검을 시작한 PR과 비교한다.
+  - 비교 값: PR 번호, state(open), draft(false), 제목, 본문, head·base의 SHA·브랜치·저장소, 변경 파일 수
+  - 값이 하나라도 없으면 차단한다.
+- 목록 완전성: 댓글 목록을 모두 받은 뒤 다시 읽은 PR의 댓글 수와 목록 수가 같아야 한다.
+- 다시 계산한 값의 일치 조건
+  - 게이트 판정이 성공이고, fingerprint와 근거 digest가 첫 점검·두 번째 점검과 같다.
+  - 최신 게이트 check의 proof v2 digest와도 같다.
+  - 필수 CI의 최신 check가 두 번째 점검에서 출처를 확인한 check와 같은 ID이고, 같은 `requiredCheckSource`로 workflow 출처(승인된 `ci.yml`의 `pull_request` 실행)를 다시 확인해도 통과한다. 그 사이 같은 이름의 check가 새로 생기거나 바뀌었으면(정상 재실행 포함) 차단하고 dry-run부터 다시 실행한다.
+- 근거는 댓글 수가 아니라 digest로 비교한다. 그래서 다음은 모두 차단된다.
+  - 보고서·확인 댓글·승인 댓글의 수정·삭제(본문이 같아도 수정 시각 변경 포함)
+  - 같은 본문을 다른 ID로 재작성
+  - 확인자·승인자 권한 변경
+  - 변경 요청 리뷰 추가
+- 무관한 봇 댓글은 근거가 아니므로 막지 않는다.
+- High는 같은 `evaluateApproval`로 head, fingerprint, PR 변경 시각 조건을 다시 판정하고, 두 번째 점검과 같은 승인 댓글이어야 한다.
+
+### 남는 경합
+
+- 최종 재확인과 병합 API 호출 사이의 변경은 도구가 막을 수 없다. GitHub 병합 API가 원자적으로 고정하는 것은 다음뿐이다.
+  - head: `--match-head-commit`
+  - 최신 base 반영: 기본 브랜치 보호의 strict 필수 검사
+- 이 사이 일어날 수 있는 다음 변경은 병합 API가 막지 않는다.
+  - 확인·보고서·승인 댓글 수정·삭제, 작성자 권한 변경, 변경 요청 추가
+  - base 재지정, 제목·본문 변경
+- 다른 브랜치로 재지정되면 그 브랜치의 보호 설정이 적용된다.
+- 근거 변경은 병합 후 감사로 **감지만** 한다. 이 경합을 해결했다고 표현하지 않는다.
+
+### 병합 실패와 사용하지 않는 옵션
+
+병합 명령이 실패하면 실제 PR 상태만 다시 조회하고 재병합하지 않는다. 관리자 우회(`--admin`), GitHub auto-merge, `gh`의 `--delete-branch`는 사용하지 않는다.
+
+### 병합 후 감사
+
+병합과 제목 검증이 끝나면 댓글·리뷰·작성자 권한을 다시 조회해 같은 `collectReviewBasis`로 근거 digest를 계산하고, 병합 직전 값과 비교한다.
+
+- 다르거나 확인할 수 없으면 `[심각]` 경고를 출력하고 종료 코드 1로 끝난다.
+- 병합은 자동으로 되돌리지 않는다. 사람이 조사할 수 있도록 브랜치 정리도 하지 않는다.
+
+### 브랜치 정리
+
+병합, 제목 검증, 감사가 성공한 뒤에만 정리한다.
+
+- 원격
+  - 저장소 설정 Automatically delete head branches(현재 켜짐)로 지워졌는지 최대 3회 확인한다.
+  - 남아 있으면 다음 조건이 모두 맞을 때만 `git push --force-with-lease=<ref>:<head>`로 삭제한다: fork가 아님, 기본·보호 브랜치가 아님, 다른 열린 PR의 head·base가 아님, 원격 SHA가 검증된 head와 같음.
+  - push URL이 모두 대상 저장소인 로컬 원격만 사용한다.
+  - 하나라도 불확실하면 지우지 않고 보고한다.
+- 로컬
+  - 다음 조건이 모두 맞을 때만 `git update-ref -d <ref> <head>`로 삭제한다: 대상 저장소를 가리키는 로컬 Git 저장소임, 브랜치가 검증된 head와 같은 SHA임, 현재 체크아웃이나 다른 worktree에서 사용 중이 아님, 작업 트리가 깨끗함.
+  - 병합 직후에는 보통 작업 브랜치를 체크아웃하고 있으므로, 이 경우 건너뛰고 보고한다.
+
+### dry-run
+
+`--dry-run`은 다음을 출력한다.
+
+- 위험도, 필수 검사와 출처, 독립 리뷰
+- 사용자 승인 필요 여부와 승인 명령
+- 기존 게이트와 검사 출처(proof v2)
+- 판정 근거 digest, 판정 코드 일치 여부
+- Shadow 자동 판정 후보(관찰용)
+- 현재 병합 가능 여부, 막는 이유, 병합 후 정리 계획
+
+병합, 댓글, 브랜치 삭제, 잠금 파일 생성을 하지 않는다. 종료 코드는 병합 가능하면 0, 그 밖에는 1이다.
+
+### 해결되지 않은 위험
+
+구현 Agent와 관리자가 같은 GitHub 인증을 쓰면 `/merge-approve`와 `/review-gate` 댓글이 실제 사람의 판단이라는 것을 기술적으로 증명할 수 없다. 같은 인증으로 근거 댓글을 고친 뒤 게이트를 다시 실행하는 것도 막지 못한다. 이 문제는 해결되지 않았다.

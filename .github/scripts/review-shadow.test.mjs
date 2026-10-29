@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { describe as describePR, sha256 } from './review-gate-core.mjs';
 import { runGate } from './review-gate.mjs';
 import {
-  classifyRisk, compareWithGate, decideShadow, evaluateCodexReview, evaluateRequiredChecks, findApproval,
+  approvalText, classifyRisk, compareWithGate, decideShadow, evaluateCodexReview, evaluateRequiredChecks, findApproval,
   parseReviewState, parseSeverity, planReviewRequest, validateShadowConfig,
 } from './review-shadow-core.mjs';
 
@@ -42,7 +42,7 @@ const codexFor = input => evaluateCodexReview({ head, comments: [], reviews: [],
 
 test('현재 shadow 설정이 유효하고 잘못된 설정은 거부', () => {
   validateShadowConfig(shadow);
-  for (const change of [{ enabled: 'yes' }, { lowRiskPaths: [''] }, { requiredChecks: [] }, { codexReviewer: { ...bot, userId: '199175422' } }, { maxReviewRequests: 0 }]) {
+  for (const change of [{ enabled: 'yes' }, { lowRiskPaths: [''] }, { requiredChecks: [] }, { codexReviewer: { ...bot, userId: '199175422' } }, { maxReviewRequests: 0 }, { requiredChecks: [{ name: 'verify', appId: 15368, workflow: 'ci.yml' }] }]) {
     assert.throws(() => validateShadowConfig({ ...shadow, ...change }), JSON.stringify(change));
   }
 });
@@ -197,18 +197,27 @@ test('필수 CI 실패·취소·스킵·누락·진행 중·다른 앱은 성공
   assert.equal(state([run(2, { conclusion: 'failure' }), run(1)]), 'failure');
 });
 
-test('관리자 승인은 최신 head를 명시하고 변경 이후에 작성돼야 함', () => {
+test('관리자 승인은 최신 head 전체 SHA와 fingerprint를 명시하고 변경 이후에 작성돼야 함', () => {
+  const fingerprint = 'f'.repeat(64);
   const approval = (body, id = 30, created_at = '2026-10-28T01:00:00Z') => ({ id, body, created_at, user: { id: 102342597, type: 'User' } });
-  const find = (comments, confirmers = new Set([30]), lastChangedAt = '2026-10-28T00:00:00Z') => findApproval({ head, comments, confirmers, lastChangedAt }).state;
+  const find = (comments, confirmers = new Set([30]), lastChangedAt = '2026-10-28T00:00:00Z') => findApproval({ head, fingerprint, comments, confirmers, lastChangedAt }).state;
+  const valid = approvalText(head, fingerprint);
+  assert.equal(valid, `/merge-approve ${head} ${fingerprint}`);
   assert.equal(find([]), 'none');
-  assert.equal(find([approval(`/merge-approve ${head.slice(0, 7)}`)]), 'approved');
-  assert.equal(find([approval(`/merge-approve ${head}\r\n`)]), 'approved');
-  assert.equal(find([approval(`/merge-approve ${otherHead}`)]), 'invalid');
-  assert.equal(find([approval(`/merge-approve ${head}`)], new Set()), 'invalid');
-  assert.equal(find([approval(`/merge-approve ${head}`, 30, '2026-10-27T23:59:59Z')]), 'invalid');
-  assert.equal(find([approval(`/merge-approve ${head}`)], new Set([30]), 'unknown'), 'indeterminate');
-  assert.equal(find([approval(`/merge-approve ${head}`)], new Set([30]), null), 'approved');
+  assert.equal(find([approval(valid)]), 'approved');
+  assert.equal(find([approval(`${valid}\r\n`)]), 'approved');
+  assert.equal(find([approval(approvalText(otherHead, fingerprint))]), 'invalid');
+  // 본문·제목·base·파일·정책이 바뀌면 fingerprint가 달라져 이전 승인이 무효다.
+  assert.equal(find([approval(approvalText(head, '0'.repeat(64)))]), 'invalid');
+  // 이전 Shadow 형식(짧은 SHA만)과 SHA만 있는 승인은 더 이상 인정하지 않는다.
+  assert.equal(find([approval(`/merge-approve ${head.slice(0, 7)}`)]), 'invalid');
+  assert.equal(find([approval(`/merge-approve ${head}`)]), 'invalid');
+  assert.equal(find([approval(valid)], new Set()), 'invalid');
+  assert.equal(find([approval(valid, 30, '2026-10-27T23:59:59Z')]), 'invalid');
+  assert.equal(find([approval(valid)], new Set([30]), 'unknown'), 'indeterminate');
+  assert.equal(find([approval(valid)], new Set([30]), null), 'approved');
   assert.equal(find([approval('PASS 승인합니다')]), 'none');
+  assert.equal(find([approval(`/review-gate\n${valid}`)]), 'none');
 });
 
 test('같은 head 중복 요청·대기 중 요청·상한 초과·한도 초과면 새 요청 불가', () => {
@@ -252,31 +261,40 @@ test('위험도별 자동 판정 후보 조건', () => {
 
 // GitHub API를 호출하지 않는 runGate 통합 실행. 기존 게이트 확인 댓글과 Codex 응답을 함께 둔다.
 const admin = { id: 102342597, login: 'yoobilee', type: 'User' };
-async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewComments = false, extraComments = [], body, lastEditedAt = null, checkRuns, behindBy = 0 } = {}) {
+const gateMetadata = '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->';
+// 해당 본문의 PR 상태(fingerprint)에 대한 High 병합 승인 댓글.
+const approveFor = (body = gateMetadata, created_at = '2026-10-27T16:00:00Z') => {
+  const files = [{ filename: '.github/scripts/review-gate.mjs', status: 'modified' }];
+  const { fingerprint } = describePR({ title: 'fix: 권한 확인 누락 수정', body, head: { sha: head }, base: { sha: 'b'.repeat(40) } }, files, config);
+  return { id: 50, user: admin, body: approvalText(head, fingerprint), created_at, updated_at: created_at };
+};
+// prCounts: pulls.get 호출 순서(runGate 시작 → evaluatePR 재확인 → Shadow 인라인 조회 후)별로 PR 정보를 바꾼다.
+async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewComments = false, extraComments = [], body, lastEditedAt = null, checkRuns, behindBy = 0, prCounts = [], reviewComments = [] } = {}) {
   const metadata = '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->';
-  const pr = { number: 7, title: 'fix: 권한 확인 누락 수정', body: body ?? metadata, state: 'open', changed_files: 1, head: { sha: head }, base: { sha: 'b'.repeat(40) } };
+  const pr = { number: 7, title: 'fix: 권한 확인 누락 수정', body: body ?? metadata, state: 'open', draft: false, changed_files: 1, head: { sha: head, ref: 'fix/auth', repo: { full_name: 'owner/repo' } }, base: { sha: 'b'.repeat(40), ref: 'main', repo: { full_name: 'owner/repo' } } };
   const files = [{ filename: '.github/scripts/review-gate.mjs', status: 'modified' }];
   // 관리자 확인은 항상 원래 본문 기준으로 작성된 것으로 둔다. 본문이 바뀌면 fingerprint가 달라져야 한다.
   const d = describePR({ ...pr, body: metadata }, files, config);
   const report = `# 독립 리뷰 보고서\nHEAD: ${d.head}\nBASE: ${d.base}\n완료`.replace(/\n/g, lineEnding);
   const confirmation = { fingerprint: d.fingerprint, decision: 'pass', reviewer: 'codex', reviewComplete: true, evidence: 'https://github.com/owner/repo/pull/7#issuecomment-10', evidenceHash: sha256(report.replace(/\r\n?/g, '\n')), findings: { critical: 0, high: 0, medium: 0, low: 0 } };
   let comments = [
-    { id: 10, user: admin, body: report, created_at: '2026-10-27T15:00:00Z' },
-    { id: 11, user: admin, body: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\``.replace(/\n/g, lineEnding), created_at: '2026-10-27T15:01:00Z' },
+    { id: 10, user: admin, body: report, created_at: '2026-10-27T15:00:00Z', updated_at: '2026-10-27T15:00:00Z' },
+    { id: 11, user: admin, body: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\``.replace(/\n/g, lineEnding), created_at: '2026-10-27T15:01:00Z', updated_at: '2026-10-27T15:01:00Z' },
     { id: 6444483731, user: admin, body: '@codex review', created_at: '2026-10-27T14:21:52Z' },
     real.photoSelectorPr5.reviewSummaryCompleted, real.photoSelectorPr5.reviewReceipt, ...extraComments,
   ];
   if (reverse) comments = [...comments].reverse();
-  const current = { ...pr, comments: comments.length, review_comments: 0 };
+  const current = { ...pr, comments: comments.length, review_comments: reviewComments.length };
+  let gets = 0;
   const calls = [];
   const summary = [];
   let failed = false;
   const github = {
     rest: {
       pulls: {
-        list: async () => ({ data: [current] }), get: async () => ({ data: current }),
+        list: async () => ({ data: [current] }), get: async () => ({ data: { ...current, ...prCounts[gets++] } }),
         listFiles: async () => ({ data: files }), listReviews: async () => ({ data: [] }),
-        listReviewComments: async () => { if (failReviewComments) throw new Error('sensitive raw response'); return { data: [] }; },
+        listReviewComments: async () => { if (failReviewComments) throw new Error('sensitive raw response'); return { data: reviewComments }; },
       },
       issues: { listComments: async () => ({ data: comments }) },
       repos: {
@@ -305,15 +323,24 @@ async function runWithShadow({ lineEnding = '\n', reverse = false, failReviewCom
 }
 
 test('Shadow 판정은 Summary에만 기록되고 기존 check 호출과 결론을 바꾸지 않음', async () => {
-  const r = await runWithShadow();
+  const r = await runWithShadow({ extraComments: [approveFor()] });
   assert.deepEqual(r.calls, [['create', 'independent-review'], ['update', 'success']]);
   assert.equal(r.failed, false);
   assert.match(r.summary, /Shadow 판정 PR #7 \(관찰용, 병합에 영향 없음\)/);
   assert.match(r.summary, /위험도: high/);
   assert.match(r.summary, /Codex GitHub 리뷰: clean/);
-  assert.match(r.summary, /사용자 승인: approved — 기존 관리자 확인 통과/);
+  assert.match(r.summary, /사용자 승인: approved/);
   assert.match(r.summary, /자동 판정 후보\(high\): 예/);
   assert.match(r.summary, /기존 게이트 비교: 일치/);
+});
+
+test('High는 기존 /review-gate 확인만으로 병합 승인되지 않고 Summary에 승인 명령을 보여 줌', async () => {
+  const r = await runWithShadow();
+  assert.deepEqual(r.calls, [['create', 'independent-review'], ['update', 'success']]);
+  assert.match(r.summary, /사용자 승인: none/);
+  assert.match(r.summary, /자동 판정 후보\(high\): 아니오 — .*사용자 승인/);
+  assert.match(r.summary, /차이: 기존 게이트 통과, Shadow 후보 아님/);
+  assert.ok(r.summary.includes(`승인 명령(High, 변경을 확인한 관리자가 직접 작성): \`${approveFor().body}\``));
 });
 
 test('Shadow 조회 오류는 판단 불가로 기록하고 기존 성공 check를 유지', async () => {
@@ -340,7 +367,7 @@ test('중복·역순 이벤트에도 같은 상태면 같은 Shadow 결과', asy
 });
 
 test('CRLF 보고서와 확인 댓글도 기존 게이트와 Shadow가 함께 동작', async () => {
-  const r = await runWithShadow({ lineEnding: '\r\n' });
+  const r = await runWithShadow({ lineEnding: '\r\n', extraComments: [approveFor()] });
   assert.deepEqual(r.calls, [['create', 'independent-review'], ['update', 'success']]);
   assert.match(r.summary, /자동 판정 후보\(high\): 예/);
 });
@@ -356,8 +383,7 @@ test('PR 본문 변경은 fingerprint를 바꾸고 기존 확인을 무효화', 
 });
 
 test('Shadow 승인 댓글이 기존 관리자 확인보다 새로워도 기존 게이트 성공을 바꾸지 않음', async () => {
-  const approve = { id: 50, user: admin, body: `/merge-approve ${head.slice(0, 7)}`, created_at: '2026-10-27T16:00:00Z' };
-  const r = await runWithShadow({ extraComments: [approve] });
+  const r = await runWithShadow({ extraComments: [approveFor()] });
   assert.deepEqual(r.calls, [['create', 'independent-review'], ['update', 'success']]);
 });
 
@@ -381,23 +407,50 @@ test('Codex 구현 PR은 Codex GitHub 리뷰를 독립 리뷰로 인정하지 �
 });
 
 test('본문 수정 이전의 승인 댓글은 무효이고 이후 승인은 유효', async () => {
-  const metadata = '<!-- ai-review\nimplemented-by: claude\nrisk: high\nsensitive-change: yes\n-->';
-  const approve = { id: 50, user: admin, body: `/merge-approve ${head.slice(0, 7)}`, created_at: '2026-10-27T16:00:00Z' };
+  const body = `${gateMetadata}\n수정`;
   // 본문이 바뀌어 기존 확인은 실패하므로 승인 댓글만으로 판단한다.
-  const stale = await runWithShadow({ body: `${metadata}\n수정`, extraComments: [approve], lastEditedAt: '2026-10-27T16:30:00Z' });
+  const before = await runWithShadow({ body, extraComments: [approveFor()], lastEditedAt: '2026-10-27T15:30:00Z' });
+  assert.match(before.summary, /사용자 승인: invalid/, '수정 전 본문의 fingerprint로 쓴 승인');
+  const stale = await runWithShadow({ body, extraComments: [approveFor(body)], lastEditedAt: '2026-10-27T16:30:00Z' });
   assert.match(stale.summary, /사용자 승인: invalid/);
-  const fresh = await runWithShadow({ body: `${metadata}\n수정`, extraComments: [approve], lastEditedAt: '2026-10-27T15:30:00Z' });
+  const fresh = await runWithShadow({ body, extraComments: [approveFor(body)], lastEditedAt: '2026-10-27T15:30:00Z' });
   assert.match(fresh.summary, /사용자 승인: approved/);
   assert.match(fresh.summary, /차이: 기존 게이트 실패, Shadow 후보/);
 });
 
 test('main이 앞서 나간 PR은 이전 승인이 있어도 후보가 아니고 기존 판정은 그대로', async () => {
-  const approve = { id: 50, user: admin, body: `/merge-approve ${head.slice(0, 7)}`, created_at: '2026-10-27T16:00:00Z' };
   for (const behindBy of [1, 'error']) {
-    const r = await runWithShadow({ extraComments: [approve], behindBy });
+    const r = await runWithShadow({ extraComments: [approveFor()], behindBy });
     assert.deepEqual(r.calls, [['create', 'independent-review'], ['update', 'success']], String(behindBy));
     assert.match(r.summary, /자동 판정 후보\(high\): 아니오 — .*최신 base/, String(behindBy));
     assert.doesNotMatch(r.summary, /sensitive raw response/);
   }
   assert.match((await runWithShadow({ behindBy: 1 })).summary, /최신 base 반영: behind/);
+});
+
+// 실제 PR #7(2026-10-28): 게이트 실행 중 Codex 봇 안내 댓글이 추가돼 PR 정보(0개)와 댓글 목록(1개)이 달라졌고 Shadow가 판단 불가였다.
+test('목록 수는 목록 조회 뒤 PR 정보와 같아야 하며, 실행 중 목록에 포함된 새 댓글은 허용', async () => {
+  const total = 5; // runWithShadow 기본 댓글 수
+  const arrived = await runWithShadow({ prCounts: [{ comments: total - 1 }] });
+  assert.deepEqual(arrived.calls, [['create', 'independent-review'], ['update', 'success']]);
+  assert.doesNotMatch(arrived.summary, /판단 불가/);
+  assert.match(arrived.summary, /Codex GitHub 리뷰: clean/);
+  const inline = { id: 1, user: { id: 1, login: 'someone', type: 'User' }, pull_request_review_id: 9, body: '의견' };
+  for (const [prCounts, label] of [
+    // pulls.get 세 번째(모든 목록 조회 뒤) PR 정보가 기준이다.
+    [[{ comments: total + 1 }, { comments: total + 1 }, { comments: total + 1 }], '목록 누락'],
+    // Codex 리뷰 P2: 목록 조회 뒤 새 일반 댓글(예: 새 `@codex review`)이 생기면 목록이 그 댓글을 놓친 것이다.
+    [[{}, {}, { comments: total + 1 }], '목록 조회 뒤 새 일반 댓글'],
+    [[{}, {}, { comments: total - 1 }], '조회 뒤 수보다 많음'],
+    [[{}, {}, { review_comments: 0 }], '인라인 조회 뒤 수보다 많음'],
+    [[{}, {}, { review_comments: 2 }], '인라인 목록 조회 뒤 새 지적'],
+    [[{}, {}, { head: { sha: 'f'.repeat(40), ref: 'fix/auth', repo: { full_name: 'owner/repo' } } }], '인라인 조회 중 head 변경'],
+    [[{}, {}, { base: { sha: 'b'.repeat(40), ref: 'release', repo: { full_name: 'owner/repo' } } }], '인라인 조회 중 base 재지정'],
+    [[{}, {}, { title: 'fix: 바뀐 제목' }], '인라인 조회 중 제목 변경'],
+  ]) {
+    const r = await runWithShadow({ prCounts, reviewComments: [inline] });
+    assert.match(r.summary, /판단 불가: 조회·형식·설정 오류/, label);
+  }
+  // 인라인 댓글이 조회 중 추가된 경우는 허용한다.
+  assert.doesNotMatch((await runWithShadow({ prCounts: [{}, { review_comments: 0 }, { review_comments: 1 }], reviewComments: [inline] })).summary, /판단 불가/);
 });

@@ -1,4 +1,4 @@
-import { normalizeNewlines } from './review-gate-core.mjs';
+import { approvalCommand, isApprovalComment, normalizeNewlines } from './review-gate-core.mjs';
 
 // Shadow 판정은 관찰용이다. 기존 independent-review 판정과 check 게시를 바꾸지 않는다.
 const shaPattern = /^[a-f0-9]{40}$/;
@@ -7,10 +7,11 @@ const summaryMarker = '<!-- codex-pull-request-review-summary -->';
 const statePattern = /<!-- codex-review-state:v1 (\{.*\}) -->/;
 const usageLimitPrefix = 'You have reached your Codex usage limits';
 const reviewRequest = '@codex review';
-// 기존 게이트는 `/review-gate`로 시작하는 최신 관리자 댓글을 확인으로 읽는다. 승인 댓글이 기존 판정을 바꾸지 않도록 별도 명령을 쓴다.
-export const approvalCommand = '/merge-approve';
-const approvalPattern = /^\/merge-approve ([a-f0-9]{7,40})$/;
-export const isApprovalComment = body => normalizeNewlines(body).trim().startsWith(`${approvalCommand} `);
+// 승인 명령(`/merge-approve`)은 게이트 근거와 함께 쓰므로 review-gate-core.mjs에 둔다.
+export { approvalCommand, isApprovalComment };
+// 승인은 전체 head SHA와 PR fingerprint를 함께 고정한다. 본문·제목·base·파일·정책이 바뀌면 fingerprint가 달라져 이전 승인이 무효가 된다.
+const approvalPattern = /^\/merge-approve ([a-f0-9]{40}) ([a-f0-9]{64})$/;
+export const approvalText = (head, fingerprint) => `${approvalCommand} ${head} ${fingerprint}`;
 
 const matchesPrefix = (path, prefixes) => prefixes.some(prefix => path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`));
 const byId = (a, b) => Number(a.id) - Number(b.id);
@@ -21,7 +22,8 @@ export function validateShadowConfig(shadow) {
   const bot = shadow?.codexReviewer;
   if (!shadow || typeof shadow.enabled !== 'boolean' || !strings(shadow.lowRiskPaths) || !strings(shadow.highRiskPaths)
       || !Array.isArray(shadow.requiredChecks) || !shadow.requiredChecks.length
-      || shadow.requiredChecks.some(check => typeof check?.name !== 'string' || !check.name || !Number.isSafeInteger(check.appId))
+      || shadow.requiredChecks.some(check => typeof check?.name !== 'string' || !check.name || !Number.isSafeInteger(check.appId)
+        || (check.workflow !== undefined && (typeof check.workflow !== 'string' || !check.workflow.startsWith('.github/workflows/'))))
       || typeof bot?.login !== 'string' || !Number.isSafeInteger(bot.userId) || !Number.isSafeInteger(bot.appId)
       || !Number.isSafeInteger(shadow.maxReviewRequests) || shadow.maxReviewRequests < 1) throw new Error('shadow 설정 오류');
 }
@@ -137,26 +139,31 @@ export function evaluateCodexReview({ head, comments, reviews, reviewComments, b
   return result('findings', '지적 있음', { ...base, evidence, hasUnresolvedFindings, findings });
 }
 
+// 같은 이름·앱·head의 가장 최근 실행만 현재 결과로 본다.
+export const latestCheckRun = ({ head, checkRuns, name, appId }) => checkRuns
+  .filter(run => run.name === name && run.app?.id === appId && run.head_sha === head).sort(byId).at(-1);
+
 export function evaluateRequiredChecks({ head, checkRuns, requiredChecks }) {
   return requiredChecks.map(({ name, appId }) => {
-    const latest = checkRuns.filter(run => run.name === name && run.app?.id === appId && run.head_sha === head).sort(byId).at(-1);
+    const latest = latestCheckRun({ head, checkRuns, name, appId });
     if (!latest) return { name, state: 'missing' };
     if (latest.status !== 'completed') return { name, state: 'pending' };
     return { name, state: latest.conclusion === 'success' ? 'success' : (latest.conclusion ?? 'unknown') };
   });
 }
 
-// 승인 댓글은 head SHA를 명시해야 하고, 본문·제목·base 변경 뒤에 작성된 것만 유효하다.
-export function findApproval({ head, comments, confirmers, lastChangedAt }) {
-  const candidates = comments.filter(comment => approvalPattern.test(normalizeNewlines(comment.body).trim()));
+// 승인 댓글은 최신 head와 fingerprint를 명시해야 하고, 본문·제목·base 변경 뒤에 작성된 것만 유효하다.
+// 명령으로 시작하지만 형식이 다른 댓글(이전 7자리 SHA 형식 포함)은 승인으로 인정하지 않는다.
+export function findApproval({ head, fingerprint, comments, confirmers, lastChangedAt }) {
+  const candidates = comments.filter(comment => isApprovalComment(comment.body));
   if (!candidates.length) return { state: 'none' };
   if (lastChangedAt !== null && !isIsoTime(lastChangedAt)) return { state: 'indeterminate', reason: 'PR 변경 시각 조회 실패' };
   const valid = candidates.filter(comment => {
-    const sha = approvalPattern.exec(normalizeNewlines(comment.body).trim())[1];
-    return head.startsWith(sha) && confirmers.has(comment.id) && isIsoTime(comment.created_at)
+    const match = approvalPattern.exec(normalizeNewlines(comment.body).trim());
+    return match?.[1] === head && match[2] === fingerprint && confirmers.has(comment.id) && isIsoTime(comment.created_at)
       && (lastChangedAt === null || Date.parse(comment.created_at) > Date.parse(lastChangedAt));
   });
-  return valid.length ? { state: 'approved', commentId: valid.sort(byId).at(-1).id } : { state: 'invalid', reason: '최신 head·변경 이후의 관리자 승인 없음' };
+  return valid.length ? { state: 'approved', commentId: valid.sort(byId).at(-1).id } : { state: 'invalid', reason: '최신 head·fingerprint·변경 이후의 관리자 승인 없음' };
 }
 
 // 요청 댓글에는 대상 SHA가 없으므로 head가 처음 보인 시각(push로 생긴 check suite) 이후 요청만 그 head 요청으로 본다.
@@ -214,6 +221,7 @@ export function formatShadowSummary({ number, shadow }) {
     `- Codex GitHub 리뷰: ${codex.status} — ${codex.reason}${findings}${codex.ignoredUntrusted ? ` / 신뢰하지 않는 리뷰 형식 댓글 ${codex.ignoredUntrusted}개 무시` : ''}`,
     `- 리뷰 요청: PR ${request.requestCount}회(최신 head ${request.headRequestCount ?? '알 수 없음'}회), 새 요청 ${request.allowed ? '가능' : `불가(${request.reason})`}`,
     `- 사용자 승인: ${approval.state}${approval.reason ? ` — ${approval.reason}` : ''}`,
+    ...(risk.risk === 'high' ? [`- 승인 명령(High, 변경을 확인한 관리자가 직접 작성): \`${approvalText(shadow.head, fingerprint)}\``] : []),
     `- 자동 판정 후보(${risk.risk}): ${decision.candidate ? '예' : '아니오'}${decision.blockers.length ? ` — ${decision.blockers.join('; ')}` : ''}`,
     `- 기존 게이트 비교: ${comparison}`,
     `- 기준 fingerprint: ${fingerprint}\n`,

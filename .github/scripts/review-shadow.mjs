@@ -1,3 +1,4 @@
+import { assertPullRequestUnchanged } from './review-gate-core.mjs';
 import {
   classifyRisk, compareWithGate, decideShadow, evaluateCodexReview, evaluateRequiredChecks, findApproval,
   isApprovalComment, planReviewRequest, validateShadowConfig,
@@ -34,9 +35,16 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
   if (!shadow.enabled) return null;
   const { description, decision, files, comments, reviews, blocked } = evaluation;
   const head = description.head;
-  if (comments.length !== pr.comments) throw new Error('PR 댓글 전체 조회 실패');
   const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, { ...repo, pull_number: pr.number, per_page: 100 });
-  if (reviewComments.length !== pr.review_comments) throw new Error('인라인 리뷰 댓글 전체 조회 실패');
+  // 두 목록 수는 모든 목록을 조회한 **뒤에** 다시 받은 PR 정보의 수와 같아야 한다. 조회 전 PR 정보와 비교하면 실행 중 추가된
+  // 댓글(예: PR 생성 직후 봇 안내)로 실패하고, 조회 뒤 수와 다르면 목록이 새 댓글(리뷰 요청·인라인 지적)을 놓친 것이다.
+  const after = (await github.rest.pulls.get({ ...repo, pull_number: pr.number })).data;
+  const complete = (count, total) => Number.isSafeInteger(total) && count === total;
+  // 목록 조회 사이 PR 재지정·제목·본문 변경 등도 기존 게이트와 같은 기준으로 감지한다.
+  assertPullRequestUnchanged(pr, after);
+  if (!complete(comments.length, after.comments) || !complete(reviewComments.length, after.review_comments)) {
+    throw new Error('PR 댓글 전체 조회 실패');
+  }
   const checkRuns = await github.paginate(github.rest.checks.listForRef, { ...repo, ref: head, filter: 'all', per_page: 100 });
   // head push로 생긴 check suite 중 가장 이른 생성 시각을 그 head가 처음 보인 시각으로 쓴다. 조회 실패는 알 수 없음이다.
   let headSeenAt = null;
@@ -53,17 +61,21 @@ export async function evaluateShadow({ github, repo, pr, config, evaluation, can
   const checks = evaluateRequiredChecks({ head, checkRuns, requiredChecks: shadow.requiredChecks });
   const request = planReviewRequest({ comments, codex, maxReviewRequests: shadow.maxReviewRequests, headSeenAt });
 
-  let approval = { state: 'none' };
-  if (decision.state === 'success' && risk.risk === 'high') approval = { state: 'approved', reason: '기존 관리자 확인 통과' };
-  else if (comments.some(comment => isApprovalComment(comment.body))) {
-    const confirmers = new Set();
-    for (const comment of comments) if (isApprovalComment(comment.body) && await canConfirm(comment.user)) confirmers.add(comment.id);
-    let changedAt;
-    try { changedAt = await lastChangedAt({ github, repo, number: pr.number }); } catch { changedAt = 'unknown'; }
-    approval = findApproval({ head, comments, confirmers, lastChangedAt: changedAt });
-  }
+  const approval = await evaluateApproval({ github, repo, number: pr.number, head, fingerprint: description.fingerprint, comments, canConfirm });
 
   const baseSync = await baseSyncState({ github, repo, base: description.base, head });
   const shadowDecision = decideShadow({ risk: risk.risk, meta: description.meta, checks, codex, approval, blocked, request, maxReviewRequests: shadow.maxReviewRequests, baseSync });
-  return { risk, checks, codex, approval, request, baseSync, decision: shadowDecision, comparison: compareWithGate(shadowDecision, decision), fingerprint: description.fingerprint };
+  return { head, risk, checks, codex, approval, request, baseSync, decision: shadowDecision, comparison: compareWithGate(shadowDecision, decision), fingerprint: description.fingerprint };
+}
+
+// High 병합 승인은 기존 `/review-gate` 리뷰 확인과 별개의 명시적 명령으로만 인정한다.
+// Shadow 판정과 병합 도구의 실행 직전 재확인이 같은 함수로 승인자 권한·작성 시각·head·fingerprint를 확인한다.
+// 승인 댓글의 내용·작성자 권한 변경은 게이트 근거 digest(gateEvidence)가 따로 고정한다.
+export async function evaluateApproval({ github, repo, number, head, fingerprint, comments, canConfirm }) {
+  if (!comments.some(comment => isApprovalComment(comment.body))) return { state: 'none' };
+  const confirmers = new Set();
+  for (const comment of comments) if (isApprovalComment(comment.body) && await canConfirm(comment.user)) confirmers.add(comment.id);
+  let changedAt;
+  try { changedAt = await lastChangedAt({ github, repo, number }); } catch { changedAt = 'unknown'; }
+  return findApproval({ head, fingerprint, comments, confirmers, lastChangedAt: changedAt });
 }

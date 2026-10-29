@@ -10,6 +10,10 @@ export const isReportBody = body => normalizeNewlines(body).startsWith(reportHea
 // LF 보고서는 정규화 전후가 같으므로 기존 확인 댓글의 해시가 그대로 유효하다.
 export const reportHash = body => sha256(normalizeNewlines(body));
 const titlePattern = /^(feat|fix|chore|refactor|test|docs)(\([a-zA-Z0-9_/-]+\))?!?: [^\r\n]+$/;
+// 기존 게이트는 `/review-gate`로 시작하는 최신 관리자 댓글을 확인으로 읽는다. High 병합 승인 댓글이 기존 판정을 바꾸지 않도록 별도 명령을 쓴다.
+// 게이트 근거(gateEvidence)와 Shadow 승인 판정이 같은 기준으로 승인 댓글을 고른다.
+export const approvalCommand = '/merge-approve';
+export const isApprovalComment = body => normalizeNewlines(body).trim().startsWith(`${approvalCommand} `);
 
 export function validTitle(title) {
   return typeof title === 'string' && titlePattern.test(title)
@@ -55,6 +59,59 @@ export function describe(pr, files, config) {
     files: files.map(file => [file.filename, file.previous_filename ?? null, file.status]).sort(),
   }));
   return { meta, risk, needsReview, reviewer, fingerprint, head: pr.head.sha, base: pr.base.sha };
+}
+
+// 판정과 병합의 근거가 되는 PR 상태. 게이트·Shadow·병합 도구가 같은 기준으로 PR 변경을 감지한다.
+// 값이 하나라도 없거나 형식이 다르면 비교할 수 없으므로 오류다. 본문 null은 fingerprint와 같이 빈 문자열로 본다.
+export function pullRequestSnapshot(pr) {
+  const text = value => typeof value === 'string' && value.length > 0;
+  const side = value => ({ sha: value?.sha, ref: value?.ref, repo: value?.repo?.full_name });
+  const snapshot = {
+    number: pr?.number, state: pr?.state, draft: pr?.draft, title: pr?.title, body: pr?.body ?? '',
+    head: side(pr?.head), base: side(pr?.base), changedFiles: pr?.changed_files,
+  };
+  if (!Number.isSafeInteger(snapshot.number) || !text(snapshot.state) || typeof snapshot.draft !== 'boolean'
+      || typeof snapshot.title !== 'string' || typeof snapshot.body !== 'string' || !Number.isSafeInteger(snapshot.changedFiles)
+      || [snapshot.head, snapshot.base].some(item => !shaPattern.test(item.sha ?? '') || !text(item.ref) || !text(item.repo))) {
+    throw new Error('PR 상태 값 누락 또는 형식 오류');
+  }
+  return snapshot;
+}
+
+// 검증을 시작한 PR(expected)과 지금 PR(current)이 같고 검토 가능한 상태인지 확인한다. 다르면 이전 판정을 쓰지 않는다.
+export function assertPullRequestUnchanged(expected, current) {
+  const before = pullRequestSnapshot(expected);
+  const now = pullRequestSnapshot(current);
+  if (now.state !== 'open' || now.draft || JSON.stringify(now) !== JSON.stringify(before)) throw new Error('검증 중 PR 변경 또는 검토 준비 전 상태');
+  return now;
+}
+
+const isIsoTime = value => typeof value === 'string' && !Number.isNaN(Date.parse(value));
+const byId = (a, b) => Number(a.id) - Number(b.id);
+
+// 게이트 판정과 High 병합 승인의 근거가 된 댓글·리뷰와 작성자의 현재 권한을 정렬된 안정적인 표현으로 고정한다.
+// 댓글 수가 아니라 ID·작성자·작성/수정 시각·본문 해시로 비교하므로 삭제·수정·같은 본문 재작성·권한 변경이 모두 digest를 바꾼다.
+// 근거가 아닌 댓글(봇 안내 등)은 들어가지 않는다. 값이 없거나 형식이 다르면 비교할 수 없으므로 오류다.
+export function gateEvidence({ confirmation = null, report = null, approvals = [], blocking = [] }) {
+  const comment = item => {
+    const { comment: value, role } = item;
+    if (!Number.isSafeInteger(value?.id) || !Number.isSafeInteger(value.user?.id) || typeof value.user.login !== 'string' || typeof value.user.type !== 'string'
+        || !isIsoTime(value.created_at) || !isIsoTime(value.updated_at) || typeof value.body !== 'string' || typeof role !== 'string') throw new Error('근거 댓글 형식 오류');
+    return { id: value.id, userId: value.user.id, login: value.user.login, type: value.user.type, createdAt: value.created_at, updatedAt: value.updated_at, bodyHash: sha256(value.body), role };
+  };
+  const review = item => {
+    const { review: value, role } = item;
+    if (!Number.isSafeInteger(value?.id) || !Number.isSafeInteger(value.user?.id) || typeof value.state !== 'string' || typeof role !== 'string') throw new Error('근거 리뷰 형식 오류');
+    return { id: value.id, userId: value.user.id, state: value.state, role };
+  };
+  const record = {
+    v: 2,
+    confirmation: confirmation && comment(confirmation),
+    report: report && comment(report),
+    approvals: [...approvals].sort((a, b) => byId(a.comment, b.comment)).map(comment),
+    blocking: [...blocking].sort((a, b) => byId(a.review, b.review)).map(review),
+  };
+  return { record, digest: sha256(JSON.stringify(record)) };
 }
 
 export function parseConfirmation(body) {

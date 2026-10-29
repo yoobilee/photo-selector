@@ -7,7 +7,7 @@
 - 예: `feat: XLSX 파일 가져오기 지원`, `fix: 모바일 프로젝트 탭 이동 개선`, `chore: 라우트 코드 분할로 번들 경고 해소`.
 - `Merge pull request #N from …`, PR 번호만 있는 제목, 의미 없는 squash 기본 제목은 사용하지 않는다.
 - PR 제목이 규칙에 맞으면 병합 제목으로 그대로 사용한다. 관련 Issue, 링크와 `Closes #N` 등 자동 종료 키워드는 본문에 보존한다.
-- squash 또는 merge 방식은 프로젝트에서 확정한다. 이 정책은 자동 병합 권한을 부여하지 않는다.
+- 이 프로젝트의 병합 방식은 squash로 확정한다. 이 정책은 자동 병합 권한을 부여하지 않는다.
 
 ## Windows와 실제 저장 결과
 
@@ -26,10 +26,11 @@ Node 22 이상과 로그인된 GitHub CLI가 있는 환경에서 실행한다. �
 PowerShell 또는 Git Bash에서 같은 Node 명령을 사용할 수 있다.
 
 ```text
-node .github/scripts/merge-pr.mjs owner/repo PR번호 squash
+node .github/scripts/merge-pr.mjs owner/repo PR번호 --dry-run
+node .github/scripts/merge-pr.mjs owner/repo PR번호 squash --head <dry-run에서 확인한 head SHA>
 ```
 
-`merge`를 선택하려면 마지막 인수를 `merge`로 바꾼다. v1 게이트의 check run 이름은 `independent-review`로 고정한다. 이름 변경은 정책·workflow·브랜치 보호·병합 도구를 함께 변경하는 별도 높은 위험 작업이다.
+먼저 `--dry-run`으로 병합 가능 여부와 막는 이유를 확인한다. 병합 방식은 squash만 지원하며 `merge`·`rebase` 인수는 거부한다. 옵션과 위험도별 조건은 [리뷰 게이트 설정 §7](../checklists/review-gate-setup.md#7-병합-도구)을 따른다. v1 게이트의 check run 이름은 `independent-review`로 고정한다. 이름 변경은 정책·workflow·브랜치 보호·병합 도구를 함께 변경하는 별도 높은 위험 작업이다.
 
 이 도구는 기본 브랜치 대상 여부, 필수 검사, GitHub Actions 앱·승인된 workflow 출처, 최신 fingerprint와 실제 리뷰 근거를 검증한다. 병합 직전에 본문·base/head·관리자 확인·리뷰를 다시 조회한다. branch protection API에서 strict required checks와 검사 게시 앱 고정을 확인할 수 없으면 병합하지 않는다. 확인과 병합 사이 base 경쟁의 최종 방어는 이 GitHub 보호 설정이며, `--match-head-commit`만으로 base를 원자적으로 고정할 수 있다고 표현하지 않는다.
 

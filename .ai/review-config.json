@@ -44,7 +44,8 @@
     "requiredChecks": [
       {
         "name": "verify",
-        "appId": 15368
+        "appId": 15368,
+        "workflow": ".github/workflows/ci.yml"
       }
     ],
     "codexReviewer": {
