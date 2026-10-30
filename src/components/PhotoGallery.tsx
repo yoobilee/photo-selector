@@ -1,10 +1,17 @@
 import { useEffect, useRef, type Ref } from 'react'
 import type { Photo } from '../photos/photo.ts'
+import type { SharpnessResult } from '../photos/sharpness.ts'
 import { iconButtonClassName, primaryButtonClassName } from './buttonStyles.ts'
 import CloseIcon from './CloseIcon.tsx'
+import SharpnessBadge from './SharpnessBadge.tsx'
+import { describeSharpness, summarizeSharpness, type PhotoSharpnessState } from './sharpnessText.ts'
+
+const ANALYZING: PhotoSharpnessState = { status: 'analyzing' }
 
 interface PhotoGalleryProps {
   photos: readonly Photo[]
+  // 사진 id별 흐림 분석 결과. 없는 사진은 분석 중이다.
+  sharpness: ReadonlyMap<string, SharpnessResult>
   headingRef: Ref<HTMLHeadingElement>
   pickerButtonRef: Ref<HTMLButtonElement>
   isImporting: boolean
@@ -14,6 +21,7 @@ interface PhotoGalleryProps {
 
 function PhotoGallery({
   photos,
+  sharpness,
   headingRef,
   pickerButtonRef,
   isImporting,
@@ -39,6 +47,9 @@ function PhotoGallery({
     onRemovePhoto(photo.id)
   }
 
+  const sharpnessOf = (photo: Photo): PhotoSharpnessState => sharpness.get(photo.id) ?? ANALYZING
+  const summary = summarizeSharpness(photos.map(sharpnessOf))
+
   return (
     <section aria-labelledby="gallery-heading">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -63,19 +74,33 @@ function PhotoGallery({
       <p className="mt-2 text-sm text-neutral-600">
         목록에서 제거해도 기기에 저장된 원본 파일은 삭제되지 않습니다.
       </p>
+      {/* 흐림 판정은 기기 안에서만 계산한 참고 정보이며 사진을 자동으로 지우거나 바꾸지 않는다. */}
+      <p className="mt-1 text-sm font-medium text-neutral-800">
+        <span aria-hidden="true">{summary.visible}</span>
+        <span className="sr-only" aria-live="polite">
+          {summary.announced}
+        </span>
+      </p>
 
       <ul className="mt-5 grid grid-cols-[repeat(auto-fill,minmax(6.5rem,1fr))] gap-x-2 gap-y-3 sm:grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] sm:gap-x-3">
         {photos.map((photo, index) => (
           <li key={photo.id} className="min-w-0">
-            <img
-              src={photo.thumbnailUrl}
-              alt={photo.source.name}
-              width={photo.width}
-              height={photo.height}
-              loading="lazy"
-              decoding="async"
-              className="aspect-square w-full rounded-md bg-neutral-200 object-cover"
-            />
+            <div className="relative">
+              <img
+                src={photo.thumbnailUrl}
+                alt={photo.source.name}
+                aria-describedby={`${photo.id}-sharpness`}
+                width={photo.width}
+                height={photo.height}
+                loading="lazy"
+                decoding="async"
+                className="aspect-square w-full rounded-md bg-neutral-200 object-cover"
+              />
+              <SharpnessBadge state={sharpnessOf(photo)} />
+            </div>
+            <span id={`${photo.id}-sharpness`} className="sr-only">
+              {describeSharpness(sharpnessOf(photo))}
+            </span>
             <div className="mt-1 flex items-center gap-1">
               <span
                 aria-hidden="true"
