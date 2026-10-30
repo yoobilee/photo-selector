@@ -24,6 +24,7 @@ Thumbs.db
 # Node and build output
 node_modules/
 dist/
+dist-calibration/
 dist-ssr/
 coverage/
 *.local

@@ -73,9 +73,35 @@ describe('createSharpnessWorkerAnalyzer', () => {
     await expect(next).resolves.toEqual({ status: 'sharp' })
   })
 
+  it('returns the measurement from the same worker analysis for the evaluation tool', async () => {
+    const { workers, createWorker } = createWorkers()
+    const analyzer = createSharpnessWorkerAnalyzer({ createWorker })
+    const measurement = { score: 0.0123, hasUnjudgedDirection: false, noise: 0.4 }
+
+    const measured = analyzer.measure(photo)
+    const verdictOnly = analyzer.analyze(photo)
+    workers[0]!.dispatchEvent(
+      new MessageEvent('message', { data: { jobId: workers[0]!.requests[0]!.request.jobId, result: { status: 'blurry' }, measurement } }),
+    )
+    workers[1]!.dispatchEvent(
+      new MessageEvent('message', { data: { jobId: workers[1]!.requests[0]!.request.jobId, result: { status: 'blurry' }, measurement } }),
+    )
+
+    await expect(measured).resolves.toEqual({ result: { status: 'blurry' }, measurement })
+    await expect(verdictOnly).resolves.toEqual({ status: 'blurry' })
+    // 측정값이 없는 응답(이전 Worker 등)도 실패로 보지 않고 측정값만 비운다.
+    const withoutMeasurement = analyzer.measure(photo)
+    workers[1]!.respond(1, { status: 'sharp' })
+    await expect(withoutMeasurement).resolves.toEqual({ result: { status: 'sharp' }, measurement: null })
+  })
+
   it('reports analysis as unsupported without Web Worker', async () => {
     const analyzer = createSharpnessWorkerAnalyzer({ createWorker: null })
     await expect(analyzer.analyze(photo)).resolves.toEqual({ status: 'unavailable', reason: 'unsupported' })
+    await expect(analyzer.measure(photo)).resolves.toEqual({
+      result: { status: 'unavailable', reason: 'unsupported' },
+      measurement: null,
+    })
   })
 
   it('terminates every worker on dispose and settles pending analyses', async () => {

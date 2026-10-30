@@ -1,1 +1,4 @@
 @import 'tailwindcss';
+
+/* 개발용 흐림 판정 평가 도구의 클래스는 사용자 앱 CSS에 넣지 않는다. 평가 도구는 calibration/calibration.css를 쓴다. */
+@source not './calibration';

@@ -3,5 +3,7 @@ const focusRing =
 
 export const primaryButtonClassName = `inline-flex min-h-11 items-center justify-center rounded-md bg-neutral-900 px-5 text-sm font-semibold text-white hover:bg-neutral-700 aria-disabled:cursor-not-allowed aria-disabled:opacity-60 ${focusRing}`
 
+export const secondaryButtonClassName = `inline-flex min-h-11 items-center justify-center rounded-md border border-neutral-400 bg-white px-4 text-sm font-semibold text-neutral-900 hover:bg-neutral-100 aria-disabled:cursor-not-allowed aria-disabled:opacity-60 ${focusRing}`
+
 // 색상은 사용하는 위치의 배경에 맞춰 호출자가 지정한다.
 export const iconButtonClassName = `inline-flex size-9 shrink-0 items-center justify-center rounded-md ${focusRing}`

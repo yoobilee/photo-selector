@@ -1,5 +1,5 @@
-import { analyzeImageSharpness, classifyAnalysisImage } from './analyzeImageSharpness.ts'
-import type { GrayImage, SharpnessResult } from './sharpness.ts'
+import { analyzeImageSharpness, evaluateAnalysisImage, type SharpnessAnalysis } from './analyzeImageSharpness.ts'
+import type { GrayImage } from './sharpness.ts'
 
 // 흐림 분석 전용 Web Worker. 디코딩과 계산이 메인 스레드(화면 반응)를 막지 않게 한다.
 // 받은 Blob은 같은 기기 메모리 안에서 전달된 원본 참조이며, 외부로 보내거나 수정하지 않는다.
@@ -8,9 +8,8 @@ export type SharpnessWorkerRequest =
   | { readonly jobId: number; readonly kind: 'file'; readonly file: Blob }
   | { readonly jobId: number; readonly kind: 'pixels'; readonly image: GrayImage | null }
 
-export interface SharpnessWorkerResponse {
+export interface SharpnessWorkerResponse extends SharpnessAnalysis {
   readonly jobId: number
-  readonly result: SharpnessResult
 }
 
 const scope = self as unknown as {
@@ -19,12 +18,12 @@ const scope = self as unknown as {
 }
 
 scope.onmessage = async ({ data: request }) => {
-  let result: SharpnessResult
+  let analysis: SharpnessAnalysis
   try {
-    result = request.kind === 'file' ? await analyzeImageSharpness(request.file) : classifyAnalysisImage(request.image)
+    analysis = request.kind === 'file' ? await analyzeImageSharpness(request.file) : evaluateAnalysisImage(request.image)
   } catch {
     // 오류 상세(파일 내용·메타데이터 포함 가능)는 전달하지 않는다.
-    result = { status: 'unavailable', reason: 'failed' }
+    analysis = { result: { status: 'unavailable', reason: 'failed' }, measurement: null }
   }
-  scope.postMessage({ jobId: request.jobId, result })
+  scope.postMessage({ jobId: request.jobId, ...analysis })
 }
