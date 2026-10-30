@@ -9,7 +9,7 @@ import {
   renderUniform,
   scaleContrast,
 } from '../test/syntheticImages.ts'
-import { classifyAnalysisImage } from './analyzeImageSharpness.ts'
+import { classifyAnalysisImage, evaluateAnalysisImage } from './analyzeImageSharpness.ts'
 import {
   SHARP_RATIO_THRESHOLD,
   classifySharpness,
@@ -138,5 +138,22 @@ describe('sharpness verdict', () => {
     expect(classifyAnalysisImage(gaussianBlur(scene(1), 0.8))).toEqual({ status: 'sharp' })
     expect(classifyAnalysisImage(gaussianBlur(scene(1), 3))).toEqual({ status: 'blurry' })
     expect(classifyAnalysisImage(renderUniform(WIDTH, HEIGHT))).toEqual({ status: 'unavailable', reason: 'low-detail' })
+  })
+
+  // 개발용 평가 도구는 판정과 함께 측정값을 받는다. 판정은 사용자 화면과 같은 함수에서 나와야 한다.
+  it('gives the evaluation tool the same verdict as the gallery plus the measurement it was based on', () => {
+    const images = [
+      gaussianBlur(scene(1), 0.8),
+      gaussianBlur(scene(2), 3),
+      motionBlur(gaussianBlur(scene(3), 0.6), 9),
+      addNoise(gaussianBlur(scene(4), 2), 1, 4),
+      renderUniform(WIDTH, HEIGHT),
+    ]
+    for (const image of images) {
+      const { result, measurement } = evaluateAnalysisImage(image)
+      expect(result).toEqual(classifyAnalysisImage(image))
+      expect(measurement).toEqual(measureSharpness(image))
+    }
+    expect(evaluateAnalysisImage(null)).toEqual({ result: { status: 'unavailable', reason: 'too-small' }, measurement: null })
   })
 })

@@ -8,7 +8,9 @@
   },
   "scripts": {
     "dev": "vite",
+    "calibrate": "vite --open /calibration.html",
     "build": "vite build",
+    "build:calibration": "vite build --mode calibration",
     "preview": "vite preview",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc -b",

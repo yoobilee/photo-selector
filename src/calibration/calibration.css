@@ -1,0 +1,2 @@
+/* 개발용 흐림 판정 평가 도구 전용 CSS. 사용자 앱(index.css)과 같은 Tailwind 설정에 이 폴더의 클래스를 더한다. */
+@import 'tailwindcss';

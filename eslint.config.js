@@ -7,7 +7,7 @@ import tseslint from 'typescript-eslint'
 
 export default defineConfig([
   // .github/scripts는 템플릿 리뷰 게이트 코드로 별도 테스트(npm run test:gate)로 검증한다.
-  globalIgnores(['dist', 'coverage', 'playwright-report', 'test-results', '.github']),
+  globalIgnores(['dist', 'dist-calibration', 'coverage', 'playwright-report', 'test-results', '.github']),
   {
     files: ['src/**/*.{ts,tsx}'],
     extends: [

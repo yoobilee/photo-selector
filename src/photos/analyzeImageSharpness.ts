@@ -5,6 +5,7 @@ import {
   measureSharpness,
   toGrayscale,
   type GrayImage,
+  type SharpnessMeasurement,
   type SharpnessResult,
 } from './sharpness.ts'
 
@@ -19,6 +20,13 @@ export type CreateAnalysisContext = (
 
 export const createOffscreenContext: CreateAnalysisContext = (width, height) =>
   new OffscreenCanvas(width, height).getContext('2d', { willReadFrequently: true })
+
+// 판정 결과와 판정에 쓴 측정값. 사용자 화면은 result만 쓰고, 개발용 평가 도구는 측정값도 함께 기록한다.
+// 너무 작아 측정하지 않았거나 분석에 실패하면 measurement는 null이다.
+export interface SharpnessAnalysis {
+  readonly result: SharpnessResult
+  readonly measurement: SharpnessMeasurement | null
+}
 
 // 원본 Blob을 디코딩해 분석 크기의 밝기 이미지를 만든다. 판정하기에 너무 작으면 null이다.
 // 원본은 읽기만 하며, 디코딩한 원본 크기 화소와 캔버스는 끝나면 바로 해제한다. 디코딩 실패는 오류로 전달된다.
@@ -51,14 +59,22 @@ export async function decodeAnalysisImage(file: Blob, createContext: CreateAnaly
   }
 }
 
-// 분석용 밝기 이미지(너무 작으면 null)의 판정 결과
+// 분석용 밝기 이미지(너무 작으면 null)를 측정하고 판정한다. 판정은 classifySharpness 하나로만 한다.
+export function evaluateAnalysisImage(image: GrayImage | null): SharpnessAnalysis {
+  if (!image) return { result: { status: 'unavailable', reason: 'too-small' }, measurement: null }
+  const measurement = measureSharpness(image)
+  const verdict = classifySharpness(measurement)
+  return {
+    result: verdict === 'low-detail' ? { status: 'unavailable', reason: 'low-detail' } : { status: verdict },
+    measurement,
+  }
+}
+
 export function classifyAnalysisImage(image: GrayImage | null): SharpnessResult {
-  if (!image) return { status: 'unavailable', reason: 'too-small' }
-  const verdict = classifySharpness(measureSharpness(image))
-  return verdict === 'low-detail' ? { status: 'unavailable', reason: 'low-detail' } : { status: verdict }
+  return evaluateAnalysisImage(image).result
 }
 
 // Worker 안에서 디코딩부터 판정까지 한다.
-export async function analyzeImageSharpness(file: Blob): Promise<SharpnessResult> {
-  return classifyAnalysisImage(await decodeAnalysisImage(file, createOffscreenContext))
+export async function analyzeImageSharpness(file: Blob): Promise<SharpnessAnalysis> {
+  return evaluateAnalysisImage(await decodeAnalysisImage(file, createOffscreenContext))
 }
