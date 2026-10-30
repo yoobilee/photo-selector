@@ -104,6 +104,20 @@ test('counts outcomes from labels and exports results without file names or netw
   expect(unexpectedRequests).toEqual([])
 })
 
+test('removes rows with the keyboard without losing focus', async ({ page }) => {
+  await page.goto(calibrationUrl)
+  await page.getByTestId('calibration-file-input').setInputFiles(files.slice(0, 2))
+  const removeButtons = page.getByRole('button', { name: / 평가에서 제거$/ })
+  await expect(removeButtons).toHaveCount(2)
+
+  await removeButtons.first().focus()
+  await page.keyboard.press('Enter')
+  await expect(removeButtons).toHaveCount(1)
+  await expect(removeButtons.first()).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('button', { name: '사진 불러오기' })).toBeFocused()
+})
+
 test('is not part of the production build users get', async ({ page }) => {
   // 기본 baseURL은 배포 빌드(dist)다.
   await page.goto('/calibration.html')

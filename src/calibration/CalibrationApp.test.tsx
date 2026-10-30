@@ -205,6 +205,26 @@ describe('CalibrationApp', () => {
     expect(within(rowOf(reimported)).getByText('흐림 의심')).toBeInTheDocument()
   })
 
+  // Codex 리뷰 P2(PR #9 1회차): 키보드로 행을 지우면 초점이 사라졌다.
+  it('keeps keyboard focus on a neighboring row when a row is removed, then on the import button', async () => {
+    render(<CalibrationApp />)
+    selectFiles([createImageFile('a.jpg', 'jpeg', [1]), createImageFile('b.jpg', 'jpeg', [2]), createImageFile('c.jpg', 'jpeg', [3])])
+    await waitFor(() => expect(photoIds()).toHaveLength(3))
+    const [a, b, c] = photoIds() as [string, string, string]
+    const removeButton = (id: string) => screen.getByRole('button', { name: `${id} 평가에서 제거` })
+    const removeWithKeyboard = (id: string) => {
+      removeButton(id).focus()
+      fireEvent.click(removeButton(id))
+    }
+
+    removeWithKeyboard(b)
+    await waitFor(() => expect(removeButton(c)).toHaveFocus())
+    removeWithKeyboard(c)
+    await waitFor(() => expect(removeButton(a)).toHaveFocus())
+    removeWithKeyboard(a)
+    await waitFor(() => expect(screen.getByRole('button', { name: '사진 불러오기' })).toHaveFocus())
+  })
+
   it('exports JSON and CSV with evaluation IDs only, never file names', async () => {
     render(<CalibrationApp />)
     const privateName = '홍길동_우리집_2026-10-01.jpg'

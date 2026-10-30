@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { iconButtonClassName } from '../components/buttonStyles.ts'
 import CloseIcon from '../components/CloseIcon.tsx'
 import type { Photo } from '../photos/photo.ts'
@@ -31,6 +32,26 @@ const groundTruths: readonly GroundTruth[] = ['sharp', 'blurry', 'unsure']
 const formatNumber = (value: number | null | undefined, digits: number) => (value == null ? '—' : value.toFixed(digits))
 
 function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTableProps) {
+  const removeButtonsRef = useRef(new Map<string, HTMLButtonElement>())
+  // 제거한 행의 버튼이 사라져도 키보드 초점이 이웃 행에 남도록 다음 대상을 기억한다(갤러리와 같은 방식).
+  // 마지막 행을 지우면 표가 사라지므로 CalibrationApp이 불러오기 버튼으로 초점을 옮긴다.
+  const pendingFocusPhotoIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    const photoId = pendingFocusPhotoIdRef.current
+    if (!photoId) return
+    pendingFocusPhotoIdRef.current = null
+    removeButtonsRef.current.get(photoId)?.focus()
+  }, [rows])
+
+  const handleRemove = (index: number) => {
+    const row = rows[index]
+    if (!row) return
+    const neighbor = rows[index + 1] ?? rows[index - 1]
+    pendingFocusPhotoIdRef.current = neighbor?.photo.id ?? null
+    onRemove(row.photo.id)
+  }
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[56rem] text-left text-sm">
@@ -51,7 +72,7 @@ function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTab
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ photo, evaluation }) => {
+          {rows.map(({ photo, evaluation }, index) => {
             const outcome = classifyOutcome(evaluation)
             const isError = outcome === 'false-positive' || outcome === 'false-negative'
             return (
@@ -144,10 +165,14 @@ function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTab
                 <td className={`py-2 pr-2 ${isError ? 'font-semibold text-red-800' : ''}`}>{outcomeText[outcome]}</td>
                 <td className="py-2">
                   <button
+                    ref={(element) => {
+                      if (element) removeButtonsRef.current.set(photo.id, element)
+                      else removeButtonsRef.current.delete(photo.id)
+                    }}
                     type="button"
                     aria-label={`${evaluation.id} 평가에서 제거`}
                     title="평가에서 제거"
-                    onClick={() => onRemove(photo.id)}
+                    onClick={() => handleRemove(index)}
                     className={`${iconButtonClassName} text-neutral-700 hover:bg-neutral-200 hover:text-neutral-950`}
                   >
                     <CloseIcon />

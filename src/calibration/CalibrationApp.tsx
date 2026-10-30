@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { primaryButtonClassName, secondaryButtonClassName } from '../components/buttonStyles.ts'
 import ImportStatus from '../components/ImportStatus.tsx'
 import { usePhotoAnalysis } from '../hooks/usePhotoAnalysis.ts'
@@ -51,7 +51,17 @@ function CalibrationApp() {
   const [includeUserAgent, setIncludeUserAgent] = useState(false)
   const [analysisPath] = useState(getAnalysisPath)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const importButtonRef = useRef<HTMLButtonElement>(null)
+  const previousPhotosRef = useRef(photos)
   const isImporting = progress !== null
+
+  // 마지막 행을 지워 표와 초점을 가진 버튼이 함께 사라지면 불러오기 버튼으로 초점을 옮긴다. 남은 행이 있으면 표가 이웃 행으로 옮긴다.
+  useEffect(() => {
+    if (previousPhotosRef.current === photos) return
+    previousPhotosRef.current = photos
+    const activeElement = document.activeElement
+    if (photos.length === 0 && (!activeElement || activeElement === document.body)) importButtonRef.current?.focus()
+  }, [photos])
 
   const rows = useMemo(
     () =>
@@ -171,6 +181,7 @@ function CalibrationApp() {
             data-testid="calibration-file-input"
           />
           <button
+            ref={importButtonRef}
             type="button"
             aria-disabled={isImporting}
             onClick={() => {
