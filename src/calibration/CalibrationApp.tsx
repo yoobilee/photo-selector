@@ -33,6 +33,7 @@ import {
   describeGroundTruthExport,
   describeGroundTruthLoaded,
   describeGroundTruthStatus,
+  groundTruthExportErrorText,
   groundTruthLoadErrorText,
 } from './groundTruthText.ts'
 import { usePhotoHashes } from './usePhotoHashes.ts'
@@ -174,7 +175,12 @@ function CalibrationApp() {
     const result = collectGroundTruthEntries(rows, dataset)
     if (result.entries.length > 0) {
       const exportedAt = new Date()
-      downloadText(groundTruthFileName(exportedAt), 'application/json', buildGroundTruthJson(result.entries, exportedAt))
+      const json = buildGroundTruthJson(result.entries, exportedAt)
+      if (!json.ok) {
+        setGroundTruthMessage({ kind: 'problem', text: `정답 데이터를 내보내지 못했습니다. ${groundTruthExportErrorText[json.error]}` })
+        return
+      }
+      downloadText(groundTruthFileName(exportedAt), 'application/json', json.text)
     }
     setGroundTruthMessage({ kind: result.entries.length > 0 ? 'success' : 'problem', text: describeGroundTruthExport(result) })
   }

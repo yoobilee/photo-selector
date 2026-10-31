@@ -537,4 +537,18 @@ describe('CalibrationApp ground truth dataset', () => {
     expect(downloads).toEqual([])
     expect(status()).toMatch(/^내보낼 정답이 없습니다/)
   })
+
+  it('does not download a ground truth file that could not be loaded again', async () => {
+    render(<CalibrationApp />)
+    const fullDataset = Array.from({ length: 20_000 }, (_, index) => ({ sha256: index.toString(16).padStart(64, '0'), label: 'sharp' }))
+    loadGroundTruth(groundTruthFile(fullDataset))
+    await panel().findByText(/사진에 적용할 수 있는 항목 20000개/)
+    selectFiles([createImageFile('a.jpg', 'jpeg', [1])])
+    await waitFor(() => expect(count('정답 데이터에 없는 사진')).toBe('1장'))
+    setLabel(photoIds()[0]!, 'blurry')
+
+    fireEvent.click(panel().getByRole('button', { name: '정답 데이터 내보내기' }))
+    expect(downloads).toEqual([])
+    expect(status()).toBe('정답 데이터를 내보내지 못했습니다. 항목이 불러오기 한도(최대 20,000개)를 넘어 다시 불러올 수 없습니다.')
+  })
 })

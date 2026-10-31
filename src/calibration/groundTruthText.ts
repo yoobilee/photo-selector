@@ -5,6 +5,7 @@ import {
   MAX_GROUND_TRUTH_ENTRIES,
   MAX_GROUND_TRUTH_FILE_BYTES,
   type GroundTruthDatasetStats,
+  type GroundTruthExportError,
   type GroundTruthLoadError,
   type SampleOrigin,
 } from './groundTruthDataset.ts'
@@ -28,7 +29,12 @@ export const groundTruthLoadErrorText: Record<GroundTruthLoadError, string> = {
   'too-many-entries': `항목이 너무 많습니다(최대 ${MAX_GROUND_TRUTH_ENTRIES.toLocaleString('ko-KR')}개).`,
 }
 
-const joinNonZero = (parts: readonly [number, string][]) =>
+export const groundTruthExportErrorText: Record<GroundTruthExportError, string> = {
+  'too-many-entries': `항목이 불러오기 한도(최대 ${MAX_GROUND_TRUTH_ENTRIES.toLocaleString('ko-KR')}개)를 넘어 다시 불러올 수 없습니다.`,
+  'too-large': `파일 크기가 불러오기 한도(최대 ${MAX_GROUND_TRUTH_FILE_BYTES / 1024 / 1024}MB)를 넘어 다시 불러올 수 없습니다. 출처·가공 설명을 줄여 보세요.`,
+}
+
+const joinNonZero =(parts: readonly [number, string][]) =>
   parts
     .filter(([count]) => count > 0)
     .map(([count, text]) => `${text} ${count}`)

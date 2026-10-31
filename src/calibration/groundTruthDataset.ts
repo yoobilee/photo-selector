@@ -231,16 +231,26 @@ export async function readGroundTruthFile(file: Blob): Promise<GroundTruthLoadRe
   return parseGroundTruthDataset(text)
 }
 
+// 불러오기 한도를 넘어 다시 불러올 수 없는 파일은 만들지 않는다.
+export type GroundTruthExportError = 'too-many-entries' | 'too-large'
+export type GroundTruthJsonResult =
+  | { readonly ok: true; readonly text: string }
+  | { readonly ok: false; readonly error: GroundTruthExportError }
+
 // 정답 데이터 파일 내용. 항목은 해시 순으로 정렬해 사진을 불러온 순서가 드러나지 않게 한다.
-export function buildGroundTruthJson(entries: readonly GroundTruthEntry[], exportedAt: Date): string {
+// 항목은 한 줄에 하나씩 써서 사람이 읽을 수 있으면서도 불러오기 크기 한도 안에 들게 한다.
+export function buildGroundTruthJson(entries: readonly GroundTruthEntry[], exportedAt: Date): GroundTruthJsonResult {
+  if (entries.length > MAX_GROUND_TRUTH_ENTRIES) return { ok: false, error: 'too-many-entries' }
   const sorted = [...entries].sort((first, second) => (first.sha256 < second.sha256 ? -1 : first.sha256 > second.sha256 ? 1 : 0))
-  const dataset = {
+  const header = {
     format: GROUND_TRUTH_FORMAT,
     version: GROUND_TRUTH_FORMAT_VERSION,
     hashAlgorithm: GROUND_TRUTH_HASH_ALGORITHM,
     exportedAt: exportedAt.toISOString(),
     notice: GROUND_TRUTH_NOTICE,
-    entries: sorted.map((entry) => ({
+  }
+  const entryLines = sorted.map((entry) =>
+    JSON.stringify({
       sha256: entry.sha256,
       label: entry.label,
       condition: entry.condition,
@@ -249,7 +259,15 @@ export function buildGroundTruthJson(entries: readonly GroundTruthEntry[], expor
       reviewed: entry.reviewed,
       processing: entry.processing,
       sourceNote: entry.sourceNote,
-    })),
-  }
-  return `${JSON.stringify(dataset, null, 2)}\n`
+    }),
+  )
+  const lines = [
+    '{',
+    ...Object.entries(header).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},`),
+    entryLines.length === 0 ? '  "entries": []' : `  "entries": [\n    ${entryLines.join(',\n    ')}\n  ]`,
+    '}',
+  ]
+  const text = `${lines.join('\n')}\n`
+  if (new TextEncoder().encode(text).byteLength > MAX_GROUND_TRUTH_FILE_BYTES) return { ok: false, error: 'too-large' }
+  return { ok: true, text }
 }

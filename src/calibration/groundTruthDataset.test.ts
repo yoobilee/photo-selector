@@ -28,6 +28,14 @@ const entry = (change: Partial<GroundTruthEntry> = {}): GroundTruthEntry => ({
   ...change,
 })
 
+const uniqueHash = (index: number) => index.toString(16).padStart(64, '0')
+
+function exportOk(entries: readonly GroundTruthEntry[]) {
+  const result = buildGroundTruthJson(entries, new Date('2026-10-30T01:02:03Z'))
+  if (!result.ok) throw new Error(`expected an export, got ${result.error}`)
+  return result.text
+}
+
 function parseOk(text: string) {
   const result = parseGroundTruthDataset(text)
   if (!result.ok) throw new Error(`expected a dataset, got ${result.error}`)
@@ -152,7 +160,7 @@ describe('ground truth dataset', () => {
       entry({ sha256: hashOf('c'), label: 'sharp', origin: 'public-image', sourceNote: 'https://example.org/photo (CC BY 4.0)' }),
       entry({ sha256: hashOf('a'), processing: '가로 손떨림 25px' }),
     ]
-    const text = buildGroundTruthJson(entries, new Date('2026-10-30T01:02:03Z'))
+    const text = exportOk(entries)
     const file = JSON.parse(text)
     expect(file).toMatchObject({
       format: GROUND_TRUTH_FORMAT,
@@ -168,5 +176,36 @@ describe('ground truth dataset', () => {
     const roundTrip = parseOk(text)
     expect(roundTrip.entries.get(hashOf('c'))).toEqual(entries[0])
     expect(roundTrip.entries.get(hashOf('a'))).toEqual(entries[1])
+  })
+
+  it('exports an empty entry list as valid JSON', () => {
+    expect(parseOk(exportOk([])).stats.total).toBe(0)
+  })
+
+  it('exports the largest loadable dataset so that it can be loaded again', async () => {
+    const entries = Array.from({ length: MAX_GROUND_TRUTH_ENTRIES }, (_, index) =>
+      entry({ sha256: uniqueHash(index), condition: null, sceneGroup: null, origin: null, reviewed: false }),
+    )
+    const imported = parseOk(datasetText(entries.map(({ sha256, label }) => ({ sha256, label }))))
+    expect(imported.stats.usable).toBe(MAX_GROUND_TRUTH_ENTRIES)
+
+    const text = exportOk([...imported.entries.values()])
+    expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(MAX_GROUND_TRUTH_FILE_BYTES)
+    const reloaded = await readGroundTruthFile(new Blob([text]))
+    if (!reloaded.ok) throw new Error(`expected a dataset, got ${reloaded.error}`)
+    expect(reloaded.dataset.stats).toMatchObject({ total: MAX_GROUND_TRUTH_ENTRIES, usable: MAX_GROUND_TRUTH_ENTRIES, invalid: 0 })
+  })
+
+  it('refuses to export a file that could not be loaded again', () => {
+    const tooMany = Array.from({ length: MAX_GROUND_TRUTH_ENTRIES + 1 }, (_, index) => entry({ sha256: uniqueHash(index) }))
+    expect(buildGroundTruthJson(tooMany, new Date())).toEqual({ ok: false, error: 'too-many-entries' })
+
+    // 설명이 긴 항목은 개수 한도 안이어도 크기 한도를 넘을 수 있다(한글 1자 = UTF-8 3바이트).
+    const longNote = '가'.repeat(MAX_NOTE_LENGTH)
+    const tooLarge = Array.from({ length: 3_000 }, (_, index) =>
+      entry({ sha256: uniqueHash(index), sourceNote: longNote, processing: longNote }),
+    )
+    expect(buildGroundTruthJson(tooLarge, new Date())).toEqual({ ok: false, error: 'too-large' })
+    expect(buildGroundTruthJson(tooLarge.slice(0, 2_000), new Date())).toMatchObject({ ok: true })
   })
 })
