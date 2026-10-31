@@ -291,6 +291,8 @@ Claude Code로 구현한 변경은 [Codex plugin for Claude Code](https://github
 
 PR 병합은 개발자 컴퓨터에서 [병합 도구](.ai/checklists/review-gate-setup.md#7-병합-도구)로 squash 병합합니다. 먼저 `node .github/scripts/merge-pr.mjs yoobilee/photo-selector PR번호 --dry-run`으로 위험도, 필수 검사, 리뷰·승인 상태와 병합을 막는 이유를 확인합니다. 병합 도구는 기본 브랜치에 승인된 판정 코드로만 병합하며, 위험도 기준 자동 병합과 Codex 리뷰 자동 요청은 제공하지 않습니다.
 
+PR #10에서는 GitHub가 검사 링크를 `/runs/<check ID>`로 반환해 `/actions/runs/<workflow run ID>`만 허용하던 출처 검증이 정상 검사를 차단했습니다. 실제 API 응답으로 재현한 뒤 두 형식을 각각 해당 ID와 정확히 비교하도록 수정했습니다. 링크가 맞아도 앱·PR HEAD·fingerprint·근거 digest와 실제 workflow 실행 ID·저장소·재실행 횟수·승인된 YAML 검증은 모두 통과해야 합니다. 이 검증은 같은 GitHub Actions 앱의 악의적인 workflow나 유출된 관리자 인증까지 완전히 방어한다는 뜻은 아닙니다.
+
 - [리뷰 게이트 설정과 확인 댓글 형식](.ai/checklists/review-gate-setup.md)
 - [위험도와 독립 검증 기준](.ai/policies/verification.md)
 - [리뷰 자동화 정책](.ai/policies/review-automation.md)
