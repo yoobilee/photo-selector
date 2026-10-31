@@ -12,6 +12,7 @@ import {
 } from '../photos/sharpness.ts'
 import type { AnalysisPath } from '../photos/sharpnessWorkerClient.ts'
 import { classifyOutcome, summarizeEvaluation, type AutomaticVerdict, type GroundTruth, type Outcome } from './evaluationMetrics.ts'
+import type { SampleOrigin } from './groundTruthDataset.ts'
 
 // 내보내기 파일 형식. 파일 이름·경로·EXIF 등 사진을 식별할 수 있는 정보는 넣지 않고 평가용 ID만 쓴다.
 
@@ -35,6 +36,10 @@ export interface EvaluationPhoto {
   readonly condition: SceneCondition | null
   // 같은 장면을 선명·흐림으로 짝지어 찍은 사진에 붙이는 번호
   readonly sceneGroup: number | null
+  // 실제 촬영 / 공개 이미지 / 인위적 가공. 실제 사진 성능과 가공 이미지 성능을 나눠 보는 데 쓴다.
+  readonly origin: SampleOrigin | null
+  // 사람이 정답을 다시 확인했는지
+  readonly reviewed: boolean
   readonly verdict: AutomaticVerdict
   readonly unavailableReason: UnavailableReason | null
   readonly measurement: SharpnessMeasurement | null
@@ -55,7 +60,8 @@ export interface EvaluationEnvironment {
 }
 
 export const EVALUATION_FORMAT = 'photo-selector-blur-evaluation'
-export const EVALUATION_FORMAT_VERSION = 1
+// 2: 사진별 origin·reviewed 추가
+export const EVALUATION_FORMAT_VERSION = 2
 
 export function bitsPerPixel(byteSize: number, width: number, height: number): number {
   return width > 0 && height > 0 ? Math.round(((byteSize * 8) / (width * height)) * 1000) / 1000 : 0
@@ -88,6 +94,8 @@ export function buildEvaluationJson(
       label: photo.label,
       condition: photo.condition,
       sceneGroup: photo.sceneGroup,
+      origin: photo.origin,
+      reviewed: photo.reviewed,
       verdict: photo.verdict,
       outcome: classifyOutcome(photo),
       unavailableReason: photo.unavailableReason,
@@ -108,6 +116,8 @@ const csvColumns = [
   'label',
   'condition',
   'sceneGroup',
+  'origin',
+  'reviewed',
   'verdict',
   'outcome',
   'unavailableReason',
@@ -139,6 +149,8 @@ export function buildEvaluationCsv(photos: readonly EvaluationPhoto[], environme
       label: photo.label,
       condition: photo.condition,
       sceneGroup: photo.sceneGroup,
+      origin: photo.origin,
+      reviewed: photo.reviewed,
       verdict: photo.verdict,
       outcome,
       unavailableReason: photo.unavailableReason,

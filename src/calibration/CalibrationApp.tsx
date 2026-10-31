@@ -7,8 +7,8 @@ import type { SharpnessAnalysis } from '../photos/analyzeImageSharpness.ts'
 import { IMAGE_INPUT_ACCEPT } from '../photos/imageFormat.ts'
 import type { Photo } from '../photos/photo.ts'
 import { getAnalysisPath, type SharpnessAnalyzer } from '../photos/sharpnessWorkerClient.ts'
-import { downloadText, evaluationFileName } from './downloadText.ts'
-import EvaluationPhotoTable, { type PhotoAnnotation } from './EvaluationPhotoTable.tsx'
+import { downloadText, evaluationFileName, groundTruthFileName } from './downloadText.ts'
+import EvaluationPhotoTable from './EvaluationPhotoTable.tsx'
 import EvaluationSummaryPanel from './EvaluationSummaryPanel.tsx'
 import {
   bitsPerPixel,
@@ -19,18 +19,40 @@ import {
 } from './evaluationExport.ts'
 import { summarizeEvaluation } from './evaluationMetrics.ts'
 import { analysisPathText } from './evaluationText.ts'
+import { getSubtleCrypto } from './fileHash.ts'
+import {
+  buildGroundTruthJson,
+  EMPTY_ANNOTATION,
+  readGroundTruthFile,
+  type GroundTruthDataset,
+  type PhotoAnnotation,
+} from './groundTruthDataset.ts'
+import { collectGroundTruthEntries, linkGroundTruth, resolveAnnotation, summarizeGroundTruthMatches } from './groundTruthMatch.ts'
+import GroundTruthPanel, { type GroundTruthMessage } from './GroundTruthPanel.tsx'
+import {
+  describeGroundTruthExport,
+  describeGroundTruthLoaded,
+  describeGroundTruthStatus,
+  groundTruthExportErrorText,
+  groundTruthLoadErrorText,
+} from './groundTruthText.ts'
+import { usePhotoHashes } from './usePhotoHashes.ts'
 
 const FAILED: SharpnessAnalysis = { result: { status: 'unavailable', reason: 'failed' }, measurement: null }
 // 사용자 화면(analyze)과 같은 Worker·디코딩·판정 경로로 분석하고 측정값도 함께 받는다.
 const selectMeasurement = (analyzer: SharpnessAnalyzer) => analyzer.measure
-const EMPTY_ANNOTATION: PhotoAnnotation = { label: null, condition: null, sceneGroup: null }
 
 function toEvaluationPhoto(photo: Photo, analysis: SharpnessAnalysis | undefined, annotation: PhotoAnnotation): EvaluationPhoto {
   const result = analysis?.result
   return {
     // 세션 순번 기반 사진 ID를 평가용 ID로 쓴다. 파일 이름과 관계없다.
     id: photo.id,
-    ...annotation,
+    // 출처 설명·가공 방식은 정답 데이터에만 두고 평가 결과에는 넣지 않는다.
+    label: annotation.label,
+    condition: annotation.condition,
+    sceneGroup: annotation.sceneGroup,
+    origin: annotation.origin,
+    reviewed: annotation.reviewed,
     verdict: result ? (result.status === 'unavailable' ? 'unavailable' : result.status) : 'pending',
     unavailableReason: result?.status === 'unavailable' ? result.reason : null,
     measurement: analysis?.measurement ?? null,
@@ -46,7 +68,14 @@ function toEvaluationPhoto(photo: Photo, analysis: SharpnessAnalysis | undefined
 function CalibrationApp() {
   const { photos, progress, lastImport, addFiles, removePhoto, dismissImportSummary } = usePhotoLibrary()
   const analyses = usePhotoAnalysis(photos, selectMeasurement, FAILED)
-  const [annotations, setAnnotations] = useState<ReadonlyMap<string, PhotoAnnotation>>(() => new Map())
+  const hashes = usePhotoHashes(photos)
+  // 사람이 표에서 직접 고른 정답. 정답 데이터보다 항상 우선한다.
+  const [manualAnnotations, setManualAnnotations] = useState<ReadonlyMap<string, PhotoAnnotation>>(() => new Map())
+  const [dataset, setDataset] = useState<GroundTruthDataset | null>(null)
+  const [groundTruthMessage, setGroundTruthMessage] = useState<GroundTruthMessage | null>(null)
+  const [isHashSupported] = useState(() => getSubtleCrypto() !== undefined)
+  // 정답 데이터 파일을 연달아 고르면 마지막 파일만 쓴다.
+  const loadRequestRef = useRef(0)
   const [device, setDevice] = useState('')
   const [includeUserAgent, setIncludeUserAgent] = useState(false)
   const [analysisPath] = useState(getAnalysisPath)
@@ -63,29 +92,41 @@ function CalibrationApp() {
     if (photos.length === 0 && (!activeElement || activeElement === document.body)) importButtonRef.current?.focus()
   }, [photos])
 
+  // 정답 데이터는 해시가 일치하고 직접 고른 정답이 없는 사진에만 적용된다. 해시가 늦게 나와도 그때 연결된다.
   const rows = useMemo(
     () =>
-      photos.map((photo) => ({
-        photo,
-        evaluation: toEvaluationPhoto(photo, analyses.get(photo.id), annotations.get(photo.id) ?? EMPTY_ANNOTATION),
-      })),
-    [photos, analyses, annotations],
+      photos.map((photo) => {
+        const hash = hashes.get(photo.id)
+        const resolved = resolveAnnotation(manualAnnotations.get(photo.id), dataset ? linkGroundTruth(hash, dataset) : null)
+        return {
+          photo,
+          hash,
+          resolved,
+          annotation: resolved.annotation,
+          groundTruthStatus: describeGroundTruthStatus(hash, resolved),
+          evaluation: toEvaluationPhoto(photo, analyses.get(photo.id), resolved.annotation),
+        }
+      }),
+    [photos, analyses, hashes, manualAnnotations, dataset],
   )
   const evaluations = rows.map((row) => row.evaluation)
   const summary = summarizeEvaluation(evaluations)
+  const matchSummary = dataset ? summarizeGroundTruthMatches(rows, dataset) : null
 
+  // 정답 데이터에서 온 정답을 고치면 그 값을 바탕으로 직접 고른 정답이 된다.
   const annotate = (photoId: string, change: Partial<PhotoAnnotation>) => {
-    setAnnotations((current) => {
+    const shown = rows.find((row) => row.photo.id === photoId)?.annotation ?? EMPTY_ANNOTATION
+    setManualAnnotations((current) => {
       const next = new Map(current)
-      next.set(photoId, { ...(current.get(photoId) ?? EMPTY_ANNOTATION), ...change })
+      next.set(photoId, { ...(current.get(photoId) ?? shown), ...change })
       return next
     })
   }
 
-  // 평가에서 제거한 사진의 정답 기록도 함께 지운다. 다시 가져오면 새 ID로 처음부터 평가한다.
+  // 평가에서 제거한 사진의 정답 기록도 함께 지운다. 다시 가져오면 새 ID로 처음부터 평가한다(정답 데이터가 있으면 다시 연결된다).
   const remove = (photoId: string) => {
     removePhoto(photoId)
-    setAnnotations((current) => {
+    setManualAnnotations((current) => {
       const next = new Map(current)
       next.delete(photoId)
       return next
@@ -106,6 +147,42 @@ function CalibrationApp() {
     } else {
       downloadText(evaluationFileName(exportedAt, 'csv'), 'text/csv', buildEvaluationCsv(evaluations, environment()))
     }
+  }
+
+  // 불러오지 못하면 이전에 불러온 정답 데이터를 그대로 둔다.
+  const loadGroundTruth = async (file: File) => {
+    loadRequestRef.current += 1
+    const request = loadRequestRef.current
+    const result = await readGroundTruthFile(file)
+    if (request !== loadRequestRef.current) return
+    if (!result.ok) {
+      const keptNote = dataset ? ' 이전에 불러온 정답 데이터를 계속 씁니다.' : ''
+      setGroundTruthMessage({ kind: 'problem', text: `정답 데이터를 불러오지 못했습니다. ${groundTruthLoadErrorText[result.error]}${keptNote}` })
+      return
+    }
+    setDataset(result.dataset)
+    setGroundTruthMessage({ kind: 'success', text: describeGroundTruthLoaded(result.dataset.stats) })
+  }
+
+  const closeGroundTruth = () => {
+    loadRequestRef.current += 1
+    setDataset(null)
+    setGroundTruthMessage(null)
+  }
+
+  const canExportGroundTruth = photos.length > 0 || dataset !== null
+  const exportGroundTruth = () => {
+    const result = collectGroundTruthEntries(rows, dataset)
+    if (result.entries.length > 0) {
+      const exportedAt = new Date()
+      const json = buildGroundTruthJson(result.entries, exportedAt)
+      if (!json.ok) {
+        setGroundTruthMessage({ kind: 'problem', text: `정답 데이터를 내보내지 못했습니다. ${groundTruthExportErrorText[json.error]}` })
+        return
+      }
+      downloadText(groundTruthFileName(exportedAt), 'application/json', json.text)
+    }
+    setGroundTruthMessage({ kind: result.entries.length > 0 ? 'success' : 'problem', text: describeGroundTruthExport(result) })
   }
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -133,8 +210,12 @@ function CalibrationApp() {
               사진은 이 기기의 메모리에서만 분석하며 서버로 보내지 않습니다. 화면을 닫거나 새로고침하면 사진과 정답이 사라집니다.
             </li>
             <li>
-              내보내기 파일에는 평가용 ID, 정답, 판정, 점수와 크기·형식만 들어갑니다. 파일 이름·경로·위치(EXIF)는 넣지
-              않습니다.
+              평가 결과 내보내기 파일에는 평가용 ID, 정답, 판정, 점수와 크기·형식만 들어갑니다. 파일 이름·경로·위치(EXIF)와 해시는
+              넣지 않습니다.
+            </li>
+            <li>
+              정답을 한 번 고른 뒤 정답 데이터로 내보내 두면, 다음에 같은 사진을 불러올 때 정답 데이터를 불러와 정답을 다시 붙일 수
+              있습니다.
             </li>
           </ul>
         </section>
@@ -210,6 +291,17 @@ function CalibrationApp() {
         </div>
 
         <ImportStatus progress={progress} lastImport={lastImport} onDismiss={dismissImportSummary} />
+
+        <GroundTruthPanel
+          dataset={dataset}
+          matchSummary={matchSummary}
+          isHashSupported={isHashSupported}
+          canExport={canExportGroundTruth}
+          message={groundTruthMessage}
+          onLoad={(file) => void loadGroundTruth(file)}
+          onExport={exportGroundTruth}
+          onClose={closeGroundTruth}
+        />
 
         <EvaluationSummaryPanel summary={summary} />
 

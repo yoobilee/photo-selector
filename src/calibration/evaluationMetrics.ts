@@ -2,7 +2,8 @@
 // 양성(찾아야 하는 것)은 '흐림'이다. 사람이 붙인 정답과 자동 판정을 비교한다.
 
 // 사람이 붙인 정답. 판단 보류는 정답이 없는 사진으로 보고 정확도 통계에서 뺀다.
-export type GroundTruth = 'sharp' | 'blurry' | 'unsure'
+export const groundTruths = ['sharp', 'blurry', 'unsure'] as const
+export type GroundTruth = (typeof groundTruths)[number]
 // 자동 판정. 아직 결과가 없으면 pending이다.
 export type AutomaticVerdict = 'sharp' | 'blurry' | 'unavailable' | 'pending'
 

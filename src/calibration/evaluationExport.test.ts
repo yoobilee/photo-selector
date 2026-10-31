@@ -14,6 +14,8 @@ const photo = (change: Partial<EvaluationPhoto> = {}): EvaluationPhoto => ({
   label: 'sharp',
   condition: 'outdoor',
   sceneGroup: 3,
+  origin: 'real-capture',
+  reviewed: true,
   verdict: 'sharp',
   unavailableReason: null,
   measurement: { score: 0.0412, hasUnjudgedDirection: false, noise: 0.37 },
@@ -41,6 +43,7 @@ describe('evaluation export', () => {
       ),
     )
     expect(report.format).toBe(EVALUATION_FORMAT)
+    expect(report.version).toBe(2)
     expect(report.exportedAt).toBe('2026-10-30T01:02:03.000Z')
     expect(report.settings.sharpRatioThreshold).toBe(SHARP_RATIO_THRESHOLD)
     expect(report.environment).toEqual(environment)
@@ -50,6 +53,8 @@ describe('evaluation export', () => {
       label: 'sharp',
       condition: 'outdoor',
       sceneGroup: 3,
+      origin: 'real-capture',
+      reviewed: true,
       verdict: 'sharp',
       outcome: 'true-negative',
       unavailableReason: null,
@@ -77,7 +82,9 @@ describe('evaluation export', () => {
         'id',
         'label',
         'noise',
+        'origin',
         'outcome',
+        'reviewed',
         'sceneGroup',
         'score',
         'unavailableReason',
@@ -101,17 +108,17 @@ describe('evaluation export', () => {
 
   it('writes CSV with a header, CRLF rows, empty cells for missing values and escaped text', () => {
     const csv = buildEvaluationCsv(
-      [photo(), photo({ id: 'photo-2', label: null, measurement: null, verdict: 'pending', condition: null, sceneGroup: null })],
+      [photo(), photo({ id: 'photo-2', label: null, measurement: null, verdict: 'pending', condition: null, sceneGroup: null, origin: null, reviewed: false })],
       { ...environment, device: '=HYPERLINK("x"), "따옴표"' },
     )
     const lines = csv.split('\r\n')
     expect(lines[0]).toBe(
-      'id,label,condition,sceneGroup,verdict,outcome,unavailableReason,score,noise,hasUnjudgedDirection,format,width,height,bitsPerPixel,device,analysisPath,userAgent',
+      'id,label,condition,sceneGroup,origin,reviewed,verdict,outcome,unavailableReason,score,noise,hasUnjudgedDirection,format,width,height,bitsPerPixel,device,analysisPath,userAgent',
     )
     expect(lines[1]).toBe(
-      'photo-1,sharp,outdoor,3,sharp,true-negative,,0.0412,0.37,false,jpeg,4032,3024,2.5,"\'=HYPERLINK(""x""), ""따옴표""",worker,',
+      'photo-1,sharp,outdoor,3,real-capture,true,sharp,true-negative,,0.0412,0.37,false,jpeg,4032,3024,2.5,"\'=HYPERLINK(""x""), ""따옴표""",worker,',
     )
-    expect(lines[2]).toMatch(/^photo-2,,,,pending,unlabeled,,,,,jpeg,/)
+    expect(lines[2]).toMatch(/^photo-2,,,,,false,pending,unlabeled,,,,,jpeg,/)
     expect(lines.at(-1)).toBe('')
   })
 

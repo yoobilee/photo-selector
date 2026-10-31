@@ -71,6 +71,9 @@ const metric = (caption: RegExp, name: string) =>
     .getAllByRole('cell')[0]!.textContent
 const photoIds = () =>
   screen.queryAllByRole('combobox', { name: / 정답$/ }).map((element) => element.getAttribute('aria-label')!.replace(' 정답', ''))
+// 테스트가 직접 계산한 기대 해시. 평가 도구의 해시 계산 코드를 쓰지 않는다.
+const sha256Of = async (file: Blob) =>
+  Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer())), (byte) => byte.toString(16).padStart(2, '0')).join('')
 
 describe('CalibrationApp', () => {
   let objectUrls: ReturnType<typeof installObjectUrlTracker>
@@ -277,5 +280,275 @@ describe('CalibrationApp', () => {
     expect(objectUrls.liveUrls.size).toBe(0)
     expect(fetchSpy).not.toHaveBeenCalled()
     consoleSpies.forEach((spy) => expect(spy).not.toHaveBeenCalled())
+  })
+})
+
+describe('CalibrationApp ground truth dataset', () => {
+  let objectUrls: ReturnType<typeof installObjectUrlTracker>
+
+  beforeEach(() => {
+    objectUrls = installObjectUrlTracker()
+    analyzer.pending.length = 0
+    analyzer.measured.length = 0
+    downloads.length = 0
+  })
+
+  afterEach(() => {
+    objectUrls.restore()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  const loadGroundTruth = (file: File) => fireEvent.change(screen.getByTestId('ground-truth-file-input'), { target: { files: [file] } })
+  const groundTruthFile = (entries: unknown[], change: Record<string, unknown> = {}) =>
+    new File([JSON.stringify({ format: 'photo-selector-blur-ground-truth', version: 1, hashAlgorithm: 'SHA-256', entries, ...change })], 'truth.json', {
+      type: 'application/json',
+    })
+  const labelOf = (id: string) => (screen.getByRole('combobox', { name: `${id} 정답` }) as HTMLSelectElement).value
+  const idOfFile = (name: string) => screen.getByTitle(name).closest('tr')!.querySelector('th span')!.textContent!
+  const panel = () => within(screen.getByRole('region', { name: '정답 데이터' }))
+  const count = (label: string) => panel().getByText(label, { selector: 'dt' }).nextElementSibling!.textContent
+  const status = () => panel().getByRole('status').textContent
+
+  it('applies labels by file content regardless of file name or import order, and counts what did not match', async () => {
+    render(<CalibrationApp />)
+    const a = createImageFile('a.jpg', 'jpeg', [1])
+    const b = createImageFile('b.jpg', 'jpeg', [2])
+    const c = createImageFile('c.jpg', 'jpeg', [3])
+    loadGroundTruth(
+      groundTruthFile([
+        { sha256: await sha256Of(c), label: 'sharp', origin: 'real-capture', reviewed: true },
+        { sha256: await sha256Of(a), label: 'blurry', condition: 'camera-shake', sceneGroup: 3, processing: '가로 손떨림' },
+        { sha256: await sha256Of(createImageFile('x.jpg', 'jpeg', [9])), label: 'sharp' },
+      ]),
+    )
+    expect(await panel().findByText(/사진에 적용할 수 있는 항목 3개/)).toBeInTheDocument()
+
+    // 정답 데이터와 다른 순서로 불러온다.
+    selectFiles([c, b, a])
+    await waitFor(() => expect(count('정답 적용')).toBe('2장'))
+    const [idA, idB, idC] = [idOfFile('a.jpg'), idOfFile('b.jpg'), idOfFile('c.jpg')]
+    expect(labelOf(idA)).toBe('blurry')
+    expect(screen.getByRole('combobox', { name: `${idA} 촬영 조건` })).toHaveValue('camera-shake')
+    expect(screen.getByRole('spinbutton', { name: `${idA} 장면 번호` })).toHaveValue(3)
+    expect(within(rowOf(idA)).getByText('가공: 가로 손떨림')).toBeInTheDocument()
+    expect(labelOf(idC)).toBe('sharp')
+    expect(screen.getByRole('combobox', { name: `${idC} 출처` })).toHaveValue('real-capture')
+    expect(screen.getByRole('checkbox', { name: `${idC} 정답 검토함` })).toBeChecked()
+    expect(screen.getByRole('combobox', { name: `${idA} 정답` })).toHaveAccessibleDescription('정답 데이터에서 적용')
+    expect(labelOf(idB)).toBe('')
+    expect(within(rowOf(idB)).getByText('정답 데이터에 없음')).toBeInTheDocument()
+    expect(count('정답 데이터에 없는 사진')).toBe('1장')
+    expect(count('불러온 사진에 없는 정답')).toBe('1개')
+
+    // 불러온 정답은 통계에 그대로 쓰인다.
+    await finishMeasure('c.jpg', SHARP)
+    await finishMeasure('b.jpg', SHARP)
+    await finishMeasure('a.jpg', SHARP)
+    expect(screen.getByText(/정답 있음 2장\(선명 1, 흐림 1\)/)).toBeInTheDocument()
+    expect(within(rowOf(idA)).getByText('미탐')).toBeInTheDocument()
+    // 해시 계산은 원본을 바꾸지 않는다.
+    expect(await readBytes(a)).toEqual([0xff, 0xd8, 0xff, 0xe0, 1])
+  })
+
+  it('matches by content when names collide and does not add a renamed copy twice', async () => {
+    render(<CalibrationApp />)
+    const labeled = createImageFile('IMG_0001.jpg', 'jpeg', [7, 7])
+    loadGroundTruth(groundTruthFile([{ sha256: await sha256Of(labeled), label: 'blurry' }]))
+    await panel().findByText(/사진에 적용할 수 있는 항목 1개/)
+
+    // 같은 이름, 다른 내용의 사진은 정답을 받지 않는다.
+    selectFiles([createImageFile('IMG_0001.jpg', 'jpeg', [8, 8])])
+    await waitFor(() => expect(count('정답 데이터에 없는 사진')).toBe('1장'))
+    selectFiles([labeled])
+    await waitFor(() => expect(count('정답 적용')).toBe('1장'))
+    expect(photoIds().map(labelOf)).toEqual(['', 'blurry'])
+
+    // 이름만 다르고 내용이 같은 파일은 이미 있는 사진이므로 추가하지 않는다.
+    selectFiles([createImageFile('renamed.jpg', 'jpeg', [7, 7])])
+    expect(await screen.findByRole('region', { name: '추가하지 않은 파일 1개' })).toBeInTheDocument()
+    expect(photoIds()).toHaveLength(2)
+    expect(count('정답 적용')).toBe('1장')
+  })
+
+  it('keeps labels picked by hand, skips conflicting entries and lets the user correct applied labels', async () => {
+    render(<CalibrationApp />)
+    const manual = createImageFile('manual.jpg', 'jpeg', [1])
+    const conflict = createImageFile('conflict.jpg', 'jpeg', [2])
+    const applied = createImageFile('applied.jpg', 'jpeg', [3])
+    selectFiles([manual, conflict, applied])
+    await waitFor(() => expect(photoIds()).toHaveLength(3))
+    const [idManual, idConflict, idApplied] = photoIds() as [string, string, string]
+    setLabel(idManual, 'sharp')
+
+    loadGroundTruth(
+      groundTruthFile([
+        { sha256: await sha256Of(manual), label: 'blurry' },
+        { sha256: await sha256Of(conflict), label: 'sharp' },
+        { sha256: await sha256Of(conflict), label: 'blurry' },
+        { sha256: await sha256Of(applied), label: 'blurry', processing: '가우시안 흐림 σ=3', origin: 'synthetic-edit' },
+        { sha256: 'photo-3', label: 'sharp' },
+      ]),
+    )
+    await waitFor(() => expect(count('정답 적용')).toBe('1장'))
+    expect(status()).toMatch(/적용할 수 있는 항목 2개.*손상 1, 충돌 1/)
+    expect(count('손상(형식 오류)')).toBe('1개')
+    expect(panel().getByText('손상 항목 순번: 5')).toBeInTheDocument()
+
+    expect(labelOf(idManual)).toBe('sharp')
+    expect(within(rowOf(idManual)).getByText('직접 고른 정답 유지(정답 데이터와 다름)')).toBeInTheDocument()
+    expect(count('직접 고른 정답 유지(데이터와 다름)')).toBe('1장')
+    expect(labelOf(idConflict)).toBe('')
+    expect(within(rowOf(idConflict)).getByText('정답 데이터 안에서 충돌 — 적용 안 함')).toBeInTheDocument()
+    expect(count('충돌로 적용 안 함')).toBe('1장')
+    expect(labelOf(idApplied)).toBe('blurry')
+
+    // 적용된 정답을 고치면 직접 고른 정답이 되며 나머지 설명은 유지된다.
+    setLabel(idApplied, 'unsure')
+    expect(labelOf(idApplied)).toBe('unsure')
+    expect(within(rowOf(idApplied)).getByText('직접 고른 정답 유지(정답 데이터와 다름)')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: `${idApplied} 출처` })).toHaveValue('synthetic-edit')
+    expect(count('직접 고른 정답 유지(데이터와 다름)')).toBe('2장')
+
+    // 정답 데이터를 닫으면 데이터에서 온 정답만 사라지고 직접 고른 정답은 남는다.
+    fireEvent.click(panel().getByRole('button', { name: '정답 데이터 닫기' }))
+    expect(panel().getByRole('button', { name: '정답 데이터 불러오기' })).toHaveFocus()
+    expect(photoIds().map(labelOf)).toEqual(['sharp', '', 'unsure'])
+  })
+
+  it('explains broken or wrong files and keeps using the dataset loaded before', async () => {
+    render(<CalibrationApp />)
+    const photo = createImageFile('a.jpg', 'jpeg', [1])
+    selectFiles([photo])
+    await waitFor(() => expect(photoIds()).toHaveLength(1))
+
+    loadGroundTruth(new File(['{"format": "photo-selector-blur-ground-truth", "entries": ['], 'broken.json'))
+    expect(await panel().findByText(/JSON 형식이 아닙니다/)).toBeInTheDocument()
+    expect(status()).not.toMatch(/이전에 불러온/)
+
+    loadGroundTruth(groundTruthFile([{ sha256: await sha256Of(photo), label: 'blurry' }]))
+    await waitFor(() => expect(labelOf(photoIds()[0]!)).toBe('blurry'))
+
+    loadGroundTruth(groundTruthFile([], { format: 'photo-selector-blur-evaluation', version: 1 }))
+    expect(await panel().findByText(/평가 결과 파일입니다.*이전에 불러온 정답 데이터를 계속 씁니다/)).toBeInTheDocument()
+    loadGroundTruth(groundTruthFile([], { version: 99 }))
+    expect(await panel().findByText(/지원하지 않는 정답 데이터 버전/)).toBeInTheDocument()
+    expect(labelOf(photoIds()[0]!)).toBe('blurry')
+  })
+
+  it('links a removed photo again when it is imported again', async () => {
+    render(<CalibrationApp />)
+    const photo = createImageFile('a.jpg', 'jpeg', [1])
+    loadGroundTruth(groundTruthFile([{ sha256: await sha256Of(photo), label: 'sharp', origin: 'public-image' }]))
+    await panel().findByText(/사진에 적용할 수 있는 항목 1개/)
+    selectFiles([photo])
+    await waitFor(() => expect(count('정답 적용')).toBe('1장'))
+    const first = photoIds()[0]!
+    setLabel(first, 'blurry')
+
+    fireEvent.click(screen.getByRole('button', { name: `${first} 평가에서 제거` }))
+    await waitFor(() => expect(photoIds()).toEqual([]))
+    expect(count('불러온 사진에 없는 정답')).toBe('1개')
+
+    selectFiles([createImageFile('a.jpg', 'jpeg', [1])])
+    await waitFor(() => expect(count('정답 적용')).toBe('1장'))
+    const again = photoIds()[0]!
+    expect(again).not.toBe(first)
+    // 제거하면서 직접 고친 정답은 지웠으므로 정답 데이터의 값으로 다시 붙는다.
+    expect(labelOf(again)).toBe('sharp')
+    expect(screen.getByRole('combobox', { name: `${again} 출처` })).toHaveValue('public-image')
+  })
+
+  it('marks a photo whose hash failed and keeps linking the others', async () => {
+    render(<CalibrationApp />)
+    const broken = createImageFile('broken.jpg', 'jpeg', [1])
+    broken.arrayBuffer = () => Promise.reject(new Error('NotReadableError'))
+    const fine = createImageFile('fine.jpg', 'jpeg', [2])
+    loadGroundTruth(groundTruthFile([{ sha256: await sha256Of(fine), label: 'sharp' }]))
+    await panel().findByText(/사진에 적용할 수 있는 항목 1개/)
+    selectFiles([broken, fine])
+
+    await waitFor(() => expect(count('해시 계산 실패')).toBe('1장'))
+    await waitFor(() => expect(count('정답 적용')).toBe('1장'))
+    expect(within(rowOf(idOfFile('broken.jpg'))).getByText('해시 계산 실패 — 정답 데이터와 연결 불가')).toBeInTheDocument()
+    expect(labelOf(idOfFile('fine.jpg'))).toBe('sharp')
+    // 해시가 없어도 분석과 직접 정답 고르기는 그대로 된다.
+    await finishMeasure('broken.jpg', BLURRY)
+    setLabel(idOfFile('broken.jpg'), 'blurry')
+    expect(within(rowOf(idOfFile('broken.jpg'))).getByText('정상(흐림)')).toBeInTheDocument()
+  })
+
+  it('warns when the page cannot hash files at all', async () => {
+    vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) })
+    render(<CalibrationApp />)
+    expect(panel().getByText(/Web Crypto를 쓸 수 없어 해시를 계산하지 못합니다/)).toBeInTheDocument()
+    selectFiles([createImageFile('a.jpg', 'jpeg', [1])])
+    await waitFor(() => expect(within(rowOf(photoIds()[0]!)).getByText('해시 계산 실패 — 정답 데이터에 넣을 수 없음')).toBeInTheDocument())
+  })
+
+  it('exports hashes and human labels only, keeps entries for photos not loaded and never puts hashes in evaluation results', async () => {
+    render(<CalibrationApp />)
+    const privateName = '홍길동_우리집_2026-10-01.jpg'
+    const labeled = createImageFile(privateName, 'jpeg', [1])
+    const unlabeled = createImageFile('IMG_0002.jpg', 'jpeg', [2])
+    const notLoadedHash = await sha256Of(createImageFile('elsewhere.jpg', 'jpeg', [5]))
+    loadGroundTruth(groundTruthFile([{ sha256: notLoadedHash, label: 'unsure', sourceNote: '공개 이미지 예시', reviewed: true }]))
+    await panel().findByText(/사진에 적용할 수 있는 항목 1개/)
+    selectFiles([labeled, unlabeled])
+    await waitFor(() => expect(count('정답 데이터에 없는 사진')).toBe('2장'))
+    const [first] = photoIds() as [string, string]
+    setLabel(first, 'blurry')
+    fireEvent.click(screen.getByRole('checkbox', { name: `${first} 정답 검토함` }))
+    // 자동 판정이 끝났어도 정답 없는 사진은 판정으로 정답을 만들지 않는다.
+    await finishMeasure(privateName, BLURRY)
+    await finishMeasure('IMG_0002.jpg', SHARP)
+
+    fireEvent.click(panel().getByRole('button', { name: '정답 데이터 내보내기' }))
+    expect(status()).toBe('정답 데이터 2개를 내보냈습니다(지금 사진 1개, 불러온 정답 데이터에서 유지 1개). 넣지 않음: 정답 미지정 사진 1.')
+    const [download] = downloads
+    expect(download!.fileName).toMatch(/^blur-ground-truth-\d{8}-\d{6}\.json$/)
+    expect(download!.mimeType).toBe('application/json')
+    for (const forbidden of ['홍길동', 'IMG_0002', '.jpg', 'blob:', 'verdict', 'score']) expect(download!.text).not.toContain(forbidden)
+    expect(download!.text).not.toMatch(/photo-\d/)
+    const exported = JSON.parse(download!.text)
+    expect(exported.entries).toEqual(
+      [
+        { sha256: await sha256Of(labeled), label: 'blurry', condition: null, sceneGroup: null, origin: null, reviewed: true, processing: null, sourceNote: null },
+        { sha256: notLoadedHash, label: 'unsure', condition: null, sceneGroup: null, origin: null, reviewed: true, processing: null, sourceNote: '공개 이미지 예시' },
+      ].sort((x, y) => (x.sha256 < y.sha256 ? -1 : 1)),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'JSON 내보내기' }))
+    fireEvent.click(screen.getByRole('button', { name: 'CSV 내보내기' }))
+    for (const { text } of downloads.slice(1)) {
+      expect(text).not.toContain(await sha256Of(labeled))
+      expect(text).not.toContain(notLoadedHash)
+      expect(text).not.toContain('공개 이미지 예시')
+    }
+    expect(JSON.parse(downloads[1]!.text).photos[0]).toMatchObject({ id: first, label: 'blurry', reviewed: true, origin: null })
+  })
+
+  it('does not download an empty ground truth file', async () => {
+    render(<CalibrationApp />)
+    expect(panel().getByRole('button', { name: '정답 데이터 내보내기' })).toHaveAttribute('aria-disabled', 'true')
+    selectFiles([createImageFile('a.jpg', 'jpeg', [1])])
+    await waitFor(() => expect(photoIds()).toHaveLength(1))
+    fireEvent.click(panel().getByRole('button', { name: '정답 데이터 내보내기' }))
+    expect(downloads).toEqual([])
+    expect(status()).toMatch(/^내보낼 정답이 없습니다/)
+  })
+
+  it('does not download a ground truth file that could not be loaded again', async () => {
+    render(<CalibrationApp />)
+    const fullDataset = Array.from({ length: 20_000 }, (_, index) => ({ sha256: index.toString(16).padStart(64, '0'), label: 'sharp' }))
+    loadGroundTruth(groundTruthFile(fullDataset))
+    await panel().findByText(/사진에 적용할 수 있는 항목 20000개/)
+    selectFiles([createImageFile('a.jpg', 'jpeg', [1])])
+    await waitFor(() => expect(count('정답 데이터에 없는 사진')).toBe('1장'))
+    setLabel(photoIds()[0]!, 'blurry')
+
+    fireEvent.click(panel().getByRole('button', { name: '정답 데이터 내보내기' }))
+    expect(downloads).toEqual([])
+    expect(status()).toBe('정답 데이터를 내보내지 못했습니다. 항목이 불러오기 한도(최대 20,000개)를 넘어 다시 불러올 수 없습니다.')
   })
 })

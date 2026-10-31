@@ -4,7 +4,7 @@ import CloseIcon from '../components/CloseIcon.tsx'
 import type { Photo } from '../photos/photo.ts'
 import { SHARP_RATIO_THRESHOLD } from '../photos/sharpness.ts'
 import { sceneConditions, type EvaluationPhoto, type SceneCondition } from './evaluationExport.ts'
-import { classifyOutcome, type GroundTruth } from './evaluationMetrics.ts'
+import { classifyOutcome, groundTruths, type GroundTruth } from './evaluationMetrics.ts'
 import {
   describeUnavailableReason,
   groundTruthText,
@@ -12,22 +12,25 @@ import {
   sceneConditionText,
   verdictText,
 } from './evaluationText.ts'
+import { sampleOrigins, type PhotoAnnotation, type SampleOrigin } from './groundTruthDataset.ts'
+import { sampleOriginText, type GroundTruthStatus } from './groundTruthText.ts'
 
-export interface PhotoAnnotation {
-  readonly label: GroundTruth | null
-  readonly condition: SceneCondition | null
-  readonly sceneGroup: number | null
+export interface EvaluationTableRow {
+  readonly photo: Photo
+  readonly annotation: PhotoAnnotation
+  readonly evaluation: EvaluationPhoto
+  // 정답 데이터 연결 상태. 표시할 것이 없으면 null
+  readonly groundTruthStatus: GroundTruthStatus | null
 }
 
 interface EvaluationPhotoTableProps {
-  readonly rows: readonly { readonly photo: Photo; readonly evaluation: EvaluationPhoto }[]
+  readonly rows: readonly EvaluationTableRow[]
   readonly onAnnotate: (photoId: string, change: Partial<PhotoAnnotation>) => void
   readonly onRemove: (photoId: string) => void
 }
 
 const controlClassName =
   'min-h-9 rounded border border-neutral-400 bg-white px-1 text-sm focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-700'
-const groundTruths: readonly GroundTruth[] = ['sharp', 'blurry', 'unsure']
 
 const formatNumber = (value: number | null | undefined, digits: number) => (value == null ? '—' : value.toFixed(digits))
 
@@ -53,8 +56,9 @@ function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTab
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[56rem] text-left text-sm">
+    // relative: 표 안의 화면 밖 글자(sr-only, absolute)가 가로 스크롤 영역을 벗어나 모바일 화면 전체를 넓히지 않게 한다.
+    <div className="relative overflow-x-auto">
+      <table className="w-full min-w-[68rem] text-left text-sm">
         <caption className="sr-only">사진별 정답과 자동 판정</caption>
         <thead>
           <tr className="border-b border-neutral-300 text-neutral-700">
@@ -62,6 +66,8 @@ function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTab
             <th scope="col" className="py-2 pr-2 font-medium">정답</th>
             <th scope="col" className="py-2 pr-2 font-medium">촬영 조건</th>
             <th scope="col" className="py-2 pr-2 font-medium">장면 번호</th>
+            <th scope="col" className="py-2 pr-2 font-medium">출처</th>
+            <th scope="col" className="py-2 pr-2 font-medium">검토</th>
             <th scope="col" className="py-2 pr-2 font-medium">자동 판정</th>
             <th scope="col" className="py-2 pr-2 font-medium">
               점수 <span className="font-normal">(흐림 의심 &lt; {SHARP_RATIO_THRESHOLD})</span>
@@ -72,9 +78,10 @@ function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTab
           </tr>
         </thead>
         <tbody>
-          {rows.map(({ photo, evaluation }, index) => {
+          {rows.map(({ photo, annotation, evaluation, groundTruthStatus }, index) => {
             const outcome = classifyOutcome(evaluation)
             const isError = outcome === 'false-positive' || outcome === 'false-negative'
+            const statusId = `${photo.id}-ground-truth-status`
             return (
               <tr key={photo.id} className="border-b border-neutral-200 align-top">
                 <th scope="row" className="py-2 pr-2 font-normal">
@@ -103,7 +110,8 @@ function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTab
                 <td className="py-2 pr-2">
                   <select
                     aria-label={`${evaluation.id} 정답`}
-                    value={evaluation.label ?? ''}
+                    aria-describedby={groundTruthStatus ? statusId : undefined}
+                    value={annotation.label ?? ''}
                     onChange={(event) =>
                       onAnnotate(photo.id, { label: (event.currentTarget.value || null) as GroundTruth | null })
                     }
@@ -116,11 +124,19 @@ function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTab
                       </option>
                     ))}
                   </select>
+                  {groundTruthStatus && (
+                    <span
+                      id={statusId}
+                      className={`mt-1 block max-w-40 text-xs ${groundTruthStatus.needsAttention ? 'font-semibold text-red-800' : 'text-neutral-700'}`}
+                    >
+                      {groundTruthStatus.text}
+                    </span>
+                  )}
                 </td>
                 <td className="py-2 pr-2">
                   <select
                     aria-label={`${evaluation.id} 촬영 조건`}
-                    value={evaluation.condition ?? ''}
+                    value={annotation.condition ?? ''}
                     onChange={(event) =>
                       onAnnotate(photo.id, { condition: (event.currentTarget.value || null) as SceneCondition | null })
                     }
@@ -141,13 +157,53 @@ function EvaluationPhotoTable({ rows, onAnnotate, onRemove }: EvaluationPhotoTab
                     step={1}
                     inputMode="numeric"
                     aria-label={`${evaluation.id} 장면 번호`}
-                    value={evaluation.sceneGroup ?? ''}
+                    value={annotation.sceneGroup ?? ''}
                     onChange={(event) => {
                       const value = Number.parseInt(event.currentTarget.value, 10)
                       onAnnotate(photo.id, { sceneGroup: Number.isSafeInteger(value) && value > 0 ? value : null })
                     }}
                     className={`${controlClassName} w-16`}
                   />
+                </td>
+                <td className="py-2 pr-2">
+                  <select
+                    aria-label={`${evaluation.id} 출처`}
+                    value={annotation.origin ?? ''}
+                    onChange={(event) =>
+                      onAnnotate(photo.id, { origin: (event.currentTarget.value || null) as SampleOrigin | null })
+                    }
+                    className={controlClassName}
+                  >
+                    <option value="">미지정</option>
+                    {sampleOrigins.map((origin) => (
+                      <option key={origin} value={origin}>
+                        {sampleOriginText[origin]}
+                      </option>
+                    ))}
+                  </select>
+                  {/* 가공 방식과 출처 설명은 정답 데이터 파일에서만 고치며 평가 결과 내보내기에 넣지 않는다. */}
+                  {annotation.processing && (
+                    <span className="mt-1 block max-w-40 truncate text-xs text-neutral-700" title={annotation.processing}>
+                      가공: {annotation.processing}
+                    </span>
+                  )}
+                  {annotation.sourceNote && (
+                    <span className="mt-1 block max-w-40 truncate text-xs text-neutral-700" title={annotation.sourceNote}>
+                      출처: {annotation.sourceNote}
+                    </span>
+                  )}
+                </td>
+                <td className="py-2 pr-2">
+                  <label className="flex min-h-9 items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={annotation.reviewed}
+                      onChange={(event) => onAnnotate(photo.id, { reviewed: event.currentTarget.checked })}
+                      aria-label={`${evaluation.id} 정답 검토함`}
+                      className="size-4"
+                    />
+                    <span aria-hidden="true">검토함</span>
+                  </label>
                 </td>
                 <td className="py-2 pr-2">
                   <span className="font-medium">{verdictText[evaluation.verdict]}</span>
