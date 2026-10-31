@@ -53,6 +53,18 @@ linuxTest('차단·dry-run·잘못된 인수는 부작용 없이 실패 코드 �
   }
 });
 
+linuxTest('custom check URL의 정상·다른 check ID·다른 run ID를 실제 CLI 진입점에서도 구별', () => {
+  const valid = run({ gateCheck: 'check-url' });
+  assert.equal(valid.result.status, 0, valid.result.stderr);
+  assert.equal(valid.merges.length, 1);
+  for (const gateCheck of ['wrong-check-url', 'wrong-run-id']) {
+    const invalid = run({ gateCheck });
+    assert.equal(invalid.result.status, 1, invalid.result.stderr);
+    assert.deepEqual(sideEffects(invalid.store.calls), []);
+    assert.match(invalid.result.stdout, /기존 게이트 검사의 출처·최신성 확인 실패/);
+  }
+});
+
 linuxTest('병합 명령 실패 또는 저장 제목 오류 후 자동 재시도하지 않음', () => {
   for (const options of [{ merge: 'fail' }, { badSubject: true }]) {
     const { result, merges } = run(options);

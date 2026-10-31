@@ -133,6 +133,21 @@ test('기존 게이트 미통과·검사 출처 불일치·변경 요청·최신
   blocked(await run({ behindBy: 'error' }), /최신 base 반영: unknown/);
 });
 
+test('custom check URL도 출처·근거 재확인을 거쳐 병합하며 다른 check·run ID는 부작용 없이 차단', async () => {
+  const valid = await run({ gateCheck: 'check-url' });
+  assert.equal(valid.status, 0, valid.out + valid.err);
+  assert.equal(valid.merges.length, 1);
+  assert.match(valid.out, /검사 출처: 확인됨\(proof v2, 근거 일치\)/);
+  assert.match(valid.out, /병합 후 감사: 게이트 근거가 병합 직전 재확인과 같음/);
+  const dry = await run({ gateCheck: 'check-url' }, ['--dry-run']);
+  assert.equal(dry.status, 0, dry.out + dry.err);
+  assert.deepEqual(dry.effects, []);
+  for (const gateCheck of ['wrong-check-url', 'wrong-run-id']) {
+    blocked(await run({ gateCheck }), /기존 게이트 검사의 출처·최신성 확인 실패/, gateCheck);
+    blocked(await run({ gateCheck }, ['--dry-run']), /기존 게이트 검사의 출처·최신성 확인 실패/, gateCheck);
+  }
+});
+
 test('게이트 proof v1은 v2로 신뢰하지 않고 재실행을 안내하며, v2 근거 digest가 다르면 차단', async () => {
   for (const risk of ['high', 'medium']) {
     const options = risk === 'high' ? {} : { risk, approval: 'none' };
