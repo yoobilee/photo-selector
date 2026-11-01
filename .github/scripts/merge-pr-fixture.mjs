@@ -153,7 +153,9 @@ export function createFake(options = {}, store = {}) {
     const added = change ? [{ id: 101, name: 'verify', head_sha: change.headSha ?? head, check_suite: { id: 501 }, app: change.app ?? actionsApp, status: 'completed', conclusion: 'success' }] : [];
     return [
       { id: 99, name: 'independent-review', head_sha: head, status: 'completed', conclusion: o.gate ? 'success' : 'failure',
-        app: o.gateCheck === 'wrong-app' ? { id: 1, slug: 'other' } : actionsApp, external_id: JSON.stringify(gateProof), details_url: 'https://github.com/owner/repo/actions/runs/42' },
+        app: o.gateCheck === 'wrong-app' ? { id: 1, slug: 'other' } : actionsApp, external_id: JSON.stringify(gateProof),
+        details_url: o.gateCheck === 'check-url' ? 'https://github.com/owner/repo/runs/99'
+          : o.gateCheck === 'wrong-check-url' ? 'https://github.com/owner/repo/runs/100' : 'https://github.com/owner/repo/actions/runs/42' },
       ...original, ...added,
     ];
   };
@@ -209,8 +211,8 @@ export function createFake(options = {}, store = {}) {
       if (o.behindBy === 'error') throw failure('compare failed');
       return { behind_by: o.behindBy };
     }
-    if (p === `repos/${repo}/actions/workflows/independent-review.yml`) return { id: 4 };
-    if (p === `repos/${repo}/actions/runs/42`) return { workflow_id: 4, path: '.github/workflows/independent-review.yml', status: 'completed', conclusion: 'success', run_attempt: 1, repository: { full_name: repo }, head_repository: { full_name: repo }, event: 'pull_request_target', head_sha: 'd'.repeat(40) };
+    if (p === `repos/${repo}/actions/workflows/independent-review.yml`) return { id: 4, path: '.github/workflows/independent-review.yml' };
+    if (p === `repos/${repo}/actions/runs/42`) return { id: o.gateCheck === 'wrong-run-id' ? 43 : 42, workflow_id: 4, path: '.github/workflows/independent-review.yml', status: 'completed', conclusion: 'success', run_attempt: 1, repository: { full_name: repo }, head_repository: { full_name: repo }, event: 'pull_request_target', head_sha: 'd'.repeat(40) };
     if (p === `repos/${repo}/actions/runs?head_sha=${store.head}`) return [{ workflow_runs: [ciRun, ...changedRun()] }];
     if (p.startsWith(`repos/${repo}/contents/.github/workflows/independent-review.yml?ref=`)) return { sha: 'gate-approved' };
     // 'main-workflow-updated': 같은 check여도 기본 브랜치의 승인된 ci.yml이 바뀌어 출처가 더 이상 승인 버전이 아닌 상황.
