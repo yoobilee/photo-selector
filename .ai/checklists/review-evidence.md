@@ -4,7 +4,7 @@
 
 이 도구는 SHA·fingerprint·정책 SHA·수집 digest·보고서 SHA-256을 계산하고, 기존 게이트의 실제 판정과 리뷰 자료를 조회한다. 명시적으로 요청하면 별도 Actions workflow가 보고서를 봇 명의로 등록한다. AI를 호출하거나 관리자 확인·승인·병합을 하지 않는다.
 
-PR #11이 먼저 병합되어야 한다. squash 병합 뒤에는 후속 커밋만 새 main 위로 재배치해 부모 PR의 중복 diff를 제거하고, base를 main으로 바꾼 뒤 최신 CI·독립 리뷰·기존 관리자 확인을 거쳐 병합한다. `review-evidence.yml`이 기본 브랜치에 도입되기 전에는 dispatch가 실패한다. 기존 보호 설정과 `independent-review` 게이트는 계속 유지한다.
+PR #11은 `979c65b1278ab71c8f706b09866679ce8c1bd7ed`로 squash 병합됐으며, PR #12의 고유 커밋을 새 main 위로 재배치해 중복 diff를 제거했다. base는 main이고 최신 CI·독립 리뷰·기존 관리자 확인을 거쳐야 한다. `review-evidence.yml`이 기본 브랜치에 도입되기 전에는 dispatch가 실패한다. 기존 보호 설정과 `independent-review` 게이트는 계속 유지한다.
 
 ## 읽기 전용 사용
 
