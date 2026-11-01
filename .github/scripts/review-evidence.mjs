@@ -60,13 +60,23 @@ async function readState({ github, repository, number }) {
       || !['PENDING', 'COMMENTED', 'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state))) fail('리뷰 응답 형식 오류');
   if (new Set(evaluation.files.map(file => file.filename)).size !== evaluation.files.length
       || evaluation.files.some(file => typeof file.filename !== 'string' || !file.filename || typeof file.status !== 'string')) fail('변경 파일 응답 형식 오류');
-  // 자기 보고서 등록 자체가 다음 수집 결과를 바꾸지 않도록 검증된 게시 봇의 자료만 제외한다.
-  // 이 제외는 승인 판정에 쓰이지 않는다. 원래 게이트는 모든 댓글을 계속 평가한다.
-  const basisComments = comments.filter(comment => !(isEvidencePublisher(comment) && markerPattern.test(normalizeNewlines(comment.body))));
-  const collectionHash = sha256(canonical({ comments: basisComments, reviews, reviewComments, checkRuns, gateEvidence: evaluation.evidence }));
   const description = describe(pr, evaluation.files, config);
   const target = { repository, number, head: description.head, base: description.base, fingerprint: description.fingerprint, policySha: file.sha };
-  return { repo, defaultBranch: info.default_branch, current, target, collectionHash, config, evaluation, comments, reviews, reviewComments, checkRuns };
+  const state = { repo, defaultBranch: info.default_branch, current, target, config, evaluation, comments, reviews, reviewComments, checkRuns };
+  const result = legacyReview(state) ?? githubReview(state);
+  // 현재 대상·검증된 원본 근거로 전체 본문과 key를 재구성할 수 있는 댓글만 제외한다.
+  // 같은 Actions 앱의 다른 workflow는 작성자 정보만으로 구별할 수 없다. 승인에는 쓰지 않는다.
+  const basisComments = comments.filter(comment => {
+    if (!result || !isEvidencePublisher(comment)) return true;
+    const body = normalizeNewlines(comment.body);
+    const key = markerPattern.exec(body)?.[1];
+    const recordedHash = /\n수집 digest: ([a-f0-9]{64})\n/.exec(body)?.[1];
+    if (!key || !recordedHash) return true;
+    const expected = renderEvidenceReport({ target, collectionHash: recordedHash, result });
+    return key !== expected.key || body !== expected.body;
+  });
+  const collectionHash = sha256(canonical({ comments: basisComments, reviews, reviewComments, checkRuns, gateEvidence: evaluation.evidence }));
+  return { ...state, collectionHash };
 }
 
 // 로컬 세션 파일은 실행 증명이 아니라 제출자의 주장이다. 기존 관리자 확인을 대체하지 않는다.
@@ -189,12 +199,14 @@ export async function publishEvidence({ github, context, request }) {
   if (!exactKeys(request, ['v', 'target', 'collectionHash', 'result']) || request.v !== 1
       || (request.result !== null && (typeof request.result !== 'object' || Array.isArray(request.result)))
       || Buffer.byteLength(JSON.stringify(request), 'utf8') > maxRequestBytes) fail('등록 요청 형식 또는 크기 오류');
+  if (request.result !== null) fail('미인증 로컬 결과는 게시할 수 없음');
   if (typeof context.requestedNumber !== 'string' || !/^[1-9][0-9]*$/.test(context.requestedNumber)
       || context.requestedNumber !== String(request.target?.number)) fail('workflow PR 번호와 자료 대상 불일치');
   const repository = await assertPublisherWorkflow({ github, context });
   if (request.target?.repository !== repository) fail('다른 저장소 등록 요청');
   const { packet, state } = await collectReviewPacket({ github, repository, number: request.target.number, result: request.result });
   if (!same(packet.target, request.target) || packet.collectionHash !== request.collectionHash) fail('등록 전 대상·근거 변경');
+  if (!['trusted-bot-api', 'legacy-gate-verified'].includes(packet.result?.authentication)) fail('게시 가능한 검증된 리뷰 근거 없음');
   const report = renderEvidenceReport(packet);
   const matches = state.comments.filter(comment => isEvidencePublisher(comment)
     && markerPattern.exec(normalizeNewlines(comment.body))?.[1] === report.key);

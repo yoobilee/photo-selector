@@ -26,7 +26,7 @@ PR·기본 브랜치 정책·전체 파일·댓글·리뷰·인라인·check 목
 - Codex 구현의 Claude 등 로컬 결과는 `review-packet.json`의 `localResultTemplate`을 리뷰 세션에 함께 전달한다. 결과 수집 담당 Agent가 target을 그대로 보존한 `result.json`을 만든다. 사용자가 SHA나 fingerprint를 옮겨 적을 필요는 없다.
 - 템플릿의 `findings: null`, `report: null`, `sessionId: null`은 미완성 값이다. 실제 리뷰 실행 결과로 채워야 한다. 빈 응답을 0건으로 채우거나 status만 completed로 바꾸지 않는다.
 - 결과의 role은 self 또는 independent다. self는 구현 Agent와 같아야 하며 independent는 기존 정책의 다른 reviewer와 같아야 한다. 고위험 독립 검증에 자체 리뷰를 재사용하지 않는다.
-- 로컬 sessionId와 보고서 파일만으로 실제 AI 실행을 인증할 수 없다. 결과는 `unverified-local-session`으로 표시하며 관리자 확인을 대체하지 않는다. 지적 0건이어도 `review.state`는 `unverified-local-result`이고 `review.provenance`에 출처를 별도로 표시한다. 게시 제목도 `미인증 로컬 독립/자체 리뷰 자료`로 구분해 검증된 독립 보고서처럼 보이지 않게 한다.
+- 로컬 sessionId와 보고서 파일만으로 실제 AI 실행을 인증할 수 없다. 결과는 `unverified-local-session`으로 표시하며 수집·분석·로컬 출력만 허용한다. 지적 0건이어도 `review.state`는 `unverified-local-result`이고 `review.provenance`에 출처를 별도로 표시한다. 로컬 출력의 제목은 `미인증 로컬 독립/자체 리뷰 자료`다. CLI는 `--result`와 `--dispatch`의 조합을 거부하며 workflow도 외부 result가 있는 요청을 거부한다. 인증됐다고 자체 선언한 JSON도 게시할 수 없다.
 
 ```text
 npm run review:prepare -- yoobilee/photo-selector PR번호 --result result.json --output checked-packet.json
@@ -39,14 +39,18 @@ npm run review:prepare -- yoobilee/photo-selector PR번호 --result result.json 
 기본 브랜치 도입 후 결과 수집 담당 Agent가 다음처럼 요청한다.
 
 ```text
-npm run review:prepare -- yoobilee/photo-selector PR번호 --result result.json --dispatch
+npm run review:prepare -- yoobilee/photo-selector PR번호 --dispatch
 ```
 
-현재 신뢰할 GitHub 리뷰 또는 기존 게이트가 확인한 보고서를 수집할 때는 `--result`를 생략할 수 있다. CLI는 고정된 `review-evidence.yml`과 기본 ref만 dispatch한다. 관리자 인증으로 댓글을 직접 쓰는 옵션은 없다. `--dispatch`가 없으면 workflow도 요청하지 않는다. 로컬 파일·보고서·해시를 stdout에 출력할 수 있으므로 결과 파일에 인증값을 넣지 않는다.
+게시할 수 있는 자료는 현재 신뢰할 GitHub 리뷰 또는 기존 게이트가 확인한 보고서뿐이다. 요청의 result는 null이어야 하며 workflow가 API에서 원본을 다시 수집한다. 미인증 로컬 자료를 봇 명의로 게시하는 기능은 제공하지 않는다. CLI는 고정된 `review-evidence.yml`과 기본 ref만 dispatch한다. 관리자 인증으로 댓글을 직접 쓰는 옵션은 없다. `--dispatch`가 없으면 workflow도 요청하지 않는다. 로컬 파일·보고서·해시를 stdout에 출력할 수 있으므로 결과 파일에 인증값을 넣지 않는다.
 
 workflow는 기본 GITHUB_TOKEN만 사용한다. contents/pull-requests/actions/checks는 read, issues는 보고서 작성을 위한 write다. checks·contents·actions write, 별도 Secrets, AI 인증은 없다. PR 코드·의존성·설치·캐시·임의 셸을 실행하지 않는다. workflow run ID·ref·HEAD·저장소·path·승인된 YAML과 요청자의 현재 write/maintain/admin 권한을 확인하고 최초 attempt만 허용한다. 실행 그룹은 별도 pr_number 입력으로 PR별 분리하며 CLI가 자동 전달한다. 요청 JSON 안의 PR 번호와 정확히 일치해야 한다. 잘못된 JSON은 concurrency에서 평가하지 않고 job의 일반 실패 처리로 중단한다.
 
 보고서는 불변 target과 수집 digest, 리뷰 역할·출처·완료 여부·집계를 명시한다. 같은 key와 동일 본문의 실제 GitHub Actions 봇 댓글만 재사용한다. 위조 작성자나 변경된 보고서를 같은 등록으로 인정하지 않는다. 게시 후 응답이 불명확하면 자동 재시도하지 않고, 다음 명시적 실행에서 실제 댓글로 복구한다. 요청 성공은 게시 완료가 아니며 Actions 실행 결과·댓글을 확인해야 한다. 봇 계정/앱 응답 형식은 실제 도입 후 확인하며 모르는 형식은 통과시키지 않는다.
+
+`collectionHash`의 자기 보고서 제외는 봇 계정·앱 확인에 더해 현재 저장소·PR 번호·HEAD·BASE·fingerprint·정책 SHA와 현재 검증된 원본 자료의 ID·집계·본문을 사용한다. 댓글에 기록된 수집 digest로 보고서 key와 전체 본문을 재구성해 둘 다 일치할 때만 제외한다. 제목·마커만 있는 댓글, 다른 대상·원본 ID, 미인증 자료, 변조 본문은 제외하지 않는다. 동일 보고서 댓글이 여러 개면 재게시를 중단한다. 기록된 digest는 재구성용 값이며 현재 상태의 증명이 아니다. 게시 요청은 별도로 최신 수집 digest와 일치해야 한다.
+
+**같은 GitHub Actions 앱의 다른 workflow는 API 작성자 신원만으로 완전히 구별할 수 없다.** 위 조건에 맞는 보고서를 다른 workflow가 그대로 복사하면 출처 workflow를 댓글만으로 증명할 수 없으며 hash 제외 대상이 될 수 있다. 이 제한은 원본 검증·본문 일치와 무관한 게시 주체의 인증 한계다. hash 제외나 봇 댓글을 관리자 확인·`independent-review` 통과 근거로 사용하지 않는다. 게시 실행 자체의 run/workflow 검증은 유지한다. workflow별 게시 신원 분리는 후속 권한 설계 범위이며 이번 변경에 추가하지 않는다.
 
 진행 중 CI나 리뷰가 바뀌면 수집 digest와 보고서 key도 바뀌므로 등록 요청을 다시 준비해야 한다. 이는 가용성보다 오래된 결과의 차단을 우선한 제한이다. 도입 후 첫 실제 게시에서 앱 필드·작성자·중복 복구를 확인하기 전에는 등록 성공을 운영 검증 완료로 보지 않는다.
 
@@ -60,7 +64,7 @@ workflow는 기본 GITHUB_TOKEN만 사용한다. contents/pull-requests/actions/
 |---|---|---|
 | SHA·fingerprint·hash 계산 | Summary/API에서 직접 확인·복사 | 수집기가 계산, target 파일을 Agent가 전달 |
 | 리뷰 실행 | 구현자와 다른 리뷰 세션 확보 | 동일. 자체/독립 구분과 결과 상태를 기계적으로 검사 |
-| 보고서 댓글 등록 | 관리자가 원문을 복사해 등록 | 자료용 봇 보고서는 dispatch로 등록 가능 |
+| 보고서 댓글 등록 | 관리자가 원문을 복사해 등록 | 검증된 기존 GitHub/관리자 자료만 dispatch로 등록, 미인증 로컬 자료는 파일 출력만 가능 |
 | 기존 게이트가 인정하는 관리자 보고서·`/review-gate` | 관리자 직접 확인·입력 | 보호 유지로 여전히 필요. 대체 승인 경로는 후속 단계 |
 | 최종 승인·병합 | 관리자 판단과 기존 절차 | 동일. 위임·자동 병합 없음 |
 

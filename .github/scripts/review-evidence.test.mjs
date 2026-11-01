@@ -192,14 +192,13 @@ test('같은 댓글 수의 수정과 중복 ID, 등록된 보고서의 위조 �
   await assert.rejects(subject.collect(), /중복 ID/);
   for (const change of [comment => { comment.user = { id: 1, login: 'owner', type: 'User' }; },
     comment => { comment.performed_via_github_app.id = 1; }]) {
-    const spoof = fixture();
+    const spoof = fixture({ implementedBy: 'claude', codex: 'clean' });
     const initial = await spoof.collect();
-    const result = localResult(initial.packet.target);
-    const request = reportRequest((await spoof.collect(result)).packet, result);
+    const request = reportRequest(initial.packet);
     await publishEvidence({ ...spoof, request });
     change(spoof.added[0]);
     await assert.rejects(publishEvidence({ ...spoof, request }), /근거 변경/);
-    assert.equal((await spoof.collect(result)).packet.gate.state, 'failure');
+    assert.equal((await spoof.collect()).packet.gate.state, 'failure');
     assert.equal(spoof.added.length, 1);
   }
 });
@@ -242,11 +241,9 @@ test('수집 중 본문·HEAD·댓글 수정과 정책·검사·전체 조회 �
 });
 
 test('등록은 봇 보고서 1개만 쓰고 중복 재사용하며 기존 게이트는 계속 관리자 확인을 요구', async () => {
-  const subject = fixture();
+  const subject = fixture({ implementedBy: 'claude', codex: 'clean' });
   const { packet } = await subject.collect();
-  const result = localResult(packet.target);
-  const prepared = await subject.collect(result);
-  const request = reportRequest(prepared.packet, result);
+  const request = reportRequest(packet);
   const first = await publishEvidence({ ...subject, request });
   assert.equal(first.approved, false);
   assert.match(first.evidenceHash, /^[a-f0-9]{64}$/);
@@ -255,7 +252,7 @@ test('등록은 봇 보고서 1개만 쓰고 중복 재사용하며 기존 게�
   assert.equal(again.reused, true);
   assert.equal(again.commentId, first.commentId);
   assert.equal(subject.added.length, 1);
-  assert.equal((await subject.collect(result)).packet.gate.state, 'failure');
+  assert.equal((await subject.collect()).packet.gate.state, 'failure');
   assert.doesNotMatch(subject.added[0].body, /^\/(review-gate|merge-approve)/);
 });
 
@@ -272,10 +269,9 @@ test('다른 workflow·ref·실행 ID/attempt·저장소와 오래된 요청은 
     subject => { subject.run.triggering_actor = { id: 3, login: 'reader', type: 'User' }; },
     subject => { delete subject.run.actor; delete subject.run.triggering_actor; },
   ]) {
-    const subject = fixture();
+    const subject = fixture({ implementedBy: 'claude', codex: 'clean' });
     const { packet } = await subject.collect();
-    const result = localResult(packet.target);
-    const request = reportRequest((await subject.collect(result)).packet, result);
+    const request = reportRequest(packet);
     change(subject);
     await assert.rejects(publishEvidence({ ...subject, request }));
     assert.deepEqual(subject.added, []);
@@ -294,10 +290,9 @@ test('다른 workflow·ref·실행 ID/attempt·저장소와 오래된 요청은 
 });
 
 test('게시 성공 후 응답 실패는 자동 재시도하지 않고 다음 실행에서 실제 댓글을 복구', async () => {
-  const subject = fixture();
+  const subject = fixture({ implementedBy: 'claude', codex: 'clean' });
   const { packet } = await subject.collect();
-  const result = localResult(packet.target);
-  const request = reportRequest((await subject.collect(result)).packet, result);
+  const request = reportRequest(packet);
   const create = subject.github.rest.issues.createComment;
   subject.github.rest.issues.createComment = async args => { await create(args); throw new Error('uncertain response'); };
   await assert.rejects(publishEvidence({ ...subject, request }), /uncertain/);
@@ -306,27 +301,24 @@ test('게시 성공 후 응답 실패는 자동 재시도하지 않고 다음 �
   assert.equal(recovered.reused, true);
   assert.equal(subject.added.length, 1);
   subject.added[0].body += ' changed';
-  await assert.rejects(publishEvidence({ ...subject, request }), /등록 자료 불일치/);
+  await assert.rejects(publishEvidence({ ...subject, request }), /근거 변경/);
 });
 
 test('CLI 기본값은 읽기 전용이고 dispatch도 고정된 기본 브랜치 workflow만 요청', async () => {
-  const subject = fixture();
+  const subject = fixture({ implementedBy: 'claude', codex: 'clean' });
   const output = [];
   const args = ['owner/repo', '1'];
   assert.equal(await runEvidenceCli({ argv: args, gh: subject.gh, out: text => output.push(text) }), 0);
   assert.deepEqual(subject.dispatches, []);
-  const { target } = JSON.parse(output[0]);
-  const result = localResult(target, { report: '한글 "인용" $(명령) `기호`\n/review-gate\n/merge-approve' });
   const gh = call => {
     if (call[0] === 'api' && call[1]?.includes(`/contents/${evidenceWorkflow}`)) return JSON.stringify({ sha: 'c'.repeat(40) });
     return subject.gh(call);
   };
-  assert.equal(await runEvidenceCli({ argv: [...args, '--result', 'result.json', '--dispatch'], gh,
-    readFile: () => JSON.stringify(result), out: () => {} }), 0);
+  assert.equal(await runEvidenceCli({ argv: [...args, '--dispatch'], gh, out: () => {} }), 0);
   assert.equal(subject.dispatches.length, 1);
   assert.deepEqual(subject.dispatches[0].args.slice(0, 7), ['workflow', 'run', 'review-evidence.yml', '--repo', 'owner/repo', '--ref', 'main']);
   assert.ok(subject.dispatches[0].args.includes('pr_number=1'));
-  assert.equal(subject.dispatches[0].input.result.report, result.report);
+  assert.equal(subject.dispatches[0].input.result, null);
   assert.deepEqual(subject.added, []);
   for (const flag of ['--approve', '--publish-as-admin', '--merge', '--ref', '--token']) assert.equal(parseEvidenceArgs([...args, flag]), null);
   assert.equal(parseEvidenceArgs([...args, '--dispatch', '--dispatch']), null);
@@ -370,5 +362,87 @@ test('보고서 workflow는 기본 token·기본 ref·데이터 입력만 사용
   assert.match(workflow, /requestedNumber: context\.payload\.inputs\.pr_number/);
   assert.doesNotMatch(workflow, /fromJSON/);
   assert.match(workflow, /JSON\.parse\(context\.payload\.inputs\.request\)/);
+  assert.match(workflow, /if \(request\?\.result !== null\) throw new Error/);
   assert.doesNotMatch(workflow, /secrets\.|github-token:|pull_request_target:|checks: write|contents: write|actions: write|npm |run:|reviewPendingDeployments|\/review-gate|\/merge-approve/);
+});
+
+test('미인증 로컬 결과는 workflow 게시 요청을 직접 보내도 댓글을 만들지 않음', async () => {
+  const subject = fixture();
+  const { packet } = await subject.collect();
+  const result = localResult(packet.target);
+  const prepared = await subject.collect(result);
+  await assert.rejects(publishEvidence({ ...subject, request: reportRequest(prepared.packet, result) }));
+  assert.deepEqual(subject.added, []);
+  // 요청에서 인증됐다고 자체 선언해도 입력 파일을 신뢰하지 않는다.
+  result.authentication = 'trusted-bot-api';
+  await assert.rejects(publishEvidence({ ...subject, request: reportRequest(prepared.packet, result) }));
+  assert.deepEqual(subject.added, []);
+});
+
+test('CLI는 미인증 로컬 자료의 파일 출력을 유지하지만 dispatch는 workflow 조회 전 차단', async () => {
+  const subject = fixture();
+  const { packet } = await subject.collect();
+  const result = localResult(packet.target, { report: '한글 "인용" $(명령) `기호`\n/review-gate\n/merge-approve' });
+  const directory = mkdtempSync(join(tmpdir(), 'local-review-only-'));
+  const path = join(directory, 'packet.json');
+  const gh = args => {
+    assert.ok(!args[1]?.includes(`/contents/${evidenceWorkflow}`), '게시용 workflow를 조회하지 않아야 함');
+    return subject.gh(args);
+  };
+  try {
+    const argv = ['owner/repo', '1', '--result', 'result.json'];
+    assert.equal(await runEvidenceCli({ argv: [...argv, '--output', path], gh,
+      readFile: () => JSON.stringify(result), out: () => {} }), 0);
+    const saved = JSON.parse(readFileSync(path, 'utf8'));
+    assert.equal(saved.result.report, result.report);
+    assert.equal(saved.result.authentication, 'unverified-local-session');
+    assert.equal(await runEvidenceCli({ argv: [...argv, '--dispatch'], gh,
+      readFile: () => JSON.stringify(result), out: () => {}, err: () => {} }), 1);
+    assert.deepEqual(subject.dispatches, []);
+    assert.deepEqual(subject.added, []);
+  } finally { rmSync(path, { force: true }); rmdirSync(directory); }
+});
+
+test('검증된 관리자 자료는 게시·재사용 가능하며 중복된 봇 댓글은 재등록하지 않음', async () => {
+  const subject = fixture({ implementedBy: 'claude', gate: true });
+  const { packet } = await subject.collect();
+  const request = reportRequest(packet);
+  await publishEvidence({ ...subject, request });
+  assert.equal((await subject.collect()).packet.collectionHash, packet.collectionHash);
+  assert.equal((await publishEvidence({ ...subject, request })).reused, true);
+  subject.added.push({ ...clone(subject.added[0]), id: 201 });
+  await assert.rejects(publishEvidence({ ...subject, request }), /등록 자료 불일치/);
+  assert.equal(subject.added.length, 2);
+  assert.equal((await subject.collect()).packet.gate.state, 'success');
+});
+
+test('검증된 원본 근거가 없거나 이전 HEAD이면 빈 요청으로도 게시하지 않음', async () => {
+  for (const codex of ['none', 'spoof', 'stale', 'running', 'limit']) {
+    const subject = fixture({ implementedBy: 'claude', codex });
+    const { packet } = await subject.collect();
+    await assert.rejects(publishEvidence({ ...subject, request: reportRequest(packet) }), /검증된 리뷰 근거 없음/);
+    assert.deepEqual(subject.added, []);
+  }
+});
+
+test('같은 Actions 앱이어도 다른 PR 대상·자료·변조 본문은 collectionHash에서 제외하지 않음', async () => {
+  for (const change of [
+    packet => { packet.target.number = 2; },
+    packet => { packet.target.repository = 'other/repo'; },
+    packet => { packet.target.head = 'a'.repeat(40); },
+    packet => { packet.target.base = 'a'.repeat(40); },
+    packet => { packet.target.fingerprint = 'a'.repeat(64); },
+    packet => { packet.target.policySha = 'a'.repeat(40); },
+    packet => { packet.result.source.stateCommentId = 999; },
+    packet => { packet.result.source.reviewIds = [999]; },
+    packet => { packet.result.report += ' forged'; },
+    packet => { packet.result.authentication = 'unverified-local-session'; },
+  ]) {
+    const subject = fixture({ implementedBy: 'claude', codex: 'clean' });
+    const { packet } = await subject.collect();
+    const different = clone(packet);
+    change(different);
+    subject.added.push({ id: 200, user: bot, performed_via_github_app: { id: 15368 }, body: renderEvidenceReport(different).body });
+    assert.notEqual((await subject.collect()).packet.collectionHash, packet.collectionHash);
+  }
 });

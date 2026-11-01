@@ -42,6 +42,7 @@ jobs:
             const { publishEvidence } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/review-evidence.mjs`);
             try {
               const request = JSON.parse(context.payload.inputs.request);
+              if (request?.result !== null) throw new Error('미인증 로컬 결과는 게시할 수 없음');
               const publisherContext = { repo: context.repo, eventName: context.eventName, ref: context.ref, sha: context.sha, runId: context.runId, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), requestedNumber: context.payload.inputs.pr_number };
               const result = await publishEvidence({ github, context: publisherContext, request });
               core.summary.addHeading('리뷰 자료 기록 — 관리자 확인 아님');

@@ -52,6 +52,7 @@ export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = 
       out('리뷰 자료를 UTF-8 파일로 저장했습니다. 기존 파일은 덮어쓰지 않습니다.');
     } else out(text);
     if (options.dispatch) {
+      if (result !== null) throw new Error('미인증 로컬 결과는 로컬 출력만 허용');
       if (!report) throw new Error('유효한 리뷰 결과 없음');
       // 기본 브랜치 도입 전에는 등록을 요청하지 않는다. 임의 ref·workflow·token을 지정하는 옵션이 없다.
       await github.rest.repos.getContent({ path: '.github/workflows/review-evidence.yml', ref: state.defaultBranch });
