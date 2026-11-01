@@ -8,7 +8,7 @@ const publisher = { login: 'github-actions[bot]', userId: 41898282, appId: 15368
 const levels = ['critical', 'high', 'medium', 'low', 'unknown'];
 const shaPattern = /^[a-f0-9]{40}$/;
 const positiveId = value => Number.isSafeInteger(value) && value > 0;
-const markerPattern = /^# (?:독립|자체) 리뷰 보고서\n\n<!-- photo-selector-review-evidence:v1 ([a-f0-9]{64}) -->\n/;
+const markerPattern = /^# (?:(?:독립|자체) 리뷰 보고서|미인증 로컬 (?:독립|자체) 리뷰 자료)\n\n<!-- photo-selector-review-evidence:v1 ([a-f0-9]{64}) -->\n/;
 const fail = message => { throw new Error(message); };
 const exactKeys = (object, keys) => object && !Array.isArray(object) && typeof object === 'object'
   && Object.keys(object).length === keys.length && keys.every(key => Object.hasOwn(object, key));
@@ -113,12 +113,14 @@ function legacyReview(state) {
 }
 
 export function assessReview(result, blocked, needsIndependentReview = true) {
-  if (blocked) return { state: 'blocked', reason: '해제되지 않은 변경 요청 리뷰' };
-  if (!result) return { state: 'missing', reason: '유효한 독립 리뷰 결과 없음' };
-  if (result.role !== 'independent' && needsIndependentReview) return { state: 'self-only', reason: '자체 리뷰는 필요한 독립 검증을 대체하지 않음' };
-  if (result.status !== 'completed' || result.reviewComplete !== true) return { state: 'incomplete', reason: '리뷰 미완료·스킵·실패·한도 초과' };
-  if (['critical', 'high', 'medium', 'unknown'].some(level => result.findings[level] !== 0)) return { state: 'blocked', reason: '차단 또는 판단 불가 지적 있음' };
-  return { state: 'awaiting-human-confirmation', reason: '자료 수집 완료. 실제 관리자 확인은 별도 필요' };
+  const verdict = (state, reason) => ({ state, reason, provenance: result?.authentication ?? 'missing' });
+  if (blocked) return verdict('blocked', '해제되지 않은 변경 요청 리뷰');
+  if (!result) return verdict('missing', '유효한 독립 리뷰 결과 없음');
+  if (result.role !== 'independent' && needsIndependentReview) return verdict('self-only', '자체 리뷰는 필요한 독립 검증을 대체하지 않음');
+  if (result.status !== 'completed' || result.reviewComplete !== true) return verdict('incomplete', '리뷰 미완료·스킵·실패·한도 초과');
+  if (['critical', 'high', 'medium', 'unknown'].some(level => result.findings[level] !== 0)) return verdict('blocked', '차단 또는 판단 불가 지적 있음');
+  if (result.authentication === 'unverified-local-session') return verdict('unverified-local-result', '미인증 로컬 주장. 실제 실행과 독립성 확인이 별도로 필요');
+  return verdict('awaiting-human-confirmation', '자료 수집 완료. 실제 관리자 확인은 별도 필요');
 }
 
 export async function collectReviewPacket({ github, repository, number, result = null }) {
@@ -146,8 +148,9 @@ export function reportRequest(packet, localResult = null) {
 export function renderEvidenceReport(packet) {
   if (!packet.result) fail('등록할 리뷰 결과 없음');
   const key = sha256(canonical({ v: 1, target: packet.target, collectionHash: packet.collectionHash, result: packet.result }));
-  const heading = packet.result.role === 'independent' ? '독립' : '자체';
-  const body = `# ${heading} 리뷰 보고서\n\n<!-- photo-selector-review-evidence:v1 ${key} -->\n`
+  const role = packet.result.role === 'independent' ? '독립' : '자체';
+  const heading = packet.result.authentication === 'unverified-local-session' ? `미인증 로컬 ${role} 리뷰 자료` : `${role} 리뷰 보고서`;
+  const body = `# ${heading}\n\n<!-- photo-selector-review-evidence:v1 ${key} -->\n`
     + `\n자동 수집 자료입니다. 관리자 확인·병합 승인이 아닙니다.\n\n`
     + `HEAD: ${packet.target.head}\nBASE: ${packet.target.base}\nFingerprint: ${packet.target.fingerprint}\n`
     + `수집 digest: ${packet.collectionHash}\n출처 검증: ${packet.result.authentication}\n`
@@ -171,6 +174,10 @@ async function assertPublisherWorkflow({ github, context }) {
       || run.head_repository?.full_name !== repository || !positiveId(workflow.id) || workflow.path !== evidenceWorkflow
       || run.workflow_id !== workflow.id || ![evidenceWorkflow, `${evidenceWorkflow}@refs/heads/${info.default_branch}`].includes(run.path)
       || run.status !== 'in_progress' || run.conclusion !== null) fail('보고서 workflow 실행 출처 불일치');
+  const actor = run.triggering_actor ?? run.actor;
+  if (!validAuthor(actor)) fail('등록 요청자 확인 실패');
+  const permission = (await github.rest.repos.getCollaboratorPermissionLevel({ ...repo, username: actor.login })).data;
+  if (!['write', 'maintain', 'admin'].includes(permission.role_name === 'maintain' ? 'maintain' : permission.permission)) fail('등록 요청자 쓰기 권한 없음');
   const approved = (await github.rest.repos.getContent({ ...repo, path: evidenceWorkflow, ref: info.default_branch })).data;
   const executed = (await github.rest.repos.getContent({ ...repo, path: evidenceWorkflow, ref: context.sha })).data;
   if (!shaPattern.test(approved.sha ?? '') || approved.sha !== executed.sha) fail('승인된 보고서 workflow와 실행 버전 불일치');

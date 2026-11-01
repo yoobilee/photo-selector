@@ -13,10 +13,11 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
+  checks: read
   issues: write
 
 concurrency:
-  group: review-evidence-${{ github.repository }}
+  group: review-evidence-${{ github.repository }}-${{ fromJSON(github.event.inputs.request).target.number }}
   cancel-in-progress: false
 
 jobs:

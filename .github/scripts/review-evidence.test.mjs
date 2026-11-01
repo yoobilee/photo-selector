@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFake, repo, head } from './merge-pr-fixture.mjs';
+import { isReportBody } from './review-gate-core.mjs';
 import { collectReviewPacket, reportRequest, renderEvidenceReport, publishEvidence, evidenceWorkflow } from './review-evidence.mjs';
 import { createEvidenceGitHub, parseEvidenceArgs, runEvidenceCli } from './review-evidence-cli.mjs';
 
@@ -30,7 +31,8 @@ function fixture(options = {}) {
   const context = { repo: { owner: 'owner', repo: 'repo' }, eventName: 'workflow_dispatch', ref: 'refs/heads/main',
     sha: 'd'.repeat(40), runId: 44, runAttempt: 1 };
   const run = { id: 44, workflow_id: 9, path: evidenceWorkflow, head_sha: context.sha, head_branch: 'main', event: 'workflow_dispatch',
-    run_attempt: 1, status: 'in_progress', conclusion: null, repository: { full_name: repo }, head_repository: { full_name: repo } };
+    run_attempt: 1, status: 'in_progress', conclusion: null, repository: { full_name: repo }, head_repository: { full_name: repo },
+    actor: { id: 1, login: 'owner', type: 'User' }, triggering_actor: { id: 1, login: 'owner', type: 'User' } };
   github.rest.actions = { getWorkflowRun: async () => ({ data: run }), getWorkflow: async () => ({ data: { id: 9, path: evidenceWorkflow } }) };
   const getContent = github.rest.repos.getContent;
   github.rest.repos.getContent = async args => args.path === evidenceWorkflow ? { data: { sha: 'c'.repeat(40) } } : getContent(args);
@@ -68,12 +70,15 @@ test('Codex 자체 리뷰와 Claude 독립 검증을 구분하며 0건 로컬 �
   const subject = fixture();
   const { packet: initial } = await subject.collect();
   const independent = await subject.collect(localResult(initial.target));
-  assert.equal(independent.packet.review.state, 'awaiting-human-confirmation');
+  assert.equal(independent.packet.review.state, 'unverified-local-result');
+  assert.equal(independent.packet.review.provenance, 'unverified-local-session');
+  assert.match(renderEvidenceReport(independent.packet).body, /^# 미인증 로컬 독립 리뷰 자료/);
+  assert.equal(isReportBody(renderEvidenceReport(independent.packet).body), false);
   assert.equal(independent.packet.result.authentication, 'unverified-local-session');
   assert.equal(independent.packet.gate.state, 'failure');
   const self = await subject.collect(localResult(initial.target, { role: 'self', reviewer: 'codex' }));
   assert.equal(self.packet.review.state, 'self-only');
-  assert.match(renderEvidenceReport(self.packet).body, /^# 자체 리뷰 보고서/);
+  assert.match(renderEvidenceReport(self.packet).body, /^# 미인증 로컬 자체 리뷰 자료/);
   await assert.rejects(subject.collect(localResult(initial.target, { reviewer: 'codex' })), /역할 불일치/);
 });
 
@@ -262,6 +267,8 @@ test('다른 workflow·ref·실행 ID/attempt·저장소와 오래된 요청은 
     subject => { subject.run.head_sha = 'e'.repeat(40); }, subject => { subject.run.repository.full_name = 'other/repo'; },
     subject => { subject.run.head_repository.full_name = 'other/repo'; }, subject => { subject.run.path = '.github/workflows/other.yml'; },
     subject => { subject.run.status = 'completed'; }, subject => { subject.run.conclusion = 'failure'; },
+    subject => { subject.run.triggering_actor = { id: 3, login: 'reader', type: 'User' }; },
+    subject => { delete subject.run.actor; delete subject.run.triggering_actor; },
   ]) {
     const subject = fixture();
     const { packet } = await subject.collect();
@@ -277,6 +284,11 @@ test('다른 workflow·ref·실행 ID/attempt·저장소와 오래된 요청은 
   request.collectionHash = 'a'.repeat(64);
   await assert.rejects(publishEvidence({ ...subject, request }), /근거 변경/);
   assert.deepEqual(subject.added, []);
+  const denied = fixture();
+  const { packet: deniedPacket } = await denied.collect();
+  denied.github.rest.repos.getCollaboratorPermissionLevel = async () => ({ data: { permission: 'read' } });
+  await assert.rejects(publishEvidence({ ...denied, request: reportRequest(deniedPacket) }), /등록 요청자 쓰기 권한 없음/);
+  assert.deepEqual(denied.added, []);
 });
 
 test('게시 성공 후 응답 실패는 자동 재시도하지 않고 다음 실행에서 실제 댓글을 복구', async () => {
@@ -350,6 +362,8 @@ test('보고서 workflow는 기본 token·기본 ref·데이터 입력만 사용
   assert.match(workflow, /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /repo: context\.repo/);
+  assert.match(workflow, /checks: read/);
+  assert.match(workflow, /fromJSON\(github\.event\.inputs\.request\)\.target\.number/);
   assert.match(workflow, /JSON\.parse\(context\.payload\.inputs\.request\)/);
   assert.doesNotMatch(workflow, /secrets\.|github-token:|pull_request_target:|checks: write|contents: write|actions: write|npm |run:|reviewPendingDeployments|\/review-gate|\/merge-approve/);
 });

@@ -4,7 +4,7 @@
 
 이 도구는 SHA·fingerprint·정책 SHA·수집 digest·보고서 SHA-256을 계산하고, 기존 게이트의 실제 판정과 리뷰 자료를 조회한다. 명시적으로 요청하면 별도 Actions workflow가 보고서를 봇 명의로 등록한다. AI를 호출하거나 관리자 확인·승인·병합을 하지 않는다.
 
-PR #11이 먼저 병합되어야 한다. 그 뒤 후속 PR의 base를 main으로 바꾸고 최신 CI·독립 리뷰·기존 관리자 확인을 거쳐 병합한다. `review-evidence.yml`이 기본 브랜치에 도입되기 전에는 dispatch가 실패한다. 기존 보호 설정과 `independent-review` 게이트는 계속 유지한다.
+PR #11이 먼저 병합되어야 한다. squash 병합 뒤에는 후속 커밋만 새 main 위로 재배치해 부모 PR의 중복 diff를 제거하고, base를 main으로 바꾼 뒤 최신 CI·독립 리뷰·기존 관리자 확인을 거쳐 병합한다. `review-evidence.yml`이 기본 브랜치에 도입되기 전에는 dispatch가 실패한다. 기존 보호 설정과 `independent-review` 게이트는 계속 유지한다.
 
 ## 읽기 전용 사용
 
@@ -26,7 +26,7 @@ PR·기본 브랜치 정책·전체 파일·댓글·리뷰·인라인·check 목
 - Codex 구현의 Claude 등 로컬 결과는 `review-packet.json`의 `localResultTemplate`을 리뷰 세션에 함께 전달한다. 결과 수집 담당 Agent가 target을 그대로 보존한 `result.json`을 만든다. 사용자가 SHA나 fingerprint를 옮겨 적을 필요는 없다.
 - 템플릿의 `findings: null`, `report: null`, `sessionId: null`은 미완성 값이다. 실제 리뷰 실행 결과로 채워야 한다. 빈 응답을 0건으로 채우거나 status만 completed로 바꾸지 않는다.
 - 결과의 role은 self 또는 independent다. self는 구현 Agent와 같아야 하며 independent는 기존 정책의 다른 reviewer와 같아야 한다. 고위험 독립 검증에 자체 리뷰를 재사용하지 않는다.
-- 로컬 sessionId와 보고서 파일만으로 실제 AI 실행을 인증할 수 없다. 결과는 `unverified-local-session`으로 표시하며 관리자 확인을 대체하지 않는다. GitHub 봇 조회 또는 기존 게이트 검증과 구분한다.
+- 로컬 sessionId와 보고서 파일만으로 실제 AI 실행을 인증할 수 없다. 결과는 `unverified-local-session`으로 표시하며 관리자 확인을 대체하지 않는다. 지적 0건이어도 `review.state`는 `unverified-local-result`이고 `review.provenance`에 출처를 별도로 표시한다. 게시 제목도 `미인증 로컬 독립/자체 리뷰 자료`로 구분해 검증된 독립 보고서처럼 보이지 않게 한다.
 
 ```text
 npm run review:prepare -- yoobilee/photo-selector PR번호 --result result.json --output checked-packet.json
@@ -44,9 +44,11 @@ npm run review:prepare -- yoobilee/photo-selector PR번호 --result result.json 
 
 현재 신뢰할 GitHub 리뷰 또는 기존 게이트가 확인한 보고서를 수집할 때는 `--result`를 생략할 수 있다. CLI는 고정된 `review-evidence.yml`과 기본 ref만 dispatch한다. 관리자 인증으로 댓글을 직접 쓰는 옵션은 없다. `--dispatch`가 없으면 workflow도 요청하지 않는다. 로컬 파일·보고서·해시를 stdout에 출력할 수 있으므로 결과 파일에 인증값을 넣지 않는다.
 
-workflow는 기본 GITHUB_TOKEN만 사용한다. contents/pull-requests/actions는 read, issues는 보고서 작성을 위한 write다. checks·contents·actions write, 별도 Secrets, AI 인증은 없다. PR 코드·의존성·설치·캐시·임의 셸을 실행하지 않는다. workflow run ID·ref·HEAD·저장소·path·승인된 YAML을 확인하고 최초 attempt만 허용한다.
+workflow는 기본 GITHUB_TOKEN만 사용한다. contents/pull-requests/actions/checks는 read, issues는 보고서 작성을 위한 write다. checks·contents·actions write, 별도 Secrets, AI 인증은 없다. PR 코드·의존성·설치·캐시·임의 셸을 실행하지 않는다. workflow run ID·ref·HEAD·저장소·path·승인된 YAML과 요청자의 현재 write/maintain/admin 권한을 확인하고 최초 attempt만 허용한다. 실행 그룹은 PR별로 분리한다.
 
 보고서는 불변 target과 수집 digest, 리뷰 역할·출처·완료 여부·집계를 명시한다. 같은 key와 동일 본문의 실제 GitHub Actions 봇 댓글만 재사용한다. 위조 작성자나 변경된 보고서를 같은 등록으로 인정하지 않는다. 게시 후 응답이 불명확하면 자동 재시도하지 않고, 다음 명시적 실행에서 실제 댓글로 복구한다. 요청 성공은 게시 완료가 아니며 Actions 실행 결과·댓글을 확인해야 한다. 봇 계정/앱 응답 형식은 실제 도입 후 확인하며 모르는 형식은 통과시키지 않는다.
+
+진행 중 CI나 리뷰가 바뀌면 수집 digest와 보고서 key도 바뀌므로 등록 요청을 다시 준비해야 한다. 이는 가용성보다 오래된 결과의 차단을 우선한 제한이다. 도입 후 첫 실제 게시에서 앱 필드·작성자·중복 복구를 확인하기 전에는 등록 성공을 운영 검증 완료로 보지 않는다.
 
 ## 남아 있는 승인 경계
 
