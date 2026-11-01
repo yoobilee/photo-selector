@@ -4,6 +4,10 @@ name: Collect review evidence
 on:
   workflow_dispatch:
     inputs:
+      pr_number:
+        description: CLI가 전달하는 PR 번호 (request의 대상과 일치해야 함)
+        required: true
+        type: string
       request:
         description: CLI가 계산한 리뷰 등록 요청 JSON (관리자 확인 아님)
         required: true
@@ -17,7 +21,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: review-evidence-${{ github.repository }}-${{ fromJSON(github.event.inputs.request).target.number }}
+  group: review-evidence-${{ github.repository }}-${{ github.event.inputs.pr_number }}
   cancel-in-progress: false
 
 jobs:
@@ -38,7 +42,7 @@ jobs:
             const { publishEvidence } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/review-evidence.mjs`);
             try {
               const request = JSON.parse(context.payload.inputs.request);
-              const publisherContext = { repo: context.repo, eventName: context.eventName, ref: context.ref, sha: context.sha, runId: context.runId, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT) };
+              const publisherContext = { repo: context.repo, eventName: context.eventName, ref: context.ref, sha: context.sha, runId: context.runId, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), requestedNumber: context.payload.inputs.pr_number };
               const result = await publishEvidence({ github, context: publisherContext, request });
               core.summary.addHeading('리뷰 자료 기록 — 관리자 확인 아님');
               core.summary.addRaw(`보고서 댓글 ID: ${result.commentId}\n\n보고서 SHA-256: ${result.evidenceHash}\n\n중복 재사용: ${result.reused}\n`);

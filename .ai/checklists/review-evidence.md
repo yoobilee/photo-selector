@@ -44,7 +44,7 @@ npm run review:prepare -- yoobilee/photo-selector PR번호 --result result.json 
 
 현재 신뢰할 GitHub 리뷰 또는 기존 게이트가 확인한 보고서를 수집할 때는 `--result`를 생략할 수 있다. CLI는 고정된 `review-evidence.yml`과 기본 ref만 dispatch한다. 관리자 인증으로 댓글을 직접 쓰는 옵션은 없다. `--dispatch`가 없으면 workflow도 요청하지 않는다. 로컬 파일·보고서·해시를 stdout에 출력할 수 있으므로 결과 파일에 인증값을 넣지 않는다.
 
-workflow는 기본 GITHUB_TOKEN만 사용한다. contents/pull-requests/actions/checks는 read, issues는 보고서 작성을 위한 write다. checks·contents·actions write, 별도 Secrets, AI 인증은 없다. PR 코드·의존성·설치·캐시·임의 셸을 실행하지 않는다. workflow run ID·ref·HEAD·저장소·path·승인된 YAML과 요청자의 현재 write/maintain/admin 권한을 확인하고 최초 attempt만 허용한다. 실행 그룹은 PR별로 분리한다.
+workflow는 기본 GITHUB_TOKEN만 사용한다. contents/pull-requests/actions/checks는 read, issues는 보고서 작성을 위한 write다. checks·contents·actions write, 별도 Secrets, AI 인증은 없다. PR 코드·의존성·설치·캐시·임의 셸을 실행하지 않는다. workflow run ID·ref·HEAD·저장소·path·승인된 YAML과 요청자의 현재 write/maintain/admin 권한을 확인하고 최초 attempt만 허용한다. 실행 그룹은 별도 pr_number 입력으로 PR별 분리하며 CLI가 자동 전달한다. 요청 JSON 안의 PR 번호와 정확히 일치해야 한다. 잘못된 JSON은 concurrency에서 평가하지 않고 job의 일반 실패 처리로 중단한다.
 
 보고서는 불변 target과 수집 digest, 리뷰 역할·출처·완료 여부·집계를 명시한다. 같은 key와 동일 본문의 실제 GitHub Actions 봇 댓글만 재사용한다. 위조 작성자나 변경된 보고서를 같은 등록으로 인정하지 않는다. 게시 후 응답이 불명확하면 자동 재시도하지 않고, 다음 명시적 실행에서 실제 댓글로 복구한다. 요청 성공은 게시 완료가 아니며 Actions 실행 결과·댓글을 확인해야 한다. 봇 계정/앱 응답 형식은 실제 도입 후 확인하며 모르는 형식은 통과시키지 않는다.
 

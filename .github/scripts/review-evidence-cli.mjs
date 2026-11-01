@@ -59,7 +59,8 @@ export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = 
       const path = join(directory, 'request.json');
       try {
         writeFileSync(path, JSON.stringify(reportRequest(packet, result)), { encoding: 'utf8', mode: 0o600 });
-        gh(['workflow', 'run', 'review-evidence.yml', '--repo', options.repository, '--ref', state.defaultBranch, '--field', `request=@${path}`]);
+        gh(['workflow', 'run', 'review-evidence.yml', '--repo', options.repository, '--ref', state.defaultBranch,
+          '--field', `pr_number=${options.number}`, '--field', `request=@${path}`]);
       } finally {
         rmSync(path, { force: true });
         rmdirSync(directory);

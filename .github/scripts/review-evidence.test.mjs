@@ -29,7 +29,7 @@ function fixture(options = {}) {
   };
   const github = createEvidenceGitHub(gh, repo);
   const context = { repo: { owner: 'owner', repo: 'repo' }, eventName: 'workflow_dispatch', ref: 'refs/heads/main',
-    sha: 'd'.repeat(40), runId: 44, runAttempt: 1 };
+    sha: 'd'.repeat(40), runId: 44, runAttempt: 1, requestedNumber: '1' };
   const run = { id: 44, workflow_id: 9, path: evidenceWorkflow, head_sha: context.sha, head_branch: 'main', event: 'workflow_dispatch',
     run_attempt: 1, status: 'in_progress', conclusion: null, repository: { full_name: repo }, head_repository: { full_name: repo },
     actor: { id: 1, login: 'owner', type: 'User' }, triggering_actor: { id: 1, login: 'owner', type: 'User' } };
@@ -262,6 +262,8 @@ test('등록은 봇 보고서 1개만 쓰고 중복 재사용하며 기존 게�
 test('다른 workflow·ref·실행 ID/attempt·저장소와 오래된 요청은 댓글 작성 전 차단', async () => {
   for (const change of [
     subject => { subject.context.ref = 'refs/heads/feature/untrusted'; },
+    subject => { subject.context.requestedNumber = '2'; }, subject => { subject.context.requestedNumber = ''; },
+    subject => { subject.context.requestedNumber = '01'; }, subject => { subject.context.requestedNumber = 1; },
     subject => { subject.context.runAttempt = 2; }, subject => { subject.context.eventName = 'pull_request_target'; },
     subject => { subject.run.id = 45; }, subject => { subject.run.workflow_id = 10; },
     subject => { subject.run.head_sha = 'e'.repeat(40); }, subject => { subject.run.repository.full_name = 'other/repo'; },
@@ -323,6 +325,7 @@ test('CLI 기본값은 읽기 전용이고 dispatch도 고정된 기본 브랜�
     readFile: () => JSON.stringify(result), out: () => {} }), 0);
   assert.equal(subject.dispatches.length, 1);
   assert.deepEqual(subject.dispatches[0].args.slice(0, 7), ['workflow', 'run', 'review-evidence.yml', '--repo', 'owner/repo', '--ref', 'main']);
+  assert.ok(subject.dispatches[0].args.includes('pr_number=1'));
   assert.equal(subject.dispatches[0].input.result.report, result.report);
   assert.deepEqual(subject.added, []);
   for (const flag of ['--approve', '--publish-as-admin', '--merge', '--ref', '--token']) assert.equal(parseEvidenceArgs([...args, flag]), null);
@@ -363,7 +366,9 @@ test('보고서 workflow는 기본 token·기본 ref·데이터 입력만 사용
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /repo: context\.repo/);
   assert.match(workflow, /checks: read/);
-  assert.match(workflow, /fromJSON\(github\.event\.inputs\.request\)\.target\.number/);
+  assert.match(workflow, /review-evidence-\$\{\{ github\.repository \}\}-\$\{\{ github\.event\.inputs\.pr_number \}\}/);
+  assert.match(workflow, /requestedNumber: context\.payload\.inputs\.pr_number/);
+  assert.doesNotMatch(workflow, /fromJSON/);
   assert.match(workflow, /JSON\.parse\(context\.payload\.inputs\.request\)/);
   assert.doesNotMatch(workflow, /secrets\.|github-token:|pull_request_target:|checks: write|contents: write|actions: write|npm |run:|reviewPendingDeployments|\/review-gate|\/merge-approve/);
 });

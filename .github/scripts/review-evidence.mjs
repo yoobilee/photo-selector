@@ -189,6 +189,8 @@ export async function publishEvidence({ github, context, request }) {
   if (!exactKeys(request, ['v', 'target', 'collectionHash', 'result']) || request.v !== 1
       || (request.result !== null && (typeof request.result !== 'object' || Array.isArray(request.result)))
       || Buffer.byteLength(JSON.stringify(request), 'utf8') > maxRequestBytes) fail('등록 요청 형식 또는 크기 오류');
+  if (typeof context.requestedNumber !== 'string' || !/^[1-9][0-9]*$/.test(context.requestedNumber)
+      || context.requestedNumber !== String(request.target?.number)) fail('workflow PR 번호와 자료 대상 불일치');
   const repository = await assertPublisherWorkflow({ github, context });
   if (request.target?.repository !== repository) fail('다른 저장소 등록 요청');
   const { packet, state } = await collectReviewPacket({ github, repository, number: request.target.number, result: request.result });
