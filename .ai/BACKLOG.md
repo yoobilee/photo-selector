@@ -2,7 +2,7 @@
 
 ## 기존 Windows 사진 분석 테스트 timeout
 
-- 2026-11-03, 자동화 1단계 구현 중 npm run verify에서 blurDetectionLimits.test.ts:60의 5000ms timeout이 두 차례 발생했다. 131 통과/1 실패, 해당 개별 테스트 실행 약6.6~7초.
+- 2026-11-03, 자동화 1단계 구현 중 npm run verify에서 blurDetectionLimits.test.ts:60의 5000ms timeout이 세 차례 발생했다. 131 통과/1 실패, 해당 개별 테스트 실행 약6.6~9초. 더 반복해 우연한 성공을 찾지 않는다.
 - 사진 분석·합성 이미지·Vitest/Vite 설정은 이번 diff에서 변경하지 않았다. PR12 작업에서도 같은 timeout이 관찰됐다. 이번 자동화 코드가 이 문제를 해결했다고 주장하지 않는다.
 - 테스트 삭제·스킵·timeout 상향을 하지 않는다. 로컬 Build/E2E/게이트는 별도 실행하며, Linux CI 전체 검증을 별도 확인한다. 필수 CI가 실패하면 이 기록만으로 병합하지 않는다.
 - 다음 조사: 동일 하드웨어의 main 단독 실행과 전체 실행에서 worker 부하·테스트 시간 분포를 측정해 원인을 좁힌다. 이번 PR에서 분석 기능을 수정하지 않는다.

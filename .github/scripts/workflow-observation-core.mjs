@@ -1,5 +1,5 @@
-import { sha256, validateConfig } from './review-gate-core.mjs';
-import { classifyRisk } from './review-shadow-core.mjs';
+import { sha256, validateConfig, parseMetadata } from './review-gate-core.mjs';
+import { classifyRisk, validateShadowConfig } from './review-shadow-core.mjs';
 
 const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -16,13 +16,17 @@ export function canonical(value) {
 }
 function target(value) {
   requireValue(keys(value, ['repository','number','head','base','fingerprint'])
-    && typeof value.repository === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repository) && id(value.number)
+    && typeof value.repository === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repository)
+    && value.repository.split('/').every(part => part !== '.' && part !== '..') && id(value.number)
     && sha(value.head) && sha(value.base) && digest(value.fingerprint), '대상 오류');
 }
 const pathValid = path => typeof path === 'string' && path.length > 0 && !path.startsWith('/')
   && !path.includes('\\') && !path.split('/').some(part => !part || part === '.' || part === '..');
+// 기존 describe의 의존성 계약과 동일. 기존 판정 모듈은 변경하지 않는다.
+const dependencyFile = path => /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|requirements[^/]*\.txt|poetry\.lock|uv\.lock|Pipfile\.lock|pyproject\.toml|Cargo\.(toml|lock)|go\.(mod|sum)|Gemfile(\.lock)?|composer\.(json|lock))$/.test(path);
 export function classifyWork({ meta, files, config }) {
   validateConfig(config);
+  validateShadowConfig(config.shadow);
   requireValue(Array.isArray(files) && files.length > 0 && files.every(file => pathValid(file.filename)
     && ['added','modified','removed','renamed','copied','changed','unchanged'].includes(file.status)
     && (file.status !== 'renamed' || pathValid(file.previous_filename))), '파일 목록 오류');
@@ -31,9 +35,13 @@ export function classifyWork({ meta, files, config }) {
     && ['yes','no'].includes(meta['sensitive-change']), '구현자/위험도 불명');
   const paths = files.flatMap(file => [file.filename, ...(file.previous_filename ? [file.previous_filename] : [])]);
   requireValue(paths.every(pathValid), '이전 경로 오류');
-  const dependency = paths.some(path => ['package.json','package-lock.json'].includes(path));
+  const dependency = paths.some(dependencyFile);
   const risk = classifyRisk({ meta, files: paths.map(filename => ({ filename })), gateConfig: config, shadow: config.shadow, dependency });
-  const kind = paths.some(path => path.startsWith('src/') || path.startsWith('public/') || path === 'index.html') ? 'product' : 'general';
+  const product = path => ['src/','public/','e2e/'].some(prefix => path.startsWith(prefix)) || path.endsWith('.html');
+  const general = path => dependencyFile(path) || ['.ai/','.github/','.codex/','.claude/','.agents/','docs/','scripts/','tools/'].some(prefix => path.startsWith(prefix))
+    || ['README.md','CHANGELOG.md','PATCH_NOTES.md','AGENTS.md','CLAUDE.md','.npmrc','.gitignore','vite.config.ts','playwright.config.ts','eslint.config.js','tsconfig.json','tsconfig.app.json','tsconfig.node.json','vercel.json'].includes(path);
+  requireValue(paths.every(path => product(path) || general(path)), '미분류 경로');
+  const kind = paths.some(product) ? 'product' : 'general';
   requireValue(kind !== 'product' || meta['implemented-by'] === 'claude', '제품 구현자는 Claude 필요');
   requireValue(kind !== 'general' || risk.risk === 'high' || meta['implemented-by'] === 'codex', '일반 자동 경로는 Codex 구현 필요');
   return { kind, risk: risk.risk, role: risk.risk === 'high' || kind === 'product' ? 'independent' : 'self',
@@ -76,6 +84,7 @@ export function observe({ before, after, receipt, meta, config, trust, apiEviden
   try {
     const value = stateDigest(before);
     requireValue(value === stateDigest(after), '동시 변경');
+    requireValue(canonical(meta) === canonical(parseMetadata(after.body)), 'metadata/body 불일치');
     const requirement = classifyWork({ meta, files: after.files, config });
     validateReceipt(receipt, { currentTarget: after.target, policyHash: after.policyHash, requirement, trust, apiEvidence });
     requireValue(after.reviews.length === 1 && canonical(after.reviews[0]) === canonical(receipt), '현재 리뷰 digest 근거 불일치');

@@ -2,10 +2,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+export const createGet = gh => path => JSON.parse(gh(['api','--method','GET',path]));
 
 // 주입 API는 GET뿐이다. 공개 App 권한은 installation token의 실효 권한 증명이 아니다.
 export async function preflight({ repository, settings, get }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '')) throw new Error('repository');
+  if (repository.split('/').some(part => part === '.' || part === '..')) throw new Error('repository');
   const issues = [];
   const read = async path => { try { return await get(path); } catch { issues.push(`조회 불가: ${path}`); return null; } };
   const repo = await read(`repos/${repository}`);
@@ -29,8 +31,12 @@ export async function preflight({ repository, settings, get }) {
   if (!settings?.evidence?.appId || settings.evidence.appId === settings?.merger?.appId) issues.push('게시/병합 App 분리 미확인');
   const env = await read(`repos/${repository}/environments/photo-selector-high-risk-merge`);
   const rule = env?.protection_rules?.find(rule => rule.type === 'required_reviewers');
-  if (rule?.prevent_self_review !== true || !rule.reviewers?.some(r => r.type === 'User' && r.reviewer?.id === settings?.approverId)
+  if (rule?.prevent_self_review !== true || rule.reviewers?.length !== 1 || !rule.reviewers?.some(r => r.type === 'User' && r.reviewer?.id === settings?.approverId)
       || env?.can_admins_bypass !== false) issues.push('Required reviewers / Prevent self-review / 우회 금지 미확인');
+  const branches = await read(`repos/${repository}/environments/photo-selector-high-risk-merge/deployment-branch-policies`);
+  if (env?.deployment_branch_policy?.custom_branch_policies !== true || env?.deployment_branch_policy?.protected_branches !== false
+      || branches?.branch_policies?.length !== 1 || branches.branch_policies[0].name !== repo?.default_branch
+      || branches.branch_policies[0].type !== 'branch') issues.push('승인 환경 main branch 제한 미확인');
   if (!Number.isSafeInteger(settings?.executorUserId) || !Number.isSafeInteger(settings?.approverId)
       || settings.executorUserId === settings.approverId || user?.id === settings.approverId) issues.push('실행자/승인자 분리 미확인');
   // API로 로컬 OS/credential manager 격리 또는 App private key 접근 통제는 입증할 수 없다.
@@ -42,8 +48,8 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
     const [repository, path, ...extra] = process.argv.slice(2);
     if (extra.length) throw new Error('args');
     const settings = path ? JSON.parse(readFileSync(path, 'utf8')) : {};
-    const result = await preflight({ repository, settings, get: path => JSON.parse(execFileSync('gh', ['api', '--method', 'GET', path], { encoding: 'utf8', stdio: ['ignore','pipe','pipe'] })) });
+    const result = await preflight({ repository, settings, get: createGet(args => execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore','pipe','pipe'] })) });
     console.log(JSON.stringify(result, null, 2));
-    process.exitCode = result.issues.length ? 1 : 0;
+    process.exitCode = result.ready ? 0 : 1;
   } catch { console.error('읽기 전용 진단 실패. 설정·조회 권한을 확인하세요.'); process.exitCode = 1; }
 }
