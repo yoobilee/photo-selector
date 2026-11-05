@@ -1,13 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { classifySharpness, downsampleByAverage, measureSharpness, type GrayImage } from '../photos/sharpness.ts'
-import { addNoise, createRandom, gaussianBlur, motionBlur, renderScene } from '../test/syntheticImages.ts'
+import { classifySharpness, downsampleByAverage, estimateBlurCause, measureSharpness, type GrayImage } from '../photos/sharpness.ts'
+import {
+  addNoise,
+  composite,
+  createRandom,
+  gaussianBlur,
+  motionBlur,
+  renderScene,
+  renderStripes,
+} from '../test/syntheticImages.ts'
 
 // 실제 사진 18장 평가(2026-10-30)에서 본 미탐·분석 불가와 같은 모양의 결과를 합성 이미지로 재현해 현재 판정의 한계를 기록한다.
 // 실제 사진이 아니므로 실제 사진의 원인을 증명하지 않는다. 판정 로직·임계값을 바꾸면 이 기록도 함께 다시 확인한다.
 
 function judge(image: GrayImage) {
   const measurement = measureSharpness(image)
-  return { verdict: classifySharpness(measurement), ...measurement }
+  const verdict = classifySharpness(measurement)
+  return { verdict, cause: verdict === 'blurry' ? estimateBlurCause(measurement) : null, ...measurement }
 }
 
 // 분석 크기 기준으로 화소 일부(위에서 아래로 coverage 비율)에만 섞는다.
@@ -67,18 +76,38 @@ describe('known limits of blur detection (synthetic reproduction, not real photo
     expect(judge(gaussianBlur(renderScene(1024, 768, 21), 0.8 + focusBlur)).verdict).toBe('blurry')
   })
 
-  // photo-17·18(흐림 정답, 방향 판정 불가로 분석 불가)과 같은 모양의 결과
-  it('turns long one-direction shake into "low-detail" or even "sharp" because the shaken direction loses its structure', () => {
+  // photo-17·18(흐림 정답, 방향 판정 불가로 분석 불가)과 같은 모양의 결과. 방향별 판정만으로는 길게 끌린 방향이 판정에서 빠져
+  // 분석 불가(25화소)나 선명(41화소)이 되던 경우를 흔들림 근거가 모두 일치할 때 찾는다. 근거가 하나라도 어긋나면 여전히 놓친다.
+  it('finds long one-direction shake only when all shake evidence agrees, and still misses it over a blurred background or with noise', () => {
     const base = gaussianBlur(renderScene(1024, 768, 13), 0.8)
     expect(judge(addNoise(motionBlur(base, 9), 0.3, 5)).verdict).toBe('blurry')
+    for (const length of [25, 41]) {
+      const long = judge(addNoise(motionBlur(base, length), 0.3, 5))
+      // 방향별 점수만 보면 선명하다(끌린 방향은 판정에서 빠졌다).
+      expect(long.score).toBeGreaterThan(0.05)
+      expect(long.verdict, `${length}px`).toBe('blurry')
+      expect(long.cause, `${length}px`).toBe('shake')
+    }
 
-    const long = judge(addNoise(motionBlur(base, 25), 0.3, 5))
-    expect(long.verdict).toBe('low-detail')
-    expect(long.hasUnjudgedDirection).toBe(true)
-    expect(long.score).toBeGreaterThan(0.05)
+    // 배경이 흐린 사진은 모든 방향이 흐린 구역이 많아 흔들림으로 보지 않는다. 피사체가 길게 흔들려도 선명으로 판정한다.
+    const subject = gaussianBlur(renderScene(1024, 768, 1), 0.8)
+    const portrait = composite(gaussianBlur(renderScene(1024, 768, 1), 4), subject, { x: 0.3, y: 0.2, w: 0.4, h: 0.6 })
+    const shakenPortrait = judge(addNoise(motionBlur(portrait, 25), 0.3, 1))
+    expect(shakenPortrait.verdict).toBe('sharp')
+    expect(shakenPortrait.isotropicBlurRegions).toBeGreaterThan(5)
+    // 잡음이 많으면 수직 방향을 선명하다고 확인할 수 없어 분석 불가로 남는다.
+    expect(judge(addNoise(motionBlur(base, 25), 1, 13)).verdict).toBe('low-detail')
+  })
 
-    // 더 길게 끌리면 그 방향의 큰 윤곽까지 사라져 판정 대상에서 빠지고, 남은 방향만 보고 선명으로 판정한다.
-    expect(judge(addNoise(motionBlur(base, 41), 0.3, 5)).verdict).toBe('sharp')
+  // 흔들림 판정과 별개로 원래 있던 한계: 선명한 가로 줄무늬가 강한 배경 흐림 위에 있으면 가로 방향 윤곽이 배경에만 있어 흐림 의심이 된다.
+  // 잡음이 없을 때만 재현된다(잡음이 있으면 분석 불가). 원인은 흔들림으로 단정하지 않는다.
+  it('flags sharp stripes over a heavily blurred background as blurry without calling it shake', () => {
+    const background = gaussianBlur(renderScene(1024, 768, 7), 5)
+    const blinds = composite(background, gaussianBlur(renderStripes(1024, 768, 20), 0.8), { x: 0, y: 0.3, w: 1, h: 0.3 })
+    const result = judge(blinds)
+    expect(result.verdict).toBe('blurry')
+    expect(result.cause).toBe('unknown')
+    expect(judge(addNoise(blinds, 0.3, 3)).verdict).toBe('low-detail')
   })
 
   // photo-4(흐림 정답, 점수 1.335, 잡음 추정 0.32)처럼 흐린 사진이 아주 높은 점수를 받는 경우의 한 가지 재현

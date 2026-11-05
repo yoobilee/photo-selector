@@ -8,6 +8,7 @@ import {
   type EvaluationEnvironment,
   type EvaluationPhoto,
 } from './evaluationExport.ts'
+import { createMeasurement } from '../test/measurements.ts'
 
 const photo = (change: Partial<EvaluationPhoto> = {}): EvaluationPhoto => ({
   id: 'photo-1',
@@ -18,7 +19,7 @@ const photo = (change: Partial<EvaluationPhoto> = {}): EvaluationPhoto => ({
   reviewed: true,
   verdict: 'sharp',
   unavailableReason: null,
-  measurement: { score: 0.0412, hasUnjudgedDirection: false, noise: 0.37 },
+  measurement: createMeasurement({ score: 0.0412, hasUnjudgedDirection: false, noise: 0.37 }),
   format: 'jpeg',
   width: 4032,
   height: 3024,
