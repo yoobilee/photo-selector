@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GrayImage, SharpnessResult } from './sharpness.ts'
 import type { SharpnessWorkerRequest } from './sharpness.worker.ts'
-import { createSharpnessWorkerAnalyzer } from './sharpnessWorkerClient.ts'
+import { SHARPNESS_ANALYSIS_TIMEOUT_MS, createSharpnessWorkerAnalyzer } from './sharpnessWorkerClient.ts'
+import { createMeasurement } from '../test/measurements.ts'
 
 // jsdom에는 Web Worker가 없으므로 메시지 주고받기만 흉내 내는 가짜 Worker를 쓴다.
 class FakeWorker extends EventTarget {
@@ -47,9 +48,9 @@ describe('createSharpnessWorkerAnalyzer', () => {
     expect(workers).toHaveLength(2)
     expect(workers[0]!.requests[0]!.request).toMatchObject({ kind: 'file', file: photo })
 
-    workers[0]!.respond(0, { status: 'blurry' })
+    workers[0]!.respond(0, { status: 'blurry', cause: 'unknown' })
     workers[1]!.respond(0, { status: 'sharp' })
-    await expect(first).resolves.toEqual({ status: 'blurry' })
+    await expect(first).resolves.toEqual({ status: 'blurry', cause: 'unknown' })
     await expect(second).resolves.toEqual({ status: 'sharp' })
 
     const third = analyzer.analyze(photo)
@@ -73,22 +74,72 @@ describe('createSharpnessWorkerAnalyzer', () => {
     await expect(next).resolves.toEqual({ status: 'sharp' })
   })
 
+  it('stops a stuck analysis after the time limit, replaces only that worker and keeps analyzing other photos', async () => {
+    vi.useFakeTimers()
+    try {
+      const { workers, createWorker } = createWorkers()
+      const analyzer = createSharpnessWorkerAnalyzer({ createWorker, timeoutMs: 1000 })
+
+      const stuck = analyzer.analyze(photo)
+      const other = analyzer.analyze(photo)
+      vi.advanceTimersByTime(600)
+      workers[1]!.respond(0, { status: 'sharp' })
+      await expect(other).resolves.toEqual({ status: 'sharp' })
+
+      vi.advanceTimersByTime(400)
+      await expect(stuck).resolves.toEqual({ status: 'unavailable', reason: 'timeout' })
+      expect(workers[0]!.terminated).toBe(true)
+      expect(workers[1]!.terminated).toBe(false)
+      // 시간 초과 뒤 늦게 온 응답은 무시한다.
+      workers[0]!.respond(0, { status: 'blurry', cause: 'unknown' })
+
+      // 끝난 분석의 제한 시간은 해제되므로 재사용한 Worker의 다음 분석을 끊지 않는다.
+      const reused = analyzer.analyze(photo)
+      const replacement = analyzer.analyze(photo)
+      expect(workers).toHaveLength(3)
+      vi.advanceTimersByTime(999)
+      workers[1]!.respond(1, { status: 'sharp' })
+      workers[2]!.respond(0, { status: 'blurry', cause: 'shake' })
+      await expect(reused).resolves.toEqual({ status: 'sharp' })
+      await expect(replacement).resolves.toEqual({ status: 'blurry', cause: 'shake' })
+      expect(workers[1]!.terminated).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('applies a default time limit to every analysis', async () => {
+    vi.useFakeTimers()
+    try {
+      const { workers, createWorker } = createWorkers()
+      const analyzer = createSharpnessWorkerAnalyzer({ createWorker })
+      const pending = analyzer.analyze(photo)
+      vi.advanceTimersByTime(SHARPNESS_ANALYSIS_TIMEOUT_MS - 1)
+      expect(workers[0]!.terminated).toBe(false)
+      vi.advanceTimersByTime(1)
+      await expect(pending).resolves.toEqual({ status: 'unavailable', reason: 'timeout' })
+      expect(workers[0]!.terminated).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('returns the measurement from the same worker analysis for the evaluation tool', async () => {
     const { workers, createWorker } = createWorkers()
     const analyzer = createSharpnessWorkerAnalyzer({ createWorker })
-    const measurement = { score: 0.0123, hasUnjudgedDirection: false, noise: 0.4 }
+    const measurement = createMeasurement({ score: 0.0123, hasUnjudgedDirection: false, noise: 0.4 })
 
     const measured = analyzer.measure(photo)
     const verdictOnly = analyzer.analyze(photo)
     workers[0]!.dispatchEvent(
-      new MessageEvent('message', { data: { jobId: workers[0]!.requests[0]!.request.jobId, result: { status: 'blurry' }, measurement } }),
+      new MessageEvent('message', { data: { jobId: workers[0]!.requests[0]!.request.jobId, result: { status: 'blurry', cause: 'unknown' }, measurement } }),
     )
     workers[1]!.dispatchEvent(
-      new MessageEvent('message', { data: { jobId: workers[1]!.requests[0]!.request.jobId, result: { status: 'blurry' }, measurement } }),
+      new MessageEvent('message', { data: { jobId: workers[1]!.requests[0]!.request.jobId, result: { status: 'blurry', cause: 'unknown' }, measurement } }),
     )
 
-    await expect(measured).resolves.toEqual({ result: { status: 'blurry' }, measurement })
-    await expect(verdictOnly).resolves.toEqual({ status: 'blurry' })
+    await expect(measured).resolves.toEqual({ result: { status: 'blurry', cause: 'unknown' }, measurement })
+    await expect(verdictOnly).resolves.toEqual({ status: 'blurry', cause: 'unknown' })
     // 측정값이 없는 응답(이전 Worker 등)도 실패로 보지 않고 측정값만 비운다.
     const withoutMeasurement = analyzer.measure(photo)
     workers[1]!.respond(1, { status: 'sharp' })

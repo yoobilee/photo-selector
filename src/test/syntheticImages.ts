@@ -141,6 +141,105 @@ export function motionBlur(image: GrayImage, length: number): GrayImage {
   return { width, height, pixels }
 }
 
+// 가로·세로를 바꾼다. 가로 흔들림을 세로 흔들림으로 바꾸는 데 쓴다.
+export function transpose(image: GrayImage): GrayImage {
+  const { width, height } = image
+  const pixels = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) pixels[x * height + y] = image.pixels[y * width + x]!
+  }
+  return { width: height, height: width, pixels }
+}
+
+// angle도(화면 좌표, 시계 방향) 방향으로 length 화소만큼 끌린 흔들림. 선을 따라 겹선형 보간으로 표본을 평균한다.
+export function angledMotionBlur(image: GrayImage, length: number, angle: number): GrayImage {
+  const { width, height } = image
+  const samples = Math.max(2, Math.round(length))
+  const cos = Math.cos((angle * Math.PI) / 180)
+  const sin = Math.sin((angle * Math.PI) / 180)
+  const at = (x: number, y: number) =>
+    image.pixels[Math.min(height - 1, Math.max(0, y)) * width + Math.min(width - 1, Math.max(0, x))]!
+  const pixels = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0
+      for (let sample = 0; sample < samples; sample += 1) {
+        const offset = -length / 2 + (length * sample) / (samples - 1)
+        const sx = x + offset * cos
+        const sy = y + offset * sin
+        const x0 = Math.floor(sx)
+        const y0 = Math.floor(sy)
+        const ax = sx - x0
+        const ay = sy - y0
+        sum +=
+          (1 - ax) * (1 - ay) * at(x0, y0) + ax * (1 - ay) * at(x0 + 1, y0) + (1 - ax) * ay * at(x0, y0 + 1) + ax * ay * at(x0 + 1, y0 + 1)
+      }
+      pixels[y * width + x] = sum / samples
+    }
+  }
+  return { width, height, pixels }
+}
+
+// 방향성이 강한 선명한 장면들. 흔들림으로 오판하지 않는지 확인한다. 가장자리는 미리 gaussianBlur로 렌즈 수준만큼 부드럽게 한다.
+// 폭 period/2 화소의 줄이 번갈아 나오는 줄무늬(블라인드·울타리). angle 0은 가로줄, 90은 세로줄이다.
+export function renderStripes(width: number, height: number, period: number, angle = 0): GrayImage {
+  const cos = Math.cos((angle * Math.PI) / 180)
+  const sin = Math.sin((angle * Math.PI) / 180)
+  const pixels = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const across = y * cos - x * sin
+      pixels[y * width + x] = Math.floor((2 * across) / period) % 2 === 0 ? 60 : 190
+    }
+  }
+  return { width, height, pixels }
+}
+
+// cell 화소 크기의 바둑판 무늬
+export function renderChecker(width: number, height: number, cell: number): GrayImage {
+  const pixels = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) pixels[y * width + x] = (Math.floor(x / cell) + Math.floor(y / cell)) % 2 ? 60 : 190
+  }
+  return { width, height, pixels }
+}
+
+// 줄마다 엇갈린 벽돌과 줄눈(반복 무늬)
+export function renderBricks(width: number, height: number): GrayImage {
+  const pixels = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    const row = Math.floor(y / 24)
+    const shift = row % 2 ? 32 : 0
+    for (let x = 0; x < width; x += 1) {
+      const isMortar = y % 24 < 3 || (x + shift) % 64 < 3
+      pixels[y * width + x] = isMortar ? 200 : 110 + ((row * 37 + Math.floor((x + shift) / 64) * 53) % 40)
+    }
+  }
+  return { width, height, pixels }
+}
+
+// 밝은 하늘과 어두운 물이 맞닿은 수평선. 물에는 가로로 긴 완만한 물결이 있다.
+export function renderHorizon(width: number, height: number): GrayImage {
+  const pixels = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const horizon = height * 0.45 + 3 * Math.sin(x / 50)
+      pixels[y * width + x] =
+        y < horizon ? 150 + 60 * (y / horizon) : 70 + 10 * Math.sin(y / 3) * Math.sin(x / 40)
+    }
+  }
+  return { width, height, pixels }
+}
+
+// 가로로 length 화소쯤 길게 늘어난 무작위 결(물결·나뭇결). 국소적으로는 흔들린 무늬와 같은 모양이다.
+export function renderStreaks(width: number, height: number, length: number, seed: number): GrayImage {
+  const random = createRandom(seed)
+  const base = { width, height, pixels: new Float32Array(width * height).map(() => 128 + (random() - 0.5) * 200) }
+  const streaks = gaussianBlur(motionBlur(base, length), 0.8)
+  const gain = length / 3
+  return { width, height, pixels: streaks.pixels.map((value) => Math.min(255, Math.max(0, 128 + (value - 128) * gain))) }
+}
+
 // 평균 0, 표준편차 amount의 결정적 가우시안 잡음을 더하고 0~255로 자른다.
 export function addNoise(image: GrayImage, amount: number, seed: number): GrayImage {
   const random = createRandom(seed)

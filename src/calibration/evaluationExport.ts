@@ -1,7 +1,17 @@
 import type { SupportedImageFormat } from '../photos/imageFormat.ts'
 import type { SharpnessMeasurement, UnavailableReason } from '../photos/sharpness.ts'
 import {
+  DEFOCUS_MAX_SPREAD,
+  DEFOCUS_MIN_REGIONS,
+  DEFOCUS_PAIR_SPREAD,
   NOISE_MARGIN,
+  SHAKE_COARSE_GRID,
+  SHAKE_ISOTROPIC_LIMIT,
+  SHAKE_MIN_COARSE_BALANCE,
+  SHAKE_MIN_REGIONS,
+  SHAKE_MIN_SPREAD,
+  SHAKE_SCALE_LOSS,
+  SHARPNESS_CLASSIFIER_REVISION,
   SHARPNESS_ANALYSIS_MAX_EDGE,
   SHARPNESS_COARSE_FACTOR,
   SHARPNESS_GRID,
@@ -61,7 +71,8 @@ export interface EvaluationEnvironment {
 
 export const EVALUATION_FORMAT = 'photo-selector-blur-evaluation'
 // 2: 사진별 origin·reviewed 추가
-export const EVALUATION_FORMAT_VERSION = 2
+// 3: settings에 판정 규칙의 판(classifierRevision)과 흔들림·초점 불량 기준 추가
+export const EVALUATION_FORMAT_VERSION = 3
 
 export function bitsPerPixel(byteSize: number, width: number, height: number): number {
   return width > 0 && height > 0 ? Math.round(((byteSize * 8) / (width * height)) * 1000) / 1000 : 0
@@ -76,8 +87,9 @@ export function buildEvaluationJson(
     format: EVALUATION_FORMAT,
     version: EVALUATION_FORMAT_VERSION,
     exportedAt: exportedAt.toISOString(),
-    // 이 결과를 만든 판정 설정. 설정이 바뀌면 결과를 직접 비교할 수 없다.
+    // 이 결과를 만든 판정 설정. 판(classifierRevision)이나 설정이 다르면 결과를 직접 비교할 수 없다.
     settings: {
+      classifierRevision: SHARPNESS_CLASSIFIER_REVISION,
       sharpRatioThreshold: SHARP_RATIO_THRESHOLD,
       analysisMaxEdge: SHARPNESS_ANALYSIS_MAX_EDGE,
       minEdge: SHARPNESS_MIN_EDGE,
@@ -86,6 +98,19 @@ export function buildEvaluationJson(
       topRegions: SHARPNESS_TOP_REGIONS,
       structureMinStrength: STRUCTURE_MIN_STRENGTH,
       noiseMargin: NOISE_MARGIN,
+      shake: {
+        coarseGrid: SHAKE_COARSE_GRID,
+        minCoarseBalance: SHAKE_MIN_COARSE_BALANCE,
+        scaleLoss: SHAKE_SCALE_LOSS,
+        minRegions: SHAKE_MIN_REGIONS,
+        minSpread: SHAKE_MIN_SPREAD,
+        isotropicLimit: SHAKE_ISOTROPIC_LIMIT,
+      },
+      defocus: {
+        pairSpread: DEFOCUS_PAIR_SPREAD,
+        maxSpread: DEFOCUS_MAX_SPREAD,
+        minRegions: DEFOCUS_MIN_REGIONS,
+      },
     },
     environment,
     summary: summarizeEvaluation(photos),
