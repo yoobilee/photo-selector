@@ -1,0 +1,37 @@
+{
+  "source": "GitHub REST API, yoobilee/photo-selector PR #10, 2026-10-31. Verification fields only; custom check suite and workflow job suite differ.",
+  "repository": "yoobilee/photo-selector",
+  "defaultBranch": "main",
+  "pr": {
+    "number": 10,
+    "head": { "sha": "3a3728cd85fe9904edc8d548fd79c9124d234ed1" }
+  },
+  "check": {
+    "id": 124499392698,
+    "name": "independent-review",
+    "app": { "id": 15368, "slug": "github-actions" },
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "3a3728cd85fe9904edc8d548fd79c9124d234ed1",
+    "check_suite": { "id": 111550755648 },
+    "details_url": "https://github.com/yoobilee/photo-selector/runs/124499392698",
+    "external_id": "{\"v\":2,\"pr\":10,\"fingerprint\":\"ad6aa990a5863b46f6b28f2ac8352402444a9b7bdc7bbdc327125e890fe74655\",\"evidenceDigest\":\"8d4bdb3de30263c7f205fa313bb2092c9f7e56f7f8cc700a602cb08577640de1\",\"runId\":\"41188211021\",\"attempt\":\"1\"}"
+  },
+  "workflow": {
+    "id": 397135942,
+    "path": ".github/workflows/independent-review.yml"
+  },
+  "run": {
+    "id": 41188211021,
+    "workflow_id": 397135942,
+    "check_suite_id": 111648602111,
+    "path": ".github/workflows/independent-review.yml",
+    "status": "completed",
+    "conclusion": "success",
+    "run_attempt": 1,
+    "event": "issue_comment",
+    "head_sha": "2d39eb120cae79e37682293f68de7a831e322c18",
+    "repository": { "full_name": "yoobilee/photo-selector" },
+    "head_repository": { "full_name": "yoobilee/photo-selector" }
+  }
+}

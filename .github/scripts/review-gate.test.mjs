@@ -350,11 +350,11 @@ test('게이트는 proof v2(fingerprint와 근거 digest)를 기록하고, 무�
 test('게이트 검사 출처 확인: v1 proof와 근거 digest 불일치는 구분된 사유로 거부', async () => {
   const pr = { number: 1, head: { sha: 'a'.repeat(40) } };
   const digest = 'd'.repeat(64);
-  const check = proof => ({ name: 'independent-review', app: { slug: 'github-actions' }, status: 'completed', conclusion: 'success', head_sha: pr.head.sha,
+  const check = proof => ({ id: 99, name: 'independent-review', app: { id: 15368, slug: 'github-actions' }, status: 'completed', conclusion: 'success', head_sha: pr.head.sha,
     external_id: JSON.stringify(proof), details_url: 'https://github.com/owner/repo/actions/runs/42' });
   const api = path => {
-    if (path.endsWith('/actions/workflows/independent-review.yml')) return { id: 4 };
-    if (path.endsWith('/actions/runs/42')) return { workflow_id: 4, path: '.github/workflows/independent-review.yml', status: 'completed', conclusion: 'success', run_attempt: 1, repository: { full_name: 'owner/repo' }, head_repository: { full_name: 'owner/repo' }, event: 'issue_comment', head_sha: 'c'.repeat(40) };
+    if (path.endsWith('/actions/workflows/independent-review.yml')) return { id: 4, path: '.github/workflows/independent-review.yml' };
+    if (path.endsWith('/actions/runs/42')) return { id: 42, workflow_id: 4, path: '.github/workflows/independent-review.yml', status: 'completed', conclusion: 'success', run_attempt: 1, repository: { full_name: 'owner/repo' }, head_repository: { full_name: 'owner/repo' }, event: 'issue_comment', head_sha: 'c'.repeat(40) };
     return { sha: 'workflow-blob' };
   };
   const verify = (proof, evidenceDigest = digest) => verifyGateSource({ check: check(proof), pr, fingerprint: 'f', evidenceDigest, repository: 'owner/repo', defaultBranch: 'main', api });
@@ -366,4 +366,129 @@ test('게이트 검사 출처 확인: v1 proof와 근거 digest 불일치는 구
   await assert.rejects(verify(v2, null), error => error.code === 'evidence-changed');
   await assert.rejects(verify({ ...v2, v: 3 }), error => error.code === 'source');
   await assert.rejects(verify({ ...v2, evidenceDigest: 'short' }), error => error.code === 'source');
+});
+
+// PR #10에서 GitHub가 details_url을 workflow URL 대신 custom check URL로 반환했다.
+// workflow는 기본 브랜치에서 실행하므로 run.head_sha·suite와 PR check의 값은 서로 다를 수 있다.
+const pr10Source = JSON.parse(readFileSync(new URL('./fixtures/gate-source-pr10.json', import.meta.url), 'utf8'));
+function createGateSourceFixture() {
+  const data = structuredClone(pr10Source);
+  const proof = JSON.parse(data.check.external_id);
+  const calls = [];
+  const approved = { sha: '2c74587ea980bef61381bcdad69d2d832ff8c648' };
+  const executed = { ...approved };
+  const api = path => {
+    calls.push(path);
+    const prefix = `repos/${data.repository}`;
+    if (path === `${prefix}/actions/workflows/independent-review.yml`) return data.workflow;
+    if (path === `${prefix}/actions/runs/${proof.runId}`) return data.run;
+    if (path === `${prefix}/contents/.github/workflows/independent-review.yml?ref=main`) return approved;
+    if (path === `${prefix}/contents/.github/workflows/independent-review.yml?ref=${data.run.head_sha}`) return executed;
+    throw new Error('예상하지 못한 API 경로');
+  };
+  const args = { check: data.check, pr: data.pr, fingerprint: proof.fingerprint, evidenceDigest: proof.evidenceDigest,
+    repository: data.repository, defaultBranch: data.defaultBranch, api };
+  return { data, proof, args, calls, approved, executed };
+}
+
+test('PR #10 회귀: 실제 custom check URL과 기본 브랜치 workflow 실행을 함께 검증', async () => {
+  const fixture = createGateSourceFixture();
+  assert.notEqual(fixture.data.check.id, fixture.data.run.id, 'check ID와 workflow run ID는 다른 식별자');
+  assert.notEqual(fixture.data.check.check_suite.id, fixture.data.run.check_suite_id, 'custom check와 job suite는 다를 수 있음');
+  assert.notEqual(fixture.data.check.head_sha, fixture.data.run.head_sha, 'workflow 실행 HEAD는 PR HEAD와 다를 수 있음');
+  assert.deepEqual(await verifyGateSource(fixture.args), fixture.proof);
+  assert.deepEqual(fixture.calls, [
+    `repos/${fixture.data.repository}/actions/workflows/independent-review.yml`,
+    `repos/${fixture.data.repository}/actions/runs/${fixture.proof.runId}`,
+    `repos/${fixture.data.repository}/contents/.github/workflows/independent-review.yml?ref=main`,
+    `repos/${fixture.data.repository}/contents/.github/workflows/independent-review.yml?ref=${fixture.data.run.head_sha}`,
+  ]);
+});
+
+test('기존 workflow run URL도 실제 run ID와 승인된 YAML이 일치할 때 허용', async () => {
+  const fixture = createGateSourceFixture();
+  fixture.data.check.details_url = `https://github.com/${fixture.data.repository}/actions/runs/${fixture.proof.runId}`;
+  assert.deepEqual(await verifyGateSource(fixture.args), fixture.proof);
+});
+
+test('check 링크의 호스트·저장소·ID 위조와 유사 URL은 API 조회 전 거부', async t => {
+  const prefix = `https://github.com/${pr10Source.repository}`;
+  const id = pr10Source.check.id;
+  const runId = pr10Source.run.id;
+  for (const url of [
+    `http://github.com/${pr10Source.repository}/runs/${id}`,
+    `https://github.com.evil.example/${pr10Source.repository}/runs/${id}`,
+    `https://github.com@evil.example/${pr10Source.repository}/runs/${id}`,
+    `https://github.com/other/repository/runs/${id}`,
+    `${prefix}/runs/${id + 1}`, `${prefix}/runs/${runId}`,
+    `${prefix}/actions/runs/${id}`, `${prefix}/actions/runs/${runId + 1}`,
+    `${prefix}/runs/${id}/`, `${prefix}/runs/${id}?next=evil`, `${prefix}/runs/${id}#fragment`,
+    `${prefix}/runs/0${id}`, `${prefix}/actions/runs/${runId}/job/${id}`, null, '',
+  ]) await t.test(String(url), async () => {
+    const fixture = createGateSourceFixture();
+    fixture.data.check.details_url = url;
+    await assert.rejects(verifyGateSource(fixture.args), /검사 출처 링크 오류/);
+    assert.deepEqual(fixture.calls, []);
+  });
+});
+
+test('정상 URL을 복사해도 다른 앱·check ID·PR HEAD·오래된 fingerprint·근거는 거부', async t => {
+  const cases = [
+    ['다른 앱 ID', fixture => { fixture.data.check.app.id = 1; }],
+    ['다른 앱 slug', fixture => { fixture.data.check.app.slug = 'other'; }],
+    ['check ID 누락', fixture => { delete fixture.data.check.id; }],
+    ['잘못된 check ID', fixture => { fixture.data.check.id = -1; }],
+    ['문자열 check ID', fixture => { fixture.data.check.id = String(fixture.data.check.id); }],
+    ['다른 check ID', fixture => { fixture.data.check.id += 1; }],
+    ['다른 check 이름', fixture => { fixture.data.check.name = 'verify'; }],
+    ['이전 HEAD', fixture => { fixture.data.check.head_sha = 'a'.repeat(40); }],
+    ['이전 fingerprint', fixture => { fixture.args.fingerprint = 'b'.repeat(64); }],
+    ['변경된 근거', fixture => { fixture.args.evidenceDigest = 'e'.repeat(64); }],
+    ['근거 누락', fixture => { fixture.args.evidenceDigest = null; }],
+    ['다른 PR', fixture => { fixture.data.pr.number += 1; }],
+    ['미완료 check', fixture => { fixture.data.check.status = 'in_progress'; }],
+    ['실패 check', fixture => { fixture.data.check.conclusion = 'failure'; }],
+  ];
+  for (const [name, change] of cases) await t.test(name, async () => {
+    const fixture = createGateSourceFixture(); change(fixture);
+    await assert.rejects(verifyGateSource(fixture.args));
+    assert.deepEqual(fixture.calls, []);
+  });
+});
+
+test('실제 workflow 응답의 ID·경로·저장소·attempt·완료 상태와 승인된 YAML을 검증', async t => {
+  const cases = [
+    ['다른 실행 ID', fixture => { fixture.data.run.id += 1; }],
+    ['실행 ID 누락', fixture => { delete fixture.data.run.id; }],
+    ['다른 workflow ID', fixture => { fixture.data.run.workflow_id += 1; }],
+    ['workflow ID 누락', fixture => { delete fixture.data.workflow.id; delete fixture.data.run.workflow_id; }],
+    ['다른 workflow 경로', fixture => { fixture.data.run.path = '.github/workflows/ci.yml'; }],
+    ['다른 조회 workflow', fixture => { fixture.data.workflow.path = '.github/workflows/ci.yml'; }],
+    ['다른 저장소', fixture => { fixture.data.run.repository.full_name = 'other/repository'; }],
+    ['fork 실행', fixture => { fixture.data.run.head_repository.full_name = 'other/repository'; }],
+    ['다른 attempt', fixture => { fixture.data.run.run_attempt += 1; }],
+    ['실행 HEAD 누락', fixture => { delete fixture.data.run.head_sha; }],
+    ['실행 HEAD 형식 오류', fixture => { fixture.data.run.head_sha = 'main'; }],
+    ['허용하지 않은 이벤트', fixture => { fixture.data.run.event = 'pull_request'; }],
+    ['미완료 실행', fixture => { fixture.data.run.status = 'in_progress'; }],
+    ...['failure', 'cancelled', 'skipped', null].map(state => [`실행 결론 ${state}`, fixture => { fixture.data.run.conclusion = state; }]),
+    ['변조한 workflow', fixture => { fixture.executed.sha = 'different-blob'; }],
+    ['승인된 YAML 누락', fixture => { delete fixture.approved.sha; }],
+    ['실행한 YAML 누락', fixture => { delete fixture.executed.sha; }],
+  ];
+  for (const [name, change] of cases) await t.test(name, async () => {
+    const fixture = createGateSourceFixture(); change(fixture);
+    await assert.rejects(verifyGateSource(fixture.args));
+  });
+});
+
+test('출처 확인 API가 조회 실패하면 정상 URL도 통과시키지 않음', async t => {
+  for (const at of ['actions/workflows/', 'actions/runs/', '?ref=main', `?ref=${pr10Source.run.head_sha}`]) {
+    await t.test(at, async () => {
+      const fixture = createGateSourceFixture();
+      const api = fixture.args.api;
+      fixture.args.api = path => { if (path.includes(at)) throw new Error('조회 실패'); return api(path); };
+      await assert.rejects(verifyGateSource(fixture.args), /조회 실패/);
+    });
+  }
 });
