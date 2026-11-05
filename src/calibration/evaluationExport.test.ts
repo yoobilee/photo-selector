@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { SHARP_RATIO_THRESHOLD } from '../photos/sharpness.ts'
+import {
+  DEFOCUS_MAX_SPREAD,
+  DEFOCUS_MIN_REGIONS,
+  DEFOCUS_PAIR_SPREAD,
+  SHAKE_COARSE_GRID,
+  SHAKE_ISOTROPIC_LIMIT,
+  SHAKE_MIN_COARSE_BALANCE,
+  SHAKE_MIN_REGIONS,
+  SHAKE_MIN_SPREAD,
+  SHAKE_SCALE_LOSS,
+  SHARPNESS_CLASSIFIER_REVISION,
+  SHARP_RATIO_THRESHOLD,
+} from '../photos/sharpness.ts'
 import {
   EVALUATION_FORMAT,
   bitsPerPixel,
@@ -44,9 +56,20 @@ describe('evaluation export', () => {
       ),
     )
     expect(report.format).toBe(EVALUATION_FORMAT)
-    expect(report.version).toBe(2)
+    expect(report.version).toBe(3)
     expect(report.exportedAt).toBe('2026-10-30T01:02:03.000Z')
     expect(report.settings.sharpRatioThreshold).toBe(SHARP_RATIO_THRESHOLD)
+    // 같은 임계값이라도 판정 규칙이 다르면 결과를 비교할 수 없으므로 규칙의 판과 흔들림·초점 불량 기준을 함께 기록한다.
+    expect(report.settings.classifierRevision).toBe(SHARPNESS_CLASSIFIER_REVISION)
+    expect(report.settings.shake).toEqual({
+      coarseGrid: SHAKE_COARSE_GRID,
+      minCoarseBalance: SHAKE_MIN_COARSE_BALANCE,
+      scaleLoss: SHAKE_SCALE_LOSS,
+      minRegions: SHAKE_MIN_REGIONS,
+      minSpread: SHAKE_MIN_SPREAD,
+      isotropicLimit: SHAKE_ISOTROPIC_LIMIT,
+    })
+    expect(report.settings.defocus).toEqual({ pairSpread: DEFOCUS_PAIR_SPREAD, maxSpread: DEFOCUS_MAX_SPREAD, minRegions: DEFOCUS_MIN_REGIONS })
     expect(report.environment).toEqual(environment)
     expect(report.summary.counts.falseNegative).toBe(1)
     expect(report.photos[0]).toEqual({

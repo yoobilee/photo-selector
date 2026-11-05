@@ -176,6 +176,8 @@
 
 평가 결과 형식은 이 변경으로 `version` 2가 되었습니다(사진별 `origin`·`reviewed` 추가, CSV 열도 같은 순서로 추가). 그 밖의 필드는 1과 같습니다.
 
+`version` 3(흔들림 근거 추가)부터 `settings`에 판정 규칙의 판 `classifierRevision`(현재 2)과 흔들림(`shake`)·초점 불량(`defocus`) 기준을 기록합니다. 임계값이 같아도 판이 다르면 같은 사진의 판정이 달라질 수 있으므로 판이 다른 평가 결과는 직접 비교하지 않습니다. `version` 2 이하 결과는 판 1(방향별 점수만으로 판정)의 결과입니다. 사진별 필드와 CSV 열은 바뀌지 않았습니다.
+
 **지표 정의** ([`src/calibration/evaluationMetrics.ts`](src/calibration/evaluationMetrics.ts))
 
 - 양성은 `흐림`입니다.

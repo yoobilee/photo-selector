@@ -30,6 +30,11 @@ export const NOISE_MARGIN = 4
 // 점수가 이 값 이상이면 선명하다.
 export const SHARP_RATIO_THRESHOLD = 0.025
 
+// 판정 규칙의 판. 같은 설정값에서도 판정이 달라지는 규칙 변경이면 올린다. 평가 결과에 기록해 다른 판의 결과와 섞지 않는다.
+// 1: 방향별 점수만으로 판정(PR #8)
+// 2: 긴 흔들림 근거(hasConsistentShake)로 흐림 의심 추가, 흐림 원인 추정(estimateBlurCause)
+export const SHARPNESS_CLASSIFIER_REVISION = 2
+
 // 흔들림 근거(collectShakeEvidence)에 쓰는 아주 거친 크기(1/16)의 구역 수. 분석 크기 1024×768에서 구역 하나가 16×12화소다.
 export const SHAKE_COARSE_GRID = 4
 // 아주 거친 크기에서 끌린 방향 윤곽이 수직 방향 윤곽의 이 비율 이상이어야 한다(원래 한 방향 윤곽만 있는 장면 제외).
