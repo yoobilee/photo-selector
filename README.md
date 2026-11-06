@@ -331,6 +331,7 @@ PR 병합은 개발자 컴퓨터에서 [병합 도구](.ai/checklists/review-gat
 PR #10에서는 GitHub가 검사 링크를 `/runs/<check ID>`로 반환해 `/actions/runs/<workflow run ID>`만 허용하던 출처 검증이 정상 검사를 차단했습니다. 실제 API 응답으로 재현한 뒤 두 형식을 각각 해당 ID와 정확히 비교하도록 수정했습니다. 링크가 맞아도 앱·PR HEAD·fingerprint·근거 digest와 실제 workflow 실행 ID·저장소·재실행 횟수·승인된 YAML 검증은 모두 통과해야 합니다. 이 검증은 같은 GitHub Actions 앱의 악의적인 workflow나 유출된 관리자 인증까지 완전히 방어한다는 뜻은 아닙니다.
 
 - [리뷰 게이트 설정과 확인 댓글 형식](.ai/checklists/review-gate-setup.md)
+- [리뷰 자료 자동 수집·봇 보고서 등록](.ai/checklists/review-evidence.md): `npm run review:prepare -- owner/repo PR번호`. SHA·해시·결과 수집과 검증된 기존 자료의 명시적인 등록 요청을 지원합니다. 미인증 로컬 결과는 파일 출력까지만 허용하며 봇으로 게시하지 않습니다. 같은 Actions 앱의 workflow별 작성자 구분 한계와 hash 제외 조건은 해당 문서에 기록했습니다. 기존 관리자 확인·승인·병합 절차는 유지하며, 기본 브랜치 도입 전에는 등록 workflow를 실행하지 않습니다.
 - [위험도와 독립 검증 기준](.ai/policies/verification.md)
 - [리뷰 자동화 정책](.ai/policies/review-automation.md)
 - [커밋·PR·병합 메시지 규칙](.ai/policies/git-messages.md)
