@@ -5,6 +5,7 @@ import type { SharpnessAnalysis } from '../photos/analyzeImageSharpness.ts'
 import { createImageFile, readBytes } from '../test/imageFiles.ts'
 import { installObjectUrlTracker } from '../test/objectUrls.ts'
 import CalibrationApp from './CalibrationApp.tsx'
+import { createMeasurement } from '../test/measurements.ts'
 
 // jsdom은 이미지를 디코딩하지 못하므로 미리보기 생성만 대체한다.
 vi.mock('../photos/createPhotoThumbnail.ts', () => ({
@@ -43,11 +44,11 @@ vi.mock('./downloadText.ts', async (importOriginal) => ({
   downloadText: (fileName: string, mimeType: string, text: string) => downloads.push({ fileName, mimeType, text }),
 }))
 
-const SHARP: SharpnessAnalysis = { result: { status: 'sharp' }, measurement: { score: 0.0812, hasUnjudgedDirection: false, noise: 0.21 } }
-const BLURRY: SharpnessAnalysis = { result: { status: 'blurry' }, measurement: { score: 0.0123, hasUnjudgedDirection: false, noise: 0.05 } }
+const SHARP: SharpnessAnalysis = { result: { status: 'sharp' }, measurement: createMeasurement({ score: 0.0812, hasUnjudgedDirection: false, noise: 0.21 }) }
+const BLURRY: SharpnessAnalysis = { result: { status: 'blurry', cause: 'unknown' }, measurement: createMeasurement({ score: 0.0123, hasUnjudgedDirection: false, noise: 0.05 }) }
 const LOW_DETAIL: SharpnessAnalysis = {
   result: { status: 'unavailable', reason: 'low-detail' },
-  measurement: { score: null, hasUnjudgedDirection: false, noise: 2.1 },
+  measurement: createMeasurement({ score: null, hasUnjudgedDirection: false, noise: 2.1 }),
 }
 
 const measuredNames = () => analyzer.measured.map((file) => (file as File).name)

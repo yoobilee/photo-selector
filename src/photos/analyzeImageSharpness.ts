@@ -1,6 +1,7 @@
 import {
   classifySharpness,
   downsampleByAverage,
+  estimateBlurCause,
   getAnalysisSize,
   measureSharpness,
   toGrayscale,
@@ -63,10 +64,17 @@ export async function decodeAnalysisImage(file: Blob, createContext: CreateAnaly
 export function evaluateAnalysisImage(image: GrayImage | null): SharpnessAnalysis {
   if (!image) return { result: { status: 'unavailable', reason: 'too-small' }, measurement: null }
   const measurement = measureSharpness(image)
-  const verdict = classifySharpness(measurement)
-  return {
-    result: verdict === 'low-detail' ? { status: 'unavailable', reason: 'low-detail' } : { status: verdict },
-    measurement,
+  return { result: toSharpnessResult(measurement), measurement }
+}
+
+function toSharpnessResult(measurement: SharpnessMeasurement): SharpnessResult {
+  switch (classifySharpness(measurement)) {
+    case 'sharp':
+      return { status: 'sharp' }
+    case 'blurry':
+      return { status: 'blurry', cause: estimateBlurCause(measurement) }
+    case 'low-detail':
+      return { status: 'unavailable', reason: 'low-detail' }
   }
 }
 

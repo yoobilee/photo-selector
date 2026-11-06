@@ -39,6 +39,8 @@ async function finishAnalysis(name: string, result: SharpnessResult) {
 
 const sharpnessBadgeOf = (name: string) =>
   screen.getByRole('img', { name }).closest('li')?.querySelector('[data-testid="sharpness-badge"]')?.textContent ?? null
+const sharpnessReasonOf = (name: string) =>
+  screen.getByRole('img', { name }).closest('li')?.querySelector('[data-testid="sharpness-reason"]')?.textContent ?? null
 
 // jsdom은 이미지를 디코딩하지 못하므로 미리보기 생성만 대체한다. 이름이 broken으로 시작하면 손상된 이미지로 취급한다.
 vi.mock('./photos/createPhotoThumbnail.ts', () => ({
@@ -293,37 +295,69 @@ describe('App', () => {
   })
 
   describe('blur detection', () => {
-    it('shows progress while analyzing and then badges only blurry and undecidable photos', async () => {
+    it('shows progress while analyzing and then labels each blur cause and undecidable photos with a visible reason', async () => {
       render(<App />)
       selectFiles([
         createImageFile('sharp.jpg', 'jpeg', [1]),
-        createImageFile('blurry.jpg', 'jpeg', [2]),
-        createImageFile('wall.jpg', 'jpeg', [3]),
+        createImageFile('shaken.jpg', 'jpeg', [2]),
+        createImageFile('soft.jpg', 'jpeg', [3]),
+        createImageFile('blurry.jpg', 'jpeg', [4]),
+        createImageFile('wall.jpg', 'jpeg', [5]),
+        createImageFile('slow.jpg', 'jpeg', [6]),
       ])
-      await findGallery(3)
+      await findGallery(6)
 
-      expect(screen.getByText('흐림 확인 중 0/3장')).toBeInTheDocument()
+      expect(screen.getByText('흐림 확인 중 0/6장')).toBeInTheDocument()
       expect(screen.getByRole('img', { name: 'sharp.jpg' })).toHaveAccessibleDescription('흐림 확인 중')
       expect(sharpnessBadgeOf('wall.jpg')).toBe('확인 중')
+      expect(sharpnessReasonOf('wall.jpg')).toBeNull()
 
       await finishAnalysis('sharp.jpg', { status: 'sharp' })
-      expect(screen.getByText('흐림 확인 중 1/3장')).toBeInTheDocument()
-      await finishAnalysis('blurry.jpg', { status: 'blurry' })
+      expect(screen.getByText('흐림 확인 중 1/6장')).toBeInTheDocument()
+      await finishAnalysis('shaken.jpg', { status: 'blurry', cause: 'shake' })
+      await finishAnalysis('soft.jpg', { status: 'blurry', cause: 'defocus' })
+      await finishAnalysis('blurry.jpg', { status: 'blurry', cause: 'unknown' })
       await finishAnalysis('wall.jpg', { status: 'unavailable', reason: 'low-detail' })
+      await finishAnalysis('slow.jpg', { status: 'unavailable', reason: 'timeout' })
 
       expect(screen.getByRole('img', { name: 'sharp.jpg' })).toHaveAccessibleDescription('흐림 의심 없음')
       expect(sharpnessBadgeOf('sharp.jpg')).toBeNull()
-      expect(screen.getByRole('img', { name: 'blurry.jpg' })).toHaveAccessibleDescription('흐림 의심')
+      expect(sharpnessReasonOf('sharp.jpg')).toBeNull()
+
+      expect(screen.getByRole('img', { name: 'shaken.jpg' })).toHaveAccessibleDescription(
+        '흔들림 의심: 윤곽이 한 방향으로 번져 있습니다',
+      )
+      expect(sharpnessBadgeOf('shaken.jpg')).toBe('흔들림 의심')
+      expect(sharpnessReasonOf('shaken.jpg')).toBe('한 방향으로 번진 윤곽')
+
+      expect(screen.getByRole('img', { name: 'soft.jpg' })).toHaveAccessibleDescription(
+        '초점 불량 의심: 윤곽이 모든 방향으로 고르게 흐립니다',
+      )
+      expect(sharpnessBadgeOf('soft.jpg')).toBe('초점 불량 의심')
+      expect(sharpnessReasonOf('soft.jpg')).toBe('전체가 고르게 흐림')
+
+      // 원인을 구분할 근거가 부족하면 원인을 단정하지 않는다.
+      expect(screen.getByRole('img', { name: 'blurry.jpg' })).toHaveAccessibleDescription(
+        '흐림 의심: 윤곽이 흐리지만 원인은 구분하기 어렵습니다',
+      )
       expect(sharpnessBadgeOf('blurry.jpg')).toBe('흐림 의심')
+      expect(sharpnessReasonOf('blurry.jpg')).toBe('원인 구분 어려움')
+
       expect(screen.getByRole('img', { name: 'wall.jpg' })).toHaveAccessibleDescription(
         '흐림 분석 불가: 윤곽이 적거나 잡음이 많아 판정할 수 없습니다',
       )
       expect(sharpnessBadgeOf('wall.jpg')).toBe('분석 불가')
+      expect(sharpnessReasonOf('wall.jpg')).toBe('윤곽 부족 또는 잡음')
+      expect(screen.getByRole('img', { name: 'slow.jpg' })).toHaveAccessibleDescription(
+        '흐림 분석 불가: 분석이 너무 오래 걸려 중단했습니다',
+      )
+      expect(sharpnessReasonOf('slow.jpg')).toBe('분석 시간 초과')
+
       // 진행 수는 화면에만 보이고, 낭독용 알림은 시작과 끝에만 바뀐다.
-      const summary = '흐림 의심 1장 · 분석 불가 1장'
+      const summary = '흔들림 의심 1장 · 초점 불량 의심 1장 · 흐림 의심 1장 · 분석 불가 2장'
       expect(screen.getAllByText(summary).map((element) => element.getAttribute('aria-live'))).toEqual([null, 'polite'])
       // 흐림 분석은 기존 가져오기 상태 문장을 바꾸지 않는다.
-      expect(screen.getByRole('status')).toHaveTextContent('사진 3장을 추가했습니다.')
+      expect(screen.getByRole('status')).toHaveTextContent('사진 6장을 추가했습니다.')
     })
 
     it('analyzes each original photo once, in the background, without changing its bytes', async () => {
@@ -337,7 +371,7 @@ describe('App', () => {
       selectFiles([first, second])
       await findGallery(2)
       await finishAnalysis('a.jpg', { status: 'sharp' })
-      await finishAnalysis('b.jpg', { status: 'blurry' })
+      await finishAnalysis('b.jpg', { status: 'blurry', cause: 'unknown' })
 
       // 중복 파일은 가져오지 않으므로 다시 분석하지 않고, 새 사진만 분석한다.
       selectFiles([createImageFile('a-copy.jpg', 'jpeg', [1, 2, 3]), createImageFile('c.jpg', 'jpeg', [7])])
@@ -361,7 +395,7 @@ describe('App', () => {
       await waitFor(() => expect(analyzedNames()).toEqual(['a.jpg', 'b.jpg', 'c.jpg']))
       await finishAnalysis('b.jpg', { status: 'sharp' })
       await finishAnalysis('c.jpg', { status: 'sharp' })
-      await finishAnalysis('d.jpg', { status: 'blurry' })
+      await finishAnalysis('d.jpg', { status: 'blurry', cause: 'unknown' })
 
       expect(screen.getByRole('img', { name: 'a.jpg' })).toHaveAccessibleDescription(
         '흐림 분석 불가: 분석 중 오류가 발생했습니다',
@@ -380,7 +414,7 @@ describe('App', () => {
       fireEvent.click(screen.getByRole('button', { name: 'a.jpg 목록에서 제거' }))
       fireEvent.click(screen.getByRole('button', { name: 'c.jpg 목록에서 제거' }))
       await findGallery(1)
-      await finishAnalysis('a.jpg', { status: 'blurry' })
+      await finishAnalysis('a.jpg', { status: 'blurry', cause: 'unknown' })
       await finishAnalysis('b.jpg', { status: 'sharp' })
 
       expect(analyzedNames()).toEqual(['a.jpg', 'b.jpg'])
@@ -397,7 +431,7 @@ describe('App', () => {
       unmount()
 
       expect(sharpnessAnalyzer.disposeCount).toBe(1)
-      await act(async () => sharpnessAnalyzer.pending[0]!.resolve({ status: 'blurry' }))
+      await act(async () => sharpnessAnalyzer.pending[0]!.resolve({ status: 'blurry', cause: 'unknown' }))
       expect(objectUrls.liveUrls.size).toBe(0)
     })
   })

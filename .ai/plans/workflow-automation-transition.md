@@ -2,10 +2,12 @@
 
 작성: 2026-11-03, Codex. 상태: 구현 가능한 설계안, 운영 미활성화.
 위험도: high. 적용 전 별도 독립 검증과 실제 사용자 최종 승인이 필요하다.
-기준 main: 979c65b1278ab71c8f706b09866679ce8c1bd7ed.
+작성 당시 기준 main: 979c65b1278ab71c8f706b09866679ce8c1bd7ed.
 기존 photo-selector-workflow/.ai/WORK_PLAN.md의 인증 분리·승인·자동 병합 후속 단계를 구체화한다. 원본 계획과 PR12는 수정하지 않는다.
 
-## 1. 현재 관찰과 근본 원인
+2026-11-06 병합 준비 기준은 PR12·PR14가 반영된 main `01d75be9d259e2c71b0dc5c0c281890158142245`다. 아래 PR12 OPEN 상태와 설정 관찰은 2026-11-03 작성 시점의 기록이다. 이번 PR13은 A 단계의 읽기 전용 관찰·진단만 포함하며, B~F의 App·승인·자동 병합 전환은 구현하거나 활성화하지 않는다.
+
+## 1. 작성 시점의 관찰과 근본 원인
 
 - PR12 OPEN/non-Draft, HEAD 48c96f3b482657301f43d3d8fb5645515e270d9b. 아직 병합하지 않는다.
 - 현재 API 인증의 저장소 permissions.admin=true. Agent와 관리자의 인증 경계가 분리되지 않았다. 같은 계정의 별도 토큰이나 브라우저 탭은 보안 격리가 아니다.
@@ -138,4 +140,4 @@ A는 mock fixture 테스트와 관련 전체 verify/Linux CI, 자체 리뷰, hig
 - [보호 브랜치 API](https://docs.github.com/en/rest/branches/branch-protection): 필수 검사 앱 고정과 보호 조회 권한.
 - [execution protections 변경 공지](https://github.blog/changelog/2026-09-17-workflow-execution-protections-in-github-actions-generally-available/): 영향받는 공개 저장소의 pull_request_target 기본 차단 강제 일정은 2026-12-02. 현재 게이트는 이 이벤트를 사용한다. Insights/evaluate 결과를 먼저 확인하고 필요한 승인된 workflow만 좁게 허용하는 전환을 설계한다. 전역 보호 해제나 PR 코드의 privileged 실행으로 해결하지 않는다.
 
-현재 작성 범위: 설계 문서만. App/Environment/보호 규칙·PR12·기존 main 미커밋4파일·AI 과금 설정은 변경하지 않았다.
+2026-11-03 작성 범위: 설계 문서만. App/Environment/보호 규칙·PR12·기존 main 미커밋4파일·AI 과금 설정은 변경하지 않았다.

@@ -1,7 +1,8 @@
 # 1단계: 관찰 전용 검증기
 
 구현 Codex, 위험도 high. workflow-automation-transition.md의 A 단계만 구현한다.
-main 979c65b 기준 독립 브랜치이며 PR12의 수집기·workflow·미병합 커밋에 의존하지 않는다.
+병합 준비 기준 main은 `01d75be9d259e2c71b0dc5c0c281890158142245`이며 PR12와 PR14의 Squash 병합을 포함한다.
+PR12의 수집기·게시 workflow와 별도 모듈로 공존하고 서로 호출하지 않는다. test:gate는 두 PR의 테스트를 모두 실행하며 review:prepare와 workflow:preflight를 함께 유지한다.
 
 ## 범위와 사용
 

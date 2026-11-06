@@ -4,9 +4,30 @@ import type { SharpnessResult } from '../photos/sharpness.ts'
 import { iconButtonClassName, primaryButtonClassName } from './buttonStyles.ts'
 import CloseIcon from './CloseIcon.tsx'
 import SharpnessBadge from './SharpnessBadge.tsx'
-import { describeSharpness, summarizeSharpness, type PhotoSharpnessState } from './sharpnessText.ts'
+import {
+  describeSharpness,
+  sharpnessShortReason,
+  summarizeSharpness,
+  type PhotoSharpnessState,
+} from './sharpnessText.ts'
 
 const ANALYZING: PhotoSharpnessState = { status: 'analyzing' }
+
+// 판정 사유를 사진 칸 아래에 직접 보여 준다(터치 화면에는 마우스를 올려 보는 설명이 없다).
+// 같은 내용의 전체 문장을 사진 설명(describeSharpness)으로 읽으므로 낭독에서는 숨긴다.
+function SharpnessReason({ state }: { state: PhotoSharpnessState }) {
+  const reason = sharpnessShortReason(state)
+  if (reason === null) return null
+  return (
+    <p
+      aria-hidden="true"
+      data-testid="sharpness-reason"
+      className={`mt-0.5 text-xs leading-snug ${state.status === 'blurry' ? 'text-amber-900' : 'text-neutral-600'}`}
+    >
+      {reason}
+    </p>
+  )
+}
 
 interface PhotoGalleryProps {
   photos: readonly Photo[]
@@ -123,6 +144,7 @@ function PhotoGallery({
                 <CloseIcon />
               </button>
             </div>
+            <SharpnessReason state={sharpnessOf(photo)} />
           </li>
         ))}
       </ul>

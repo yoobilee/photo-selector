@@ -26,9 +26,12 @@ const files = [
 ]
 
 // 갤러리 낭독용 설명과 평가 도구의 판정 표기의 대응
-const galleryToTool: Record<string, string> = {
-  '흐림 의심 없음': '선명',
-  '흐림 의심': '흐림 의심',
+// 갤러리는 흐림 의심에 추정 원인(흔들림·초점 불량·구분 어려움)을 붙이지만, 평가 도구는 원인과 관계없이 흐림 의심 하나로 집계한다.
+function galleryToTool(description: string): string {
+  if (description === '흐림 의심 없음') return '선명'
+  if (description.startsWith('흐림 분석 불가')) return '분석 불가'
+  if (/^(흔들림 의심|초점 불량 의심|흐림 의심): /.test(description)) return '흐림 의심'
+  return description
 }
 
 const sha256Of = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
@@ -51,7 +54,7 @@ test('shows the same verdicts as the gallery, with scores that match the thresho
     const description = await page.getByRole('img', { name, exact: true }).evaluate(
       (image) => document.getElementById(image.getAttribute('aria-describedby') ?? '')?.textContent ?? '',
     )
-    galleryVerdicts[name] = galleryToTool[description] ?? (description.startsWith('흐림 분석 불가') ? '분석 불가' : description)
+    galleryVerdicts[name] = galleryToTool(description)
   }
 
   // 같은 파일을 평가 도구로 분석

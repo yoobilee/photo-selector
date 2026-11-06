@@ -3,7 +3,7 @@ import type { SharpnessResult } from './sharpness.ts'
 import { createSharpnessQueue } from './sharpnessQueue.ts'
 
 const SHARP: SharpnessResult = { status: 'sharp' }
-const BLURRY: SharpnessResult = { status: 'blurry' }
+const BLURRY: SharpnessResult = { status: 'blurry', cause: 'unknown' }
 
 // 호출 순서대로 끝낼 수 있는 가짜 분석기
 function createControlledAnalyzer() {
