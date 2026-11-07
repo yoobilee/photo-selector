@@ -95,9 +95,16 @@ export function createSimilarityIndex({
     links.delete(id)
   }
 
+  // 이미 예약된 사진이면 처음부터 다시 비교한다(후보 초과로 비교 결과를 버린 뒤 다시 비교할 때 앞서 지나간 사진을 빠뜨리지 않게).
   const enqueue = (id: string) => {
     entries.get(id)!.state = 'queued'
-    if (!queue.some((job) => job.id === id)) queue.push({ id, others: null, cursor: 0 })
+    const job = queue.find((queued) => queued.id === id)
+    if (job) {
+      job.others = null
+      job.cursor = 0
+    } else {
+      queue.push({ id, others: null, cursor: 0 })
+    }
   }
 
   // 후보 수가 기준을 넘거나 내려간 사진을 처리한다. 넘으면 비교 결과를 버리고, 내려가면 다시 비교한다.
@@ -155,22 +162,28 @@ export function createSimilarityIndex({
       while (queue.length > 0) {
         const job = queue[0]!
         const entry = entries.get(job.id)!
-        // 비교를 마친 사진과만 비교한다. 아직 예약된 사진은 자기 차례에 이 사진과 비교한다.
-        job.others ??= [...entries].filter(([, other]) => other.state === 'settled').map(([otherId]) => otherId)
-        while (isActive(entry) && job.cursor < job.others.length) {
-          const otherId = job.others[job.cursor]!
-          job.cursor += 1
-          const other = entries.get(otherId)
-          if (!isActive(other) || other.state !== 'settled' || !isCandidatePair(entry.prepared, other.prepared)) continue
-          comparisonCount += 1
-          const comparison = compare(entry.prepared, other.prepared)
-          if (comparison.kind === 'same' || comparison.kind === 'similar') {
-            link(job.id, otherId, { kind: comparison.kind, score: comparison.correlation ?? 0 })
+        if (isActive(entry)) {
+          // 비교를 마친 사진과만 비교한다. 아직 예약된 사진은 자기 차례에 이 사진과 비교한다.
+          job.others ??= [...entries].filter(([, other]) => other.state === 'settled').map(([otherId]) => otherId)
+          while (job.cursor < job.others.length) {
+            const otherId = job.others[job.cursor]!
+            job.cursor += 1
+            const other = entries.get(otherId)
+            if (isActive(other) && other.state === 'settled' && isCandidatePair(entry.prepared, other.prepared)) {
+              comparisonCount += 1
+              const comparison = compare(entry.prepared, other.prepared)
+              if (comparison.kind === 'same' || comparison.kind === 'similar') {
+                link(job.id, otherId, { kind: comparison.kind, score: comparison.correlation ?? 0 })
+              }
+            }
+            // 비교하지 않고 건너뛴 사진도 시간을 확인한다(건너뛸 사진이 많을 때 시간 제한을 넘지 않게).
+            if (now() >= deadline) return false
           }
-          if (now() >= deadline) return false
         }
         queue.shift()
         entry.state = 'settled'
+        // 비교할 수 없는(후보 초과·윤곽 부족) 사진이 많이 쌓여도 한 번에 모두 처리하지 않는다.
+        if (queue.length > 0 && now() >= deadline) return false
       }
       return true
     },

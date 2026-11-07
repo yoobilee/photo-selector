@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Ref } from 'react'
+import { useEffect, useRef, useState, type FocusEvent, type Ref } from 'react'
 import type { SimilarPhotosState } from '../hooks/useSimilarPhotoGroups.ts'
 import type { Photo } from '../photos/photo.ts'
 import type { SharpnessResult } from '../photos/sharpness.ts'
@@ -42,12 +42,32 @@ function PhotoGallery({
   // 이웃이 없으면(마지막 사진이거나 묶음이 풀리면) App이 갤러리 제목으로 초점을 옮긴다.
   const pendingFocusPhotoIdRef = useRef<string | null>(null)
 
+  // 키보드 초점이 있는 사진. 분석이 진행되며 묶음이 바뀌어 사진 칸이 다른 묶음으로 옮겨지면 초점을 되돌린다.
+  const focusedPhotoIdRef = useRef<string | null>(null)
+
   useEffect(() => {
     const photoId = pendingFocusPhotoIdRef.current
     if (!photoId) return
     pendingFocusPhotoIdRef.current = null
     removeButtonsRef.current.get(photoId)?.focus()
   }, [photos])
+
+  useEffect(() => {
+    const photoId = focusedPhotoIdRef.current
+    if (!photoId) return
+    const activeElement = document.activeElement
+    // 사용자가 초점을 다른 곳으로 옮겼으면 건드리지 않는다. 초점이 있던 칸이 다시 만들어져 잃은 경우만 되돌린다.
+    if (activeElement && activeElement !== document.body) return
+    removeButtonsRef.current.get(photoId)?.focus()
+  }, [similar.groups])
+
+  const handleFocusIn = (event: FocusEvent<HTMLElement>) => {
+    focusedPhotoIdRef.current = event.target instanceof HTMLElement ? (event.target.dataset.photoId ?? null) : null
+  }
+  const handleFocusOut = (event: FocusEvent<HTMLElement>) => {
+    // 칸이 화면에서 빠져 초점을 잃은 경우(분리된 요소)는 기억을 남겨 되돌릴 수 있게 한다.
+    if (event.target.isConnected && event.relatedTarget === null) focusedPhotoIdRef.current = null
+  }
 
   // siblings는 사진 칸이 놓인 목록(전체 목록 또는 묶음)이다. 묶음에 한 장만 남으면 묶음이 사라지므로 이웃으로 옮기지 않는다.
   const handleRemove = (photo: Photo, siblings: readonly Photo[], keepsSiblings: boolean) => {
@@ -80,7 +100,7 @@ function PhotoGallery({
   )
 
   return (
-    <section aria-labelledby="gallery-heading">
+    <section aria-labelledby="gallery-heading" onFocus={handleFocusIn} onBlur={handleFocusOut}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2
           id="gallery-heading"
@@ -145,10 +165,11 @@ function PhotoGallery({
             </p>
           )}
           {similar.groups.map((group, index) => {
-            const headingId = `similar-group-${group.photos[0]!.id}`
+            const headingId = `similar-group-${index + 1}`
             return (
+              // 묶음 순서로 key를 정해, 분석 중 묶음에 사진이 더해져도 묶음과 사진 칸을 다시 만들지 않는다(키보드 초점 유지).
               <section
-                key={group.photos.map((photo) => photo.id).join(' ')}
+                key={index}
                 aria-labelledby={headingId}
                 className="rounded-lg border border-neutral-300 bg-white p-3 sm:p-4"
               >

@@ -239,4 +239,57 @@ describe('createSimilarityIndex', () => {
     settle(other, growing)
     expect(namedGroups(other.groups(), (id) => id)).toEqual(expected)
   })
+
+  it('compares again from the start a photo that became crowded and then comparable during its own comparisons', () => {
+    // pHash만 바꾼 지문으로 후보 관계를 정한다. X는 Y·W·Z1·Z2와, Z1은 Z2와 후보이고 Y·W는 X와만 후보다.
+    const base = library.burstA!
+    const withHash = (hash: readonly [number, number]): PhotoFingerprint => ({ ...base, hash })
+    const photos = {
+      X: withHash([0, 0]),
+      Y: withHash([0, 0x7fff]),
+      W: withHash([0, 0x3fff8000]),
+      Z1: withHash([0x7fff, 0]),
+      Z2: withHash([0x7fff, 0]),
+    }
+    const nameOf = new Map(Object.entries(photos).map(([name, fingerprint]) => [fingerprint, name]))
+    const scores: Record<string, number> = { 'X|Y': 0.95, 'W|X': 0.8 }
+    let clock = 0
+    const compare = (first: PreparedFingerprint, second: PreparedFingerprint): PhotoComparison => {
+      clock += 5
+      const key = [nameOf.get(first.fingerprint)!, nameOf.get(second.fingerprint)!].sort().join('|')
+      const score = scores[key]
+      return { kind: score ? 'similar' : 'different', hashDistance: 0, correlation: score ?? 0, detailedCells: 16, matchedCells: 16 }
+    }
+    const pick = (...names: (keyof typeof photos)[]) => new Map(names.map((name) => [name, photos[name]]))
+    const index = createSimilarityIndex({ compare, now: () => clock, maxCandidates: 3 })
+
+    settle(index, pick('Y', 'W'))
+    index.sync(pick('Y', 'W', 'X'))
+    // X가 Y와 비교한 뒤 시간 제한으로 멈춘다.
+    expect(index.work(4)).toBe(false)
+    // Z1·Z2가 들어와 X의 후보가 4장이 되어 비교 결과를 버리고, 둘이 빠져 다시 비교할 수 있게 된다.
+    index.sync(pick('Y', 'W', 'X', 'Z1', 'Z2'))
+    expect(index.statusOf('X')).toBe('crowded')
+    settle(index, pick('Y', 'W', 'X'))
+
+    const fresh = createSimilarityIndex({ compare, maxCandidates: 3 })
+    settle(fresh, pick('Y', 'W', 'X'))
+    expect(namedGroups(fresh.groups(), (id) => id)).toEqual([{ kind: 'similar', names: ['X', 'Y'] }])
+    expect(namedGroups(index.groups(), (id) => id)).toEqual(namedGroups(fresh.groups(), (id) => id))
+  })
+
+  it('keeps to the time limit when many queued photos are skipped without comparing', () => {
+    // 후보 상한이 0이라 모든 사진이 후보 초과로 비교하지 않는다. 시간은 확인할 때마다 1ms씩 흐른다.
+    let clock = 0
+    const compare = vi.fn(comparePhotos)
+    const index = createSimilarityIndex({ compare, now: () => (clock += 1), maxCandidates: 0 })
+    index.sync(new Map(Array.from({ length: 300 }, (_, position) => [`photo-${position}`, library.burstA!])))
+
+    expect(index.work(8)).toBe(false)
+    expect(index.pendingCount).toBeGreaterThan(280)
+    let slices = 1
+    while (!index.work(8)) slices += 1
+    expect(slices).toBeGreaterThan(30)
+    expect(compare).not.toHaveBeenCalled()
+  })
 })

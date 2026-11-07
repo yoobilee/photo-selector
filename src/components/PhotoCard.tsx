@@ -65,6 +65,7 @@ function PhotoCard({ photo, sharpness, groupNumber, removeButtonRef, onRemove }:
         <button
           ref={removeButtonRef}
           type="button"
+          data-photo-id={photo.id}
           aria-label={`${photo.source.name} 목록에서 제거`}
           title="목록에서 제거"
           onClick={onRemove}

@@ -541,6 +541,30 @@ describe('App', () => {
       expect(screen.getByRole('region', { name: '묶음 1 · 거의 같은 사진 2장' })).toBeInTheDocument()
     })
 
+    it('keeps keyboard focus on a photo in grouped view while analysis changes the groups', async () => {
+      render(<App />)
+      selectFiles(['x.jpg', 'y.jpg', 'z.jpg', 'w.jpg', 'v.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(5)
+      await finishAnalysis('y.jpg', { status: 'sharp' }, fingerprints.burstA)
+      await finishAnalysis('z.jpg', { status: 'sharp' }, fingerprints.burstB)
+      fireEvent.click(screen.getByRole('button', { name: '비슷한 사진끼리 보기' }))
+      await screen.findByRole('region', { name: '묶음 1 · 비슷한 사진 2장' })
+      const focusedButton = screen.getByRole('button', { name: 'y.jpg 목록에서 제거' })
+      focusedButton.focus()
+
+      // 앞선 순서의 사진이 묶음을 만들어 y가 두 번째 묶음으로 옮겨져도 y의 제거 버튼에 초점이 남는다.
+      await finishAnalysis('x.jpg', { status: 'sharp' }, fingerprints.portrait)
+      await finishAnalysis('w.jpg', { status: 'sharp' }, fingerprints.portraitSmall)
+      await screen.findByRole('region', { name: '묶음 2 · 비슷한 사진 2장' })
+      await waitFor(() => expect(screen.getByRole('button', { name: 'y.jpg 목록에서 제거' })).toHaveFocus())
+
+      // 초점이 있는 사진의 묶음에 사진이 더해져도 초점이 남는다.
+      screen.getByRole('button', { name: 'x.jpg 목록에서 제거' }).focus()
+      await finishAnalysis('v.jpg', { status: 'sharp' }, fingerprints.portraitBright)
+      await screen.findByRole('region', { name: '묶음 1 · 거의 같은 사진 3장' })
+      expect(screen.getByRole('button', { name: 'x.jpg 목록에서 제거' })).toHaveFocus()
+    })
+
     it('leaves photos that could not be analyzed or were removed during analysis out of groups', async () => {
       render(<App />)
       selectFiles(['a.jpg', 'b.jpg', 'c.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
