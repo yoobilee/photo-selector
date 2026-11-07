@@ -1,23 +1,28 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { StrictMode } from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.tsx'
 import { createPhotoThumbnail, type PhotoThumbnail } from './photos/createPhotoThumbnail.ts'
+import type { PhotoFingerprint } from './photos/photoFingerprint.ts'
 import type { SharpnessResult } from './photos/sharpness.ts'
+import type { PhotoAnalysis } from './photos/sharpnessWorkerClient.ts'
 import { createImageFile, createTextFile, readBytes } from './test/imageFiles.ts'
 import { installObjectUrlTracker } from './test/objectUrls.ts'
+import { adjustTone, resizeBilinear } from './test/photoVariants.ts'
+import { fingerprintOf, renderWideScene, viewOf } from './test/similarScenes.ts'
+import { gaussianBlur, renderScene, renderUniform } from './test/syntheticImages.ts'
 
-// jsdom에는 Web Worker와 이미지 디코딩이 없으므로 흐림 분석기를 테스트에서 직접 끝내는 가짜로 바꾼다.
-// 실제 판정은 sharpness.test.ts, 실제 브라우저 Worker는 E2E에서 확인한다.
+// jsdom에는 Web Worker와 이미지 디코딩이 없으므로 분석기를 테스트에서 직접 끝내는 가짜로 바꾼다.
+// 실제 판정은 sharpness.test.ts·photoSimilarity.test.ts, 실제 브라우저 Worker는 E2E에서 확인한다.
 const sharpnessAnalyzer = vi.hoisted(() => ({
-  pending: [] as { file: Blob; resolve: (result: SharpnessResult) => void }[],
+  pending: [] as { file: Blob; resolve: (analysis: PhotoAnalysis) => void }[],
   analyzedFiles: [] as Blob[],
   disposeCount: 0,
 }))
 vi.mock('./photos/sharpnessWorkerClient.ts', () => ({
   createSharpnessWorkerAnalyzer: () => ({
-    analyze: (file: Blob) =>
-      new Promise<SharpnessResult>((resolve) => {
+    analyzePhoto: (file: Blob) =>
+      new Promise<PhotoAnalysis>((resolve) => {
         sharpnessAnalyzer.analyzedFiles.push(file)
         sharpnessAnalyzer.pending.push({ file, resolve })
       }),
@@ -30,11 +35,11 @@ vi.mock('./photos/sharpnessWorkerClient.ts', () => ({
 const analyzedNames = () => sharpnessAnalyzer.analyzedFiles.map((file) => (file as File).name)
 
 // 이름이 같은 사진의 진행 중 분석을 끝낸다. 동시 분석 상한 때문에 아직 시작하지 않은 사진은 기다린다.
-async function finishAnalysis(name: string, result: SharpnessResult) {
+async function finishAnalysis(name: string, result: SharpnessResult, fingerprint: PhotoFingerprint | null = null) {
   await waitFor(() => expect(sharpnessAnalyzer.pending.some(({ file }) => (file as File).name === name)).toBe(true))
   const index = sharpnessAnalyzer.pending.findIndex(({ file }) => (file as File).name === name)
   const [job] = sharpnessAnalyzer.pending.splice(index, 1)
-  await act(async () => job!.resolve(result))
+  await act(async () => job!.resolve({ sharpness: result, fingerprint }))
 }
 
 const sharpnessBadgeOf = (name: string) =>
@@ -431,8 +436,174 @@ describe('App', () => {
       unmount()
 
       expect(sharpnessAnalyzer.disposeCount).toBe(1)
-      await act(async () => sharpnessAnalyzer.pending[0]!.resolve({ status: 'blurry', cause: 'unknown' }))
+      await act(async () =>
+        sharpnessAnalyzer.pending[0]!.resolve({ sharpness: { status: 'blurry', cause: 'unknown' }, fingerprint: null }),
+      )
       expect(objectUrls.liveUrls.size).toBe(0)
+    })
+  })
+
+  describe('similar photos', () => {
+    // 실제 지문 계산으로 만든 합성 장면의 지문. 판정 규칙 자체는 photoSimilarity.test.ts에서 확인한다.
+    let fingerprints: Record<'portrait' | 'portraitSmall' | 'portraitBright' | 'burstA' | 'burstB' | 'other' | 'wall', PhotoFingerprint>
+    beforeAll(() => {
+      const portrait = viewOf(renderWideScene(21))
+      const burst = renderWideScene(22)
+      fingerprints = {
+        portrait: fingerprintOf(portrait),
+        portraitSmall: fingerprintOf(resizeBilinear(portrait, 320, 240)),
+        portraitBright: fingerprintOf(adjustTone(portrait, { gain: 0.8, offset: 40 })),
+        burstA: fingerprintOf(viewOf(burst)),
+        burstB: fingerprintOf(viewOf(burst, 16, 8)),
+        other: fingerprintOf(gaussianBlur(renderScene(512, 384, 40), 0.8)),
+        wall: fingerprintOf(renderUniform(512, 384, 120)),
+      }
+    })
+
+    const galleryNames = () =>
+      within(screen.getAllByRole('list')[0]!)
+        .getAllByRole('img')
+        .map((image) => image.getAttribute('alt'))
+    const groupBadgeOf = (name: string) =>
+      screen.getByRole('img', { name }).closest('li')?.querySelector('[data-testid="similar-group-badge"]')?.textContent ?? null
+    const similarSummary = () => screen.getByTestId('similar-summary').textContent
+
+    it('marks groups without reordering the gallery and shows each group for comparison', async () => {
+      render(<App />)
+      const names = ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg', 'e.jpg', 'f.jpg']
+      selectFiles(names.map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(6)
+      expect(similarSummary()).toBe('비슷한 사진 확인 중')
+
+      await finishAnalysis('a.jpg', { status: 'sharp' }, fingerprints.portrait)
+      await finishAnalysis('b.jpg', { status: 'sharp' }, fingerprints.other)
+      await finishAnalysis('c.jpg', { status: 'blurry', cause: 'defocus' }, fingerprints.portraitSmall)
+      // 분석 중에도 비교가 끝나 묶인 사진에는 표시가 붙지만 갤러리 순서는 그대로다.
+      await waitFor(() => expect(groupBadgeOf('a.jpg')).toBe('묶음 1비슷한 사진 묶음 1'))
+      expect(similarSummary()).toBe('비슷한 사진 확인 중')
+      expect(galleryNames()).toEqual(names)
+      await finishAnalysis('d.jpg', { status: 'sharp' }, fingerprints.burstA)
+      await finishAnalysis('e.jpg', { status: 'blurry', cause: 'shake' }, fingerprints.burstB)
+      await finishAnalysis('f.jpg', { status: 'unavailable', reason: 'low-detail' }, fingerprints.wall)
+
+      await waitFor(() => expect(similarSummary()).toBe('비슷한 사진 묶음 2개(4장) · 비교하지 못한 사진 1장'))
+      expect(galleryNames()).toEqual(names)
+      expect(['a.jpg', 'c.jpg', 'd.jpg', 'e.jpg'].map(groupBadgeOf)).toEqual([
+        '묶음 1비슷한 사진 묶음 1',
+        '묶음 1비슷한 사진 묶음 1',
+        '묶음 2비슷한 사진 묶음 2',
+        '묶음 2비슷한 사진 묶음 2',
+      ])
+      expect(groupBadgeOf('b.jpg')).toBeNull()
+      expect(groupBadgeOf('f.jpg')).toBeNull()
+
+      const allButton = screen.getByRole('button', { name: '모든 사진' })
+      const groupsButton = screen.getByRole('button', { name: '비슷한 사진끼리 보기' })
+      expect(allButton).toHaveAttribute('aria-pressed', 'true')
+      fireEvent.click(groupsButton)
+      expect(groupsButton).toHaveAttribute('aria-pressed', 'true')
+
+      const same = screen.getByRole('region', { name: '묶음 1 · 거의 같은 사진 2장' })
+      expect(within(same).getAllByRole('img').map((image) => image.getAttribute('alt'))).toEqual(['a.jpg', 'c.jpg'])
+      expect(within(same).getByText(/크기·화질·밝기·선명도만 다를 수 있습니다/)).toBeInTheDocument()
+      // 묶음 안에서도 흐림 표시와 제거 버튼을 그대로 쓴다.
+      expect(within(same).getByText('초점 불량 의심')).toBeInTheDocument()
+      const similar = screen.getByRole('region', { name: '묶음 2 · 비슷한 사진 2장' })
+      expect(within(similar).getAllByRole('img').map((image) => image.getAttribute('alt'))).toEqual(['d.jpg', 'e.jpg'])
+      expect(screen.getByText('묶음에 없는 사진 2장은 ‘모든 사진’에서 볼 수 있습니다.')).toBeInTheDocument()
+      expect(screen.queryByTestId('similar-group-badge')).not.toBeInTheDocument()
+
+      // 묶음에서 한 장을 제거하면 혼자 남은 사진은 묶음에서 빠지고 초점은 갤러리 제목으로 간다.
+      fireEvent.click(within(similar).getByRole('button', { name: 'd.jpg 목록에서 제거' }))
+      await findGallery(5)
+      expect(screen.queryByRole('region', { name: /묶음 2/ })).not.toBeInTheDocument()
+      await waitFor(() => expect(screen.getByRole('heading', { level: 2, name: '선택한 사진 5장' })).toHaveFocus())
+      expect(similarSummary()).toBe('비슷한 사진 묶음 1개(2장) · 비교하지 못한 사진 1장')
+
+      fireEvent.click(allButton)
+      expect(galleryNames()).toEqual(['a.jpg', 'b.jpg', 'c.jpg', 'e.jpg', 'f.jpg'])
+      expect(groupBadgeOf('e.jpg')).toBeNull()
+    })
+
+    it('moves focus to the next photo of a group that keeps at least two photos', async () => {
+      render(<App />)
+      selectFiles(['a.jpg', 'b.jpg', 'c.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(3)
+      await finishAnalysis('a.jpg', { status: 'sharp' }, fingerprints.portrait)
+      await finishAnalysis('b.jpg', { status: 'sharp' }, fingerprints.portraitSmall)
+      await finishAnalysis('c.jpg', { status: 'sharp' }, fingerprints.portraitBright)
+      fireEvent.click(screen.getByRole('button', { name: '비슷한 사진끼리 보기' }))
+
+      const group = await screen.findByRole('region', { name: '묶음 1 · 거의 같은 사진 3장' })
+      fireEvent.click(within(group).getByRole('button', { name: 'a.jpg 목록에서 제거' }))
+
+      await waitFor(() => expect(screen.getByRole('button', { name: 'b.jpg 목록에서 제거' })).toHaveFocus())
+      expect(screen.getByRole('region', { name: '묶음 1 · 거의 같은 사진 2장' })).toBeInTheDocument()
+    })
+
+    it('keeps keyboard focus on a photo in grouped view while analysis changes the groups', async () => {
+      render(<App />)
+      selectFiles(['x.jpg', 'y.jpg', 'z.jpg', 'w.jpg', 'v.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(5)
+      await finishAnalysis('y.jpg', { status: 'sharp' }, fingerprints.burstA)
+      await finishAnalysis('z.jpg', { status: 'sharp' }, fingerprints.burstB)
+      fireEvent.click(screen.getByRole('button', { name: '비슷한 사진끼리 보기' }))
+      await screen.findByRole('region', { name: '묶음 1 · 비슷한 사진 2장' })
+      const focusedButton = screen.getByRole('button', { name: 'y.jpg 목록에서 제거' })
+      focusedButton.focus()
+
+      // 앞선 순서의 사진이 묶음을 만들어 y가 두 번째 묶음으로 옮겨져도 y의 제거 버튼에 초점이 남는다.
+      await finishAnalysis('x.jpg', { status: 'sharp' }, fingerprints.portrait)
+      await finishAnalysis('w.jpg', { status: 'sharp' }, fingerprints.portraitSmall)
+      await screen.findByRole('region', { name: '묶음 2 · 비슷한 사진 2장' })
+      await waitFor(() => expect(screen.getByRole('button', { name: 'y.jpg 목록에서 제거' })).toHaveFocus())
+
+      // 초점이 있는 사진의 묶음에 사진이 더해져도 초점이 남는다.
+      screen.getByRole('button', { name: 'x.jpg 목록에서 제거' }).focus()
+      await finishAnalysis('v.jpg', { status: 'sharp' }, fingerprints.portraitBright)
+      await screen.findByRole('region', { name: '묶음 1 · 거의 같은 사진 3장' })
+      expect(screen.getByRole('button', { name: 'x.jpg 목록에서 제거' })).toHaveFocus()
+    })
+
+    it('moves focus to the view switch when regrouping hides the focused photo', async () => {
+      // 천천히 옮겨 찍은 세 장: A-B보다 B-C가 더 비슷하면 C가 들어올 때 A가 묶음에서 빠진다(A-C는 비슷하지 않음).
+      const pan = renderWideScene(4)
+      const [start, middle, end] = [viewOf(pan), viewOf(pan, 16, 8), viewOf(pan, 32, 16)].map(fingerprintOf)
+      render(<App />)
+      selectFiles(['a.jpg', 'b.jpg', 'c.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(3)
+      await finishAnalysis('a.jpg', { status: 'sharp' }, start)
+      await finishAnalysis('b.jpg', { status: 'sharp' }, middle)
+      fireEvent.click(screen.getByRole('button', { name: '비슷한 사진끼리 보기' }))
+      const group = await screen.findByRole('region', { name: '묶음 1 · 비슷한 사진 2장' })
+      within(group).getByRole('button', { name: 'a.jpg 목록에서 제거' }).focus()
+
+      await finishAnalysis('c.jpg', { status: 'sharp' }, end)
+
+      await waitFor(() =>
+        expect(within(screen.getByRole('region', { name: '묶음 1 · 비슷한 사진 2장' })).queryByRole('img', { name: 'a.jpg' })).toBeNull(),
+      )
+      await waitFor(() => expect(screen.getByRole('button', { name: '비슷한 사진끼리 보기' })).toHaveFocus())
+    })
+
+    it('leaves photos that could not be analyzed or were removed during analysis out of groups', async () => {
+      render(<App />)
+      selectFiles(['a.jpg', 'b.jpg', 'c.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(3)
+      await waitFor(() => expect(analyzedNames()).toEqual(['a.jpg', 'b.jpg']))
+
+      // b는 분석 중에 제거한다. 늦게 온 결과는 묶음에 쓰지 않는다.
+      fireEvent.click(screen.getByRole('button', { name: 'b.jpg 목록에서 제거' }))
+      await findGallery(2)
+      await finishAnalysis('b.jpg', { status: 'sharp' }, fingerprints.portraitSmall)
+      await finishAnalysis('a.jpg', { status: 'sharp' }, fingerprints.portrait)
+      await finishAnalysis('c.jpg', { status: 'unavailable', reason: 'failed' })
+
+      await waitFor(() => expect(similarSummary()).toBe('비슷한 사진 묶음이 없습니다 · 비교하지 못한 사진 1장'))
+      expect(screen.queryByTestId('similar-group-badge')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: '비슷한 사진끼리 보기' }))
+      expect(screen.getByText('비슷한 사진 묶음이 없습니다.')).toBeInTheDocument()
+      expect(screen.getByText('묶음에 없는 사진 2장은 ‘모든 사진’에서 볼 수 있습니다.')).toBeInTheDocument()
     })
   })
 })

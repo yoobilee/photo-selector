@@ -1,9 +1,23 @@
-import { decodeAnalysisImage, type CreateAnalysisContext, type SharpnessAnalysis } from './analyzeImageSharpness.ts'
+import {
+  decodeAnalysisImage,
+  type CreateAnalysisContext,
+  type PhotoImageAnalysis,
+  type SharpnessAnalysis,
+} from './analyzeImageSharpness.ts'
+import { isPhotoFingerprint, type PhotoFingerprint } from './photoFingerprint.ts'
 import type { GrayImage, SharpnessResult } from './sharpness.ts'
 import type { SharpnessWorkerRequest, SharpnessWorkerResponse } from './sharpness.worker.ts'
 
+// 사용자 화면에 쓰는 사진 한 장의 분석 결과. 분석하지 못하면 fingerprint는 null이다.
+export interface PhotoAnalysis {
+  readonly sharpness: SharpnessResult
+  readonly fingerprint: PhotoFingerprint | null
+}
+
 export interface SharpnessAnalyzer {
   analyze(file: Blob): Promise<SharpnessResult>
+  // analyze와 같은 경로로 분석하고 비슷한 사진 지문도 돌려준다.
+  analyzePhoto(file: Blob): Promise<PhotoAnalysis>
   // analyze와 같은 경로로 분석하고 판정에 쓴 측정값도 돌려준다(개발용 평가 도구).
   measure(file: Blob): Promise<SharpnessAnalysis>
   // 모든 Worker를 종료한다. 진행 중이던 분석은 실패로 끝난다.
@@ -26,9 +40,13 @@ export const SHARPNESS_ANALYSIS_TIMEOUT_MS = 20_000
 // 현재 브라우저에서 쓰는 분석 경로. 평가 결과에 기록해 브라우저별 차이를 구분한다.
 export type AnalysisPath = 'worker' | 'main-thread-decode' | 'unsupported'
 
-const FAILED: SharpnessAnalysis = { result: { status: 'unavailable', reason: 'failed' }, measurement: null }
-const TIMED_OUT: SharpnessAnalysis = { result: { status: 'unavailable', reason: 'timeout' }, measurement: null }
-const UNSUPPORTED: SharpnessAnalysis = { result: { status: 'unavailable', reason: 'unsupported' }, measurement: null }
+const FAILED: PhotoImageAnalysis = { result: { status: 'unavailable', reason: 'failed' }, measurement: null, fingerprint: null }
+const TIMED_OUT: PhotoImageAnalysis = { result: { status: 'unavailable', reason: 'timeout' }, measurement: null, fingerprint: null }
+const UNSUPPORTED: PhotoImageAnalysis = {
+  result: { status: 'unavailable', reason: 'unsupported' },
+  measurement: null,
+  fingerprint: null,
+}
 
 // Vite가 같은 도메인의 별도 파일로 번들한다. 외부 CDN에서 불러오지 않는다.
 const createDefaultWorker = () => new Worker(new URL('./sharpness.worker.ts', import.meta.url), { type: 'module' })
@@ -61,14 +79,14 @@ export function createSharpnessWorkerAnalyzer(options: SharpnessAnalyzerOptions 
   const workers = new Set<Worker>()
   const jobs = new Map<
     number,
-    { worker: Worker; resolve: (analysis: SharpnessAnalysis) => void; timer: ReturnType<typeof setTimeout> | null }
+    { worker: Worker; resolve: (analysis: PhotoImageAnalysis) => void; timer: ReturnType<typeof setTimeout> | null }
   >()
   let lastJobId = 0
   let disposed = false
 
   // 불러오기 실패·비정상 종료·시간 초과한 Worker는 맡은 분석을 outcome으로 끝내고 버린다. 다음 분석은 새 Worker로 한다.
   // 다른 Worker가 진행 중인 분석은 그대로 둔다.
-  const discard = (worker: Worker, outcome: SharpnessAnalysis = FAILED) => {
+  const discard = (worker: Worker, outcome: PhotoImageAnalysis = FAILED) => {
     for (const [jobId, job] of jobs) {
       if (job.worker !== worker) continue
       jobs.delete(jobId)
@@ -92,7 +110,9 @@ export function createSharpnessWorkerAnalyzer(options: SharpnessAnalyzerOptions 
       jobs.delete(event.data.jobId)
       if (job.timer !== null) clearTimeout(job.timer)
       if (!disposed) idle.push(worker)
-      job.resolve({ result: event.data.result, measurement: event.data.measurement ?? null })
+      // 지문은 형식이 맞을 때만 쓴다. 맞지 않으면 비교하지 않는 사진으로 둔다.
+      const fingerprint = isPhotoFingerprint(event.data.fingerprint) ? event.data.fingerprint : null
+      job.resolve({ result: event.data.result, measurement: event.data.measurement ?? null, fingerprint })
     })
     worker.addEventListener('error', () => discard(worker))
     worker.addEventListener('messageerror', () => discard(worker))
@@ -106,7 +126,7 @@ export function createSharpnessWorkerAnalyzer(options: SharpnessAnalyzerOptions 
     } catch {
       return Promise.resolve(FAILED)
     }
-    return new Promise<SharpnessAnalysis>((resolve) => {
+    return new Promise<PhotoImageAnalysis>((resolve) => {
       const timer = Number.isFinite(timeoutMs) ? setTimeout(() => discard(worker, TIMED_OUT), timeoutMs) : null
       jobs.set(request.jobId, { worker, resolve, timer })
       try {
@@ -120,7 +140,7 @@ export function createSharpnessWorkerAnalyzer(options: SharpnessAnalyzerOptions 
     })
   }
 
-  const measure = async (file: Blob): Promise<SharpnessAnalysis> => {
+  const run = async (file: Blob): Promise<PhotoImageAnalysis> => {
     if (disposed) return FAILED
     if (!createWorker) return UNSUPPORTED
     lastJobId += 1
@@ -139,8 +159,15 @@ export function createSharpnessWorkerAnalyzer(options: SharpnessAnalyzerOptions 
   }
 
   return {
-    analyze: async (file) => (await measure(file)).result,
-    measure,
+    analyze: async (file) => (await run(file)).result,
+    measure: async (file) => {
+      const { result, measurement } = await run(file)
+      return { result, measurement }
+    },
+    analyzePhoto: async (file) => {
+      const { result, fingerprint } = await run(file)
+      return { sharpness: result, fingerprint }
+    },
     dispose() {
       disposed = true
       for (const worker of workers) worker.terminate()
