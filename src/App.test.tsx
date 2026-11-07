@@ -565,6 +565,27 @@ describe('App', () => {
       expect(screen.getByRole('button', { name: 'x.jpg 목록에서 제거' })).toHaveFocus()
     })
 
+    it('moves focus to the view switch when regrouping hides the focused photo', async () => {
+      // 천천히 옮겨 찍은 세 장: A-B보다 B-C가 더 비슷하면 C가 들어올 때 A가 묶음에서 빠진다(A-C는 비슷하지 않음).
+      const pan = renderWideScene(4)
+      const [start, middle, end] = [viewOf(pan), viewOf(pan, 16, 8), viewOf(pan, 32, 16)].map(fingerprintOf)
+      render(<App />)
+      selectFiles(['a.jpg', 'b.jpg', 'c.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(3)
+      await finishAnalysis('a.jpg', { status: 'sharp' }, start)
+      await finishAnalysis('b.jpg', { status: 'sharp' }, middle)
+      fireEvent.click(screen.getByRole('button', { name: '비슷한 사진끼리 보기' }))
+      const group = await screen.findByRole('region', { name: '묶음 1 · 비슷한 사진 2장' })
+      within(group).getByRole('button', { name: 'a.jpg 목록에서 제거' }).focus()
+
+      await finishAnalysis('c.jpg', { status: 'sharp' }, end)
+
+      await waitFor(() =>
+        expect(within(screen.getByRole('region', { name: '묶음 1 · 비슷한 사진 2장' })).queryByRole('img', { name: 'a.jpg' })).toBeNull(),
+      )
+      await waitFor(() => expect(screen.getByRole('button', { name: '비슷한 사진끼리 보기' })).toHaveFocus())
+    })
+
     it('leaves photos that could not be analyzed or were removed during analysis out of groups', async () => {
       render(<App />)
       selectFiles(['a.jpg', 'b.jpg', 'c.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))

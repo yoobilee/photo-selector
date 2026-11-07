@@ -44,6 +44,7 @@ function PhotoGallery({
 
   // 키보드 초점이 있는 사진. 분석이 진행되며 묶음이 바뀌어 사진 칸이 다른 묶음으로 옮겨지면 초점을 되돌린다.
   const focusedPhotoIdRef = useRef<string | null>(null)
+  const groupsViewButtonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     const photoId = pendingFocusPhotoIdRef.current
@@ -58,7 +59,8 @@ function PhotoGallery({
     const activeElement = document.activeElement
     // 사용자가 초점을 다른 곳으로 옮겼으면 건드리지 않는다. 초점이 있던 칸이 다시 만들어져 잃은 경우만 되돌린다.
     if (activeElement && activeElement !== document.body) return
-    removeButtonsRef.current.get(photoId)?.focus()
+    // 사진이 어느 묶음에도 남지 않아 화면에서 사라졌으면 보기 전환 버튼으로 옮긴다.
+    ;(removeButtonsRef.current.get(photoId) ?? groupsViewButtonRef.current)?.focus()
   }, [similar.groups])
 
   const handleFocusIn = (event: FocusEvent<HTMLElement>) => {
@@ -74,6 +76,8 @@ function PhotoGallery({
     const index = siblings.indexOf(photo)
     const neighbor = keepsSiblings ? (siblings[index + 1] ?? siblings[index - 1]) : undefined
     pendingFocusPhotoIdRef.current = neighbor?.id ?? null
+    // 제거 후 초점은 이웃 사진이나 갤러리 제목이 받는다. 묶음 변경에 따른 초점 되돌리기와 겹치지 않게 한다.
+    focusedPhotoIdRef.current = null
     onRemovePhoto(photo.id)
   }
 
@@ -142,6 +146,7 @@ function PhotoGallery({
           모든 사진
         </button>
         <button
+          ref={groupsViewButtonRef}
           type="button"
           aria-pressed={view === 'groups'}
           onClick={() => setView('groups')}
