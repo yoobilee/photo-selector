@@ -780,6 +780,10 @@ describe('App', () => {
       expect(objectUrls.liveUrls.size).toBe(urlsBefore + 1)
       expect(within(dialog).getByRole('img', { name: 'a.jpg' })).toHaveAttribute('src', expect.stringMatching(/^blob:/))
       expect(within(dialog).getByText('흐림 의심 없음')).toBeInTheDocument()
+      // 원본을 다 읽기 전에는 미리보기를 보여 주고, 다 읽으면 미리보기를 치운다(투명 영역이 겹쳐 보이지 않게).
+      expect(within(dialog).getByTestId('original-preview')).toHaveAttribute('src', screen.getAllByRole('img', { name: 'a.jpg' })[0]!.getAttribute('src'))
+      fireEvent.load(within(dialog).getByTestId('original-image'))
+      expect(within(dialog).queryByTestId('original-preview')).not.toBeInTheDocument()
 
       // 넘기면 앞 사진의 원본을 바로 해제한다.
       fireEvent.click(within(dialog).getByRole('button', { name: '다음 사진' }))
@@ -883,6 +887,42 @@ describe('App', () => {
       act(() => (dialog as HTMLDialogElement).close())
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
       expect(screen.getByRole('button', { name: '묶음 1 크게 비교' })).toHaveFocus()
+    })
+
+    it('turns pages with a one-finger swipe but not while pinching or zoomed in', async () => {
+      await importGroupedPhotos()
+      showView('비슷한 사진끼리 보기')
+      fireEvent.click(screen.getByRole('button', { name: '묶음 1 크게 비교' }))
+      const dialog = screen.getByRole('dialog')
+      const panes = within(dialog).getByTestId('compare-panes')
+      const position = () => within(dialog).getByTestId('compare-position').textContent
+      const touch = (type: 'pointerDown' | 'pointerUp', pointerId: number, clientX: number) =>
+        fireEvent[type](panes, { pointerType: 'touch', pointerId, clientX, clientY: 200 })
+
+      // 두 손가락 확대·축소는 사진을 넘기지 않는다.
+      touch('pointerDown', 1, 300)
+      touch('pointerDown', 2, 200)
+      touch('pointerUp', 2, 60)
+      touch('pointerUp', 1, 100)
+      expect(position()).toBe('1 / 3')
+
+      // 한 손가락으로 왼쪽으로 밀면 다음 사진이다.
+      touch('pointerDown', 3, 300)
+      touch('pointerUp', 3, 100)
+      expect(position()).toBe('2 / 3')
+
+      // 확대한 상태에서 미는 것은 확대한 화면을 옮기는 동작이다.
+      vi.stubGlobal('visualViewport', { scale: 2 })
+      try {
+        touch('pointerDown', 4, 300)
+        touch('pointerUp', 4, 100)
+        expect(position()).toBe('2 / 3')
+      } finally {
+        vi.unstubAllGlobals()
+      }
+      touch('pointerDown', 5, 100)
+      touch('pointerUp', 5, 300)
+      expect(position()).toBe('1 / 3')
     })
 
     it('reads no original image until the comparison is opened', async () => {

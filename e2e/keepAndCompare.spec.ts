@@ -101,6 +101,9 @@ test('compares a group with the original images and returns to the same place in
     expect(pane!.height).toBeGreaterThan(250)
   }
   await expect(dialog.getByText('흐림 의심 없음').first()).toBeVisible()
+  // 원본을 다 읽으면 미리보기를 치운다. 비교 영역에서도 두 손가락 확대는 브라우저에 맡긴다.
+  await expect(dialog.getByTestId('original-preview')).toHaveCount(0)
+  expect(await dialog.getByTestId('compare-panes').evaluate((element) => getComputedStyle(element).touchAction)).toContain('pinch-zoom')
   expect(await hasNoHorizontalOverflow(page)).toBe(true)
   expect((await new AxeBuilder({ page }).include('dialog').analyze()).violations).toEqual([])
 
