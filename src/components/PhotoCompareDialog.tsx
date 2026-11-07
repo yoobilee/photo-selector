@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type PointerEvent } from 'react'
+import { useIsPageZoomed } from '../hooks/useIsPageZoomed.ts'
 import { useMediaQuery } from '../hooks/useMediaQuery.ts'
 import type { Photo } from '../photos/photo.ts'
 import { iconButtonClassName, secondaryButtonClassName } from './buttonStyles.ts'
@@ -88,6 +89,8 @@ function PhotoCompareDialog({ title, photos, sharpnessOf, keptIds, onSetKept, on
   // 화면에 닿아 있는 손가락. 두 손가락 이상(확대·축소)이면 넘기기로 보지 않는다.
   const activePointersRef = useRef(new Set<number>())
   const isSideBySide = useMediaQuery(SIDE_BY_SIDE_QUERY)
+  // 확대한 동안에는 가로 밀기를 확대한 화면 옮기기로 브라우저에 맡기고 사진 넘기기로 쓰지 않는다.
+  const isZoomed = useIsPageZoomed()
   // 맨 앞에 보이는 사진. 비교 중 사진이 빠져도 같은 사진을 계속 보도록 위치 대신 id로 기억한다.
   const [firstPhotoId, setFirstPhotoId] = useState(() => photos[0]?.id ?? '')
   const [hasNavigated, setHasNavigated] = useState(false)
@@ -169,7 +172,7 @@ function PhotoCompareDialog({ title, photos, sharpnessOf, keptIds, onSetKept, on
     const swipeStart = endPointer(event)
     if (!swipeStart) return
     // 사진을 확대한 상태에서 미는 것은 확대한 화면을 옮기는 동작이므로 사진을 넘기지 않는다.
-    if ((window.visualViewport?.scale ?? 1) > 1.01) return
+    if (isZoomed) return
     const dx = event.clientX - swipeStart.x
     const dy = event.clientY - swipeStart.y
     if (Math.abs(dx) < SWIPE_DISTANCE || Math.abs(dx) < Math.abs(dy)) return
@@ -210,8 +213,8 @@ function PhotoCompareDialog({ title, photos, sharpnessOf, keptIds, onSetKept, on
           onPointerUp={handlePointerUp}
           onPointerCancel={endPointer}
           onFocus={handlePaneFocus}
-          // 세로 이동과 두 손가락 확대는 브라우저에 맡기고 가로 밀기만 사진 넘기기로 쓴다.
-          className={`grid min-h-0 flex-1 touch-pan-y touch-pinch-zoom grid-rows-1 gap-3 p-3 sm:p-4 ${paneCount > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}
+          // 세로 이동과 두 손가락 확대는 브라우저에 맡기고 가로 밀기만 사진 넘기기로 쓴다. 확대한 동안에는 모든 방향 이동을 브라우저에 맡긴다.
+          className={`grid min-h-0 flex-1 ${isZoomed ? 'touch-manipulation' : 'touch-pan-y touch-pinch-zoom'} grid-rows-1 gap-3 p-3 sm:p-4 ${paneCount > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}
         >
           {visiblePhotos.length === 0 && (
             <p className="self-center text-center text-sm text-neutral-700">비교할 사진이 목록에 없습니다.</p>

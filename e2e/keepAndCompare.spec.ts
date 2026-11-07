@@ -152,3 +152,36 @@ test('navigates the comparison with the keyboard and keeps focus inside it', asy
   await dialog.getByRole('button', { name: '비교 닫기' }).click()
   await expect(page.getByRole('button', { name: '묶음 1 크게 비교' })).toBeFocused()
 })
+
+test('lets the user pinch-zoom the comparison and pan the enlarged photo sideways without turning pages', async ({ page, browserName }, testInfo) => {
+  // 두 손가락 동작은 Chromium의 개발자 도구 프로토콜(터치 입력)로만 흉내 낼 수 있다. 실제 휴대폰 확인을 대신하지 않는다.
+  test.skip(browserName !== 'chromium' || !testInfo.project.use.isMobile, '터치 확대 흉내는 모바일 Chromium에서만 지원')
+  await page.getByRole('button', { name: '비슷한 사진끼리 보기' }).click()
+  await page.getByRole('button', { name: '묶음 1 크게 비교' }).click()
+  const dialog = page.getByRole('dialog')
+  const panes = dialog.getByTestId('compare-panes')
+  await expect(dialog.getByTestId('compare-position')).toHaveText('1 / 2')
+  const box = (await panes.boundingBox())!
+  const center = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }
+
+  // 두 손가락을 벌려 확대한다.
+  const cdp = await page.context().newCDPSession(page)
+  const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', touchPoints: { x: number; y: number }[]) =>
+    cdp.send('Input.dispatchTouchEvent', { type, touchPoints })
+  await touch('touchStart', [{ x: center.x - 40, y: center.y }, { x: center.x + 40, y: center.y }])
+  for (let step = 1; step <= 10; step += 1) {
+    await touch('touchMove', [{ x: center.x - 40 - step * 8, y: center.y }, { x: center.x + 40 + step * 8, y: center.y }])
+  }
+  await touch('touchEnd', [])
+  await expect.poll(() => page.evaluate(() => window.visualViewport!.scale)).toBeGreaterThan(1.5)
+  await expect.poll(() => panes.evaluate((element) => getComputedStyle(element).touchAction)).toBe('manipulation')
+
+  // 확대한 사진을 한 손가락으로 옆으로 밀면 확대한 화면이 옮겨지고 사진은 넘어가지 않는다.
+  const offsetBefore = await page.evaluate(() => window.visualViewport!.offsetLeft)
+  const finger = { x: Math.round(page.viewportSize()!.width / 2), y: Math.round(page.viewportSize()!.height / 2) }
+  await touch('touchStart', [finger])
+  for (let step = 1; step <= 10; step += 1) await touch('touchMove', [{ x: finger.x - step * 12, y: finger.y }])
+  await touch('touchEnd', [])
+  await expect.poll(() => page.evaluate(() => window.visualViewport!.offsetLeft)).toBeGreaterThan(offsetBefore + 10)
+  await expect(dialog.getByTestId('compare-position')).toHaveText('1 / 2')
+})

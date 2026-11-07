@@ -78,6 +78,7 @@ describe('App', () => {
   afterEach(() => {
     objectUrls.restore()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('renders the service title as the main heading', () => {
@@ -890,6 +891,9 @@ describe('App', () => {
     })
 
     it('turns pages with a one-finger swipe but not while pinching or zoomed in', async () => {
+      // 브라우저의 확대 배율(visualViewport)을 흉내 낸다. 비교 화면이 열릴 때 바뀜 알림을 구독하므로 먼저 설치한다.
+      const viewport = Object.assign(new EventTarget(), { scale: 1 })
+      vi.stubGlobal('visualViewport', viewport)
       await importGroupedPhotos()
       showView('비슷한 사진끼리 보기')
       fireEvent.click(screen.getByRole('button', { name: '묶음 1 크게 비교' }))
@@ -911,18 +915,28 @@ describe('App', () => {
       touch('pointerUp', 3, 100)
       expect(position()).toBe('2 / 3')
 
-      // 확대한 상태에서 미는 것은 확대한 화면을 옮기는 동작이다.
-      vi.stubGlobal('visualViewport', { scale: 2 })
+      expect(panes).toHaveClass('touch-pan-y', 'touch-pinch-zoom')
+
+      // 확대한 상태에서 미는 것은 확대한 화면을 옮기는 동작이다. 가로 이동도 브라우저에 맡긴다.
       try {
+        viewport.scale = 2
+        act(() => viewport.dispatchEvent(new Event('resize')))
+        expect(panes).toHaveClass('touch-manipulation')
+        expect(panes).not.toHaveClass('touch-pan-y')
         touch('pointerDown', 4, 300)
         touch('pointerUp', 4, 100)
         expect(position()).toBe('2 / 3')
+
+        // 다시 원래 크기로 돌아오면 가로 밀기로 넘긴다.
+        viewport.scale = 1
+        act(() => viewport.dispatchEvent(new Event('resize')))
+        expect(panes).toHaveClass('touch-pan-y', 'touch-pinch-zoom')
+        touch('pointerDown', 5, 100)
+        touch('pointerUp', 5, 300)
+        expect(position()).toBe('1 / 3')
       } finally {
         vi.unstubAllGlobals()
       }
-      touch('pointerDown', 5, 100)
-      touch('pointerUp', 5, 300)
-      expect(position()).toBe('1 / 3')
     })
 
     it('reads no original image until the comparison is opened', async () => {
