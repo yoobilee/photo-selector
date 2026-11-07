@@ -78,6 +78,7 @@ describe('App', () => {
   afterEach(() => {
     objectUrls.restore()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('renders the service title as the main heading', () => {
@@ -604,6 +605,346 @@ describe('App', () => {
       fireEvent.click(screen.getByRole('button', { name: '비슷한 사진끼리 보기' }))
       expect(screen.getByText('비슷한 사진 묶음이 없습니다.')).toBeInTheDocument()
       expect(screen.getByText('묶음에 없는 사진 2장은 ‘모든 사진’에서 볼 수 있습니다.')).toBeInTheDocument()
+    })
+  })
+
+  describe('keeping and comparing photos', () => {
+    let fingerprints: Record<'portrait' | 'portraitSmall' | 'portraitBright' | 'burstA' | 'burstB' | 'other', PhotoFingerprint>
+    beforeAll(() => {
+      const portrait = viewOf(renderWideScene(21))
+      const burst = renderWideScene(22)
+      fingerprints = {
+        portrait: fingerprintOf(portrait),
+        portraitSmall: fingerprintOf(resizeBilinear(portrait, 320, 240)),
+        portraitBright: fingerprintOf(adjustTone(portrait, { gain: 0.8, offset: 40 })),
+        burstA: fingerprintOf(viewOf(burst)),
+        burstB: fingerprintOf(viewOf(burst, 16, 8)),
+        other: fingerprintOf(gaussianBlur(renderScene(512, 384, 40), 0.8)),
+      }
+    })
+
+    const keepButton = (name: string, container: HTMLElement = document.body) =>
+      within(container).getByRole('button', { name: `${name} 남기기` })
+    const keptSummary = () => screen.getByTestId('kept-summary').textContent
+    const keptLabelOf = (name: string) =>
+      screen.getByRole('img', { name }).closest('li')?.querySelector('[data-testid="kept-label"]')?.textContent ?? null
+    const listedNames = (container: HTMLElement) =>
+      within(container)
+        .getAllByRole('img')
+        .map((image) => image.getAttribute('alt'))
+    const showView = (name: '모든 사진' | '비슷한 사진끼리 보기' | '남길 사진만 보기') =>
+      fireEvent.click(screen.getByRole('button', { name }))
+    // 원본 File로 만든 Object URL(비교 화면의 원본 표시)만 센다. 미리보기 URL은 원본과 다른 Blob으로 만든다.
+    const originalUrlFiles = () =>
+      (objectUrls.createObjectURL.mock.calls as unknown[][])
+        .map(([value]) => value)
+        .filter((value): value is File => value instanceof File)
+        .map((file) => file.name)
+
+    // 사진 다섯 장: a·b·c는 거의 같은 사진, d·e는 연속 촬영, 나머지는 묶음 밖이다.
+    async function importGroupedPhotos(names = ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg', 'e.jpg', 'f.jpg']) {
+      render(<App />)
+      selectFiles(names.map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(names.length)
+      const results: [string, SharpnessResult, PhotoFingerprint][] = [
+        ['a.jpg', { status: 'sharp' }, fingerprints.portrait],
+        ['b.jpg', { status: 'blurry', cause: 'shake' }, fingerprints.portraitSmall],
+        ['c.jpg', { status: 'sharp' }, fingerprints.portraitBright],
+        ['d.jpg', { status: 'sharp' }, fingerprints.burstA],
+        ['e.jpg', { status: 'sharp' }, fingerprints.burstB],
+        ['f.jpg', { status: 'sharp' }, fingerprints.other],
+      ]
+      for (const [name, result, fingerprint] of results) {
+        if (names.includes(name)) await finishAnalysis(name, result, fingerprint)
+      }
+      await waitFor(() => expect(screen.getByTestId('similar-summary').textContent).not.toBe('비슷한 사진 확인 중'))
+    }
+
+    it('lets the user keep several photos, inside or outside a group, and shares the choice across views', async () => {
+      await importGroupedPhotos()
+      expect(keptSummary()).toBe('남길 사진을 아직 고르지 않았습니다')
+      expect(keepButton('a.jpg')).toHaveAttribute('aria-pressed', 'false')
+
+      // 같은 묶음의 두 장과 묶음 밖 사진을 남긴다.
+      fireEvent.click(keepButton('a.jpg'))
+      fireEvent.click(keepButton('c.jpg'))
+      fireEvent.click(keepButton('f.jpg'))
+      expect(keptSummary()).toBe('남길 사진 3장')
+      expect(keepButton('a.jpg')).toHaveAttribute('aria-pressed', 'true')
+      // 색상 말고도 글자로 남긴 사진을 알 수 있다.
+      expect(keptLabelOf('a.jpg')).toBe('남김')
+      expect(keptLabelOf('b.jpg')).toBeNull()
+
+      // 묶음 보기에서도 같은 상태를 보고 바꿀 수 있다.
+      showView('비슷한 사진끼리 보기')
+      const same = screen.getByRole('region', { name: '묶음 1 · 거의 같은 사진 3장' })
+      expect(keepButton('a.jpg', same)).toHaveAttribute('aria-pressed', 'true')
+      expect(keepButton('b.jpg', same)).toHaveAttribute('aria-pressed', 'false')
+      fireEvent.click(keepButton('c.jpg', same))
+      fireEvent.click(keepButton('e.jpg'))
+      expect(keptSummary()).toBe('남길 사진 3장')
+
+      // 남길 사진만 모아 보고, 남기지 않은 사진은 지우거나 숨기지 않는다.
+      showView('남길 사진만 보기')
+      expect(listedNames(screen.getByRole('list'))).toEqual(['a.jpg', 'e.jpg', 'f.jpg'])
+      expect(screen.getByText('남기지 않은 사진 3장도 지워지지 않으며 ‘모든 사진’에서 볼 수 있습니다.')).toBeInTheDocument()
+      // 남길 사진 보기에서도 묶음 번호를 보여 준다.
+      expect(screen.getAllByTestId('similar-group-badge').map((badge) => badge.textContent)).toEqual([
+        '묶음 1비슷한 사진 묶음 1',
+        '묶음 2비슷한 사진 묶음 2',
+      ])
+
+      showView('모든 사진')
+      expect(listedNames(screen.getByRole('list'))).toEqual(['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg', 'e.jpg', 'f.jpg'])
+      expect(screen.getByRole('heading', { level: 2, name: '선택한 사진 6장' })).toBeInTheDocument()
+    })
+
+    it('does not restart blur or similarity analysis when the user keeps photos', async () => {
+      await importGroupedPhotos()
+      const analyzedBefore = analyzedNames()
+      const summaryBefore = screen.getByTestId('similar-summary').textContent
+
+      for (const name of ['a.jpg', 'b.jpg', 'd.jpg']) fireEvent.click(keepButton(name))
+      fireEvent.click(keepButton('b.jpg'))
+
+      expect(analyzedNames()).toEqual(analyzedBefore)
+      expect(sharpnessAnalyzer.pending).toHaveLength(0)
+      expect(screen.getByTestId('similar-summary').textContent).toBe(summaryBefore)
+      expect(screen.getByText('흔들림 의심')).toBeInTheDocument()
+    })
+
+    it('keeps the choice while groups are recalculated and forgets photos removed from the list', async () => {
+      render(<App />)
+      selectFiles(['a.jpg', 'b.jpg', 'c.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(3)
+      // 분석이 끝나기 전에 고른 선택도 묶음이 생기고 바뀌는 동안 유지된다.
+      fireEvent.click(keepButton('b.jpg'))
+      showView('비슷한 사진끼리 보기')
+      await finishAnalysis('a.jpg', { status: 'sharp' }, fingerprints.portrait)
+      await finishAnalysis('b.jpg', { status: 'sharp' }, fingerprints.portraitSmall)
+      const group = await screen.findByRole('region', { name: '묶음 1 · 거의 같은 사진 2장' })
+      expect(keepButton('b.jpg', group)).toHaveAttribute('aria-pressed', 'true')
+      await finishAnalysis('c.jpg', { status: 'sharp' }, fingerprints.portraitBright)
+      const grown = await screen.findByRole('region', { name: '묶음 1 · 거의 같은 사진 3장' })
+      expect(keepButton('b.jpg', grown)).toHaveAttribute('aria-pressed', 'true')
+      fireEvent.click(keepButton('c.jpg', grown))
+      expect(keptSummary()).toBe('남길 사진 2장')
+
+      // 남긴 사진을 목록에서 제거하면 남길 사진에서도 빠진다.
+      fireEvent.click(within(grown).getByRole('button', { name: 'b.jpg 목록에서 제거' }))
+      await findGallery(2)
+      expect(keptSummary()).toBe('남길 사진 1장')
+      showView('남길 사진만 보기')
+      expect(listedNames(screen.getByRole('list'))).toEqual(['c.jpg'])
+
+      // 같은 파일을 다시 가져와도 새 사진이므로 남기지 않은 상태로 시작한다.
+      selectFiles([createImageFile('b.jpg', 'jpeg', [1])])
+      await findGallery(3)
+      expect(keptSummary()).toBe('남길 사진 1장')
+      showView('모든 사진')
+      expect(keepButton('b.jpg')).toHaveAttribute('aria-pressed', 'false')
+    })
+
+    it('moves keyboard focus to a neighbor when a photo is unkept in the kept-only view', async () => {
+      await importGroupedPhotos(['a.jpg', 'f.jpg'])
+      fireEvent.click(keepButton('a.jpg'))
+      fireEvent.click(keepButton('f.jpg'))
+      showView('남길 사진만 보기')
+
+      keepButton('a.jpg').focus()
+      fireEvent.click(keepButton('a.jpg'))
+      expect(screen.queryByRole('img', { name: 'a.jpg' })).not.toBeInTheDocument()
+      expect(keepButton('f.jpg')).toHaveFocus()
+
+      fireEvent.click(keepButton('f.jpg'))
+      expect(screen.getByText(/남기기로 표시한 사진이 없습니다/)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '남길 사진만 보기' })).toHaveFocus()
+      expect(screen.getByText('남기지 않은 사진 2장도 지워지지 않으며 ‘모든 사진’에서 볼 수 있습니다.')).toBeInTheDocument()
+    })
+
+    it('compares a group one photo at a time on narrow screens, reading only the visible original', async () => {
+      await importGroupedPhotos()
+      showView('비슷한 사진끼리 보기')
+      const openButton = screen.getByRole('button', { name: '묶음 1 크게 비교' })
+      openButton.focus()
+      const urlsBefore = objectUrls.liveUrls.size
+
+      fireEvent.click(openButton)
+
+      const dialog = screen.getByRole('dialog', { name: '묶음 1 · 거의 같은 사진 크게 비교' })
+      // 초점이 비교 화면 안으로 옮겨진다.
+      expect(dialog).toContainElement(document.activeElement as HTMLElement)
+      expect(within(dialog).getByTestId('compare-position')).toHaveTextContent('1 / 3')
+      expect(within(dialog).getAllByTestId('compare-pane')).toHaveLength(1)
+      // 원본은 보이는 한 장만 읽고, 나머지는 이미 있는 미리보기로 보여 준다.
+      expect(originalUrlFiles()).toEqual(['a.jpg'])
+      expect(objectUrls.liveUrls.size).toBe(urlsBefore + 1)
+      expect(within(dialog).getByRole('img', { name: 'a.jpg' })).toHaveAttribute('src', expect.stringMatching(/^blob:/))
+      expect(within(dialog).getByText('흐림 의심 없음')).toBeInTheDocument()
+      // 원본을 다 읽기 전에는 미리보기를 보여 주고, 다 읽으면 미리보기를 치운다(투명 영역이 겹쳐 보이지 않게).
+      expect(within(dialog).getByTestId('original-preview')).toHaveAttribute('src', screen.getAllByRole('img', { name: 'a.jpg' })[0]!.getAttribute('src'))
+      fireEvent.load(within(dialog).getByTestId('original-image'))
+      expect(within(dialog).queryByTestId('original-preview')).not.toBeInTheDocument()
+
+      // 넘기면 앞 사진의 원본을 바로 해제한다.
+      fireEvent.click(within(dialog).getByRole('button', { name: '다음 사진' }))
+      expect(within(dialog).getByTestId('compare-position')).toHaveTextContent('2 / 3')
+      expect(within(dialog).getByText('흔들림 의심: 윤곽이 한 방향으로 번져 있습니다')).toBeInTheDocument()
+      expect(originalUrlFiles()).toEqual(['a.jpg', 'b.jpg'])
+      expect(objectUrls.liveUrls.size).toBe(urlsBefore + 1)
+      expect(screen.getByText('b.jpg · 2 / 3', { selector: '[aria-live]' })).toBeInTheDocument()
+
+      // 방향키와 사진 목록으로도 넘긴다. 끝에서는 더 넘어가지 않는다.
+      fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+      fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+      expect(within(dialog).getByTestId('compare-position')).toHaveTextContent('3 / 3')
+      expect(within(dialog).getByRole('button', { name: '다음 사진' })).toHaveAttribute('aria-disabled', 'true')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'a.jpg 보기' }))
+      expect(within(dialog).getByTestId('compare-position')).toHaveTextContent('1 / 3')
+      expect(within(dialog).getByRole('button', { name: 'a.jpg 보기' })).toHaveAttribute('aria-current', 'true')
+
+      // 비교 중 남기기를 바꾸면 갤러리에도 그대로 반영된다.
+      fireEvent.click(keepButton('a.jpg', dialog))
+      expect(keepButton('a.jpg', dialog)).toHaveAttribute('aria-pressed', 'true')
+      expect(within(dialog).getByRole('button', { name: 'a.jpg 보기, 남김' })).toBeInTheDocument()
+      expect(keptSummary()).toBe('남길 사진 1장')
+
+      // 닫으면 원본 URL을 모두 해제하고 비교를 연 버튼으로 초점을 돌린다.
+      fireEvent.click(within(dialog).getByRole('button', { name: '비교 닫기' }))
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(objectUrls.liveUrls.size).toBe(urlsBefore)
+      expect(screen.getByRole('button', { name: '묶음 1 크게 비교' })).toHaveFocus()
+      const group = screen.getByRole('region', { name: '묶음 1 · 거의 같은 사진 3장' })
+      expect(keepButton('a.jpg', group)).toHaveAttribute('aria-pressed', 'true')
+    })
+
+    it('shows two photos side by side on wide screens and keeps focus on the same pane while navigating', async () => {
+      const matchMedia = vi.fn((query: string) => ({
+        matches: query === '(min-width: 768px)',
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }))
+      vi.stubGlobal('matchMedia', matchMedia)
+      try {
+        await importGroupedPhotos()
+        showView('비슷한 사진끼리 보기')
+        fireEvent.click(screen.getByRole('button', { name: '묶음 1 크게 비교' }))
+        const dialog = screen.getByRole('dialog')
+
+        expect(within(dialog).getAllByTestId('compare-pane')).toHaveLength(2)
+        expect(within(dialog).getByTestId('compare-position')).toHaveTextContent('1–2 / 3')
+        expect(originalUrlFiles()).toEqual(['a.jpg', 'b.jpg'])
+
+        // 오른쪽 칸의 남기기 버튼에 초점을 두고 넘기면, 새로 보이는 같은 칸의 남기기 버튼이 초점을 받는다.
+        keepButton('b.jpg', dialog).focus()
+        fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+        expect(within(dialog).getByTestId('compare-position')).toHaveTextContent('2–3 / 3')
+        expect(keepButton('b.jpg', dialog)).toHaveFocus()
+        fireEvent.click(within(dialog).getByRole('button', { name: '이전 사진' }))
+        keepButton('b.jpg', dialog).focus()
+        fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+        expect(keepButton('b.jpg', dialog)).toHaveFocus()
+        // 왼쪽 칸이 사라지면(a → b) 같은 왼쪽 칸의 새 사진 버튼으로 옮긴다.
+        fireEvent.keyDown(dialog, { key: 'ArrowLeft' })
+        keepButton('a.jpg', dialog).focus()
+        fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+        expect(keepButton('b.jpg', dialog)).toHaveFocus()
+        // 두 장 묶음 끝까지 넘겨도 원본은 보이는 두 장만 남아 있다.
+        expect(within(dialog).getAllByTestId('original-image')).toHaveLength(2)
+      } finally {
+        vi.unstubAllGlobals()
+      }
+    })
+
+    it('keeps comparing the same photos while analysis changes the groups', async () => {
+      // 천천히 옮겨 찍은 세 장: c가 들어오면 묶음이 a·b에서 b·c로 바뀐다(a-c는 비슷하지 않음).
+      const pan = renderWideScene(4)
+      const [panStart, panMiddle, panEnd] = [viewOf(pan), viewOf(pan, 16, 8), viewOf(pan, 32, 16)].map(fingerprintOf)
+      render(<App />)
+      selectFiles(['a.jpg', 'b.jpg', 'c.jpg'].map((name, index) => createImageFile(name, 'jpeg', [index])))
+      await findGallery(3)
+      await finishAnalysis('a.jpg', { status: 'sharp' }, panStart)
+      await finishAnalysis('b.jpg', { status: 'sharp' }, panMiddle)
+      showView('비슷한 사진끼리 보기')
+      await screen.findByRole('region', { name: '묶음 1 · 비슷한 사진 2장' })
+      fireEvent.click(screen.getByRole('button', { name: '묶음 1 크게 비교' }))
+      const dialog = screen.getByRole('dialog')
+
+      await finishAnalysis('c.jpg', { status: 'blurry', cause: 'defocus' }, panEnd)
+      await waitFor(() =>
+        expect(within(screen.getByRole('region', { name: '묶음 1 · 비슷한 사진 2장' })).queryByRole('img', { name: 'a.jpg' })).toBeNull(),
+      )
+      // 비교 화면은 연 때의 사진을 그대로 비교한다.
+      expect(within(dialog).getByTestId('compare-position')).toHaveTextContent('1 / 2')
+      expect(within(dialog).getByRole('img', { name: 'a.jpg' })).toBeInTheDocument()
+      expect(
+        within(dialog)
+          .getAllByRole('button', { name: /보기/ })
+          .map((button) => button.getAttribute('aria-label')),
+      ).toEqual(['a.jpg 보기', 'b.jpg 보기'])
+
+      // 닫기(Esc 포함)는 dialog의 close 이벤트로 처리한다. 비교를 연 버튼이 남아 있으면 그 버튼으로 초점을 돌린다.
+      act(() => (dialog as HTMLDialogElement).close())
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '묶음 1 크게 비교' })).toHaveFocus()
+    })
+
+    it('turns pages with a one-finger swipe but not while pinching or zoomed in', async () => {
+      // 브라우저의 확대 배율(visualViewport)을 흉내 낸다. 비교 화면이 열릴 때 바뀜 알림을 구독하므로 먼저 설치한다.
+      const viewport = Object.assign(new EventTarget(), { scale: 1 })
+      vi.stubGlobal('visualViewport', viewport)
+      await importGroupedPhotos()
+      showView('비슷한 사진끼리 보기')
+      fireEvent.click(screen.getByRole('button', { name: '묶음 1 크게 비교' }))
+      const dialog = screen.getByRole('dialog')
+      const panes = within(dialog).getByTestId('compare-panes')
+      const position = () => within(dialog).getByTestId('compare-position').textContent
+      const touch = (type: 'pointerDown' | 'pointerUp', pointerId: number, clientX: number) =>
+        fireEvent[type](panes, { pointerType: 'touch', pointerId, clientX, clientY: 200 })
+
+      // 두 손가락 확대·축소는 사진을 넘기지 않는다.
+      touch('pointerDown', 1, 300)
+      touch('pointerDown', 2, 200)
+      touch('pointerUp', 2, 60)
+      touch('pointerUp', 1, 100)
+      expect(position()).toBe('1 / 3')
+
+      // 한 손가락으로 왼쪽으로 밀면 다음 사진이다.
+      touch('pointerDown', 3, 300)
+      touch('pointerUp', 3, 100)
+      expect(position()).toBe('2 / 3')
+
+      expect(panes).toHaveClass('touch-pan-y', 'touch-pinch-zoom')
+
+      // 확대한 상태에서 미는 것은 확대한 화면을 옮기는 동작이다. 가로 이동도 브라우저에 맡긴다.
+      try {
+        viewport.scale = 2
+        act(() => viewport.dispatchEvent(new Event('resize')))
+        expect(panes).toHaveClass('touch-manipulation')
+        expect(panes).not.toHaveClass('touch-pan-y')
+        touch('pointerDown', 4, 300)
+        touch('pointerUp', 4, 100)
+        expect(position()).toBe('2 / 3')
+
+        // 다시 원래 크기로 돌아오면 가로 밀기로 넘긴다.
+        viewport.scale = 1
+        act(() => viewport.dispatchEvent(new Event('resize')))
+        expect(panes).toHaveClass('touch-pan-y', 'touch-pinch-zoom')
+        touch('pointerDown', 5, 100)
+        touch('pointerUp', 5, 300)
+        expect(position()).toBe('1 / 3')
+      } finally {
+        vi.unstubAllGlobals()
+      }
+    })
+
+    it('reads no original image until the comparison is opened', async () => {
+      await importGroupedPhotos()
+      fireEvent.click(keepButton('a.jpg'))
+      showView('비슷한 사진끼리 보기')
+      showView('남길 사진만 보기')
+      expect(originalUrlFiles()).toEqual([])
     })
   })
 })

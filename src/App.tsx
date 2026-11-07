@@ -3,6 +3,7 @@ import EmptyState from './components/EmptyState.tsx'
 import ImportStatus from './components/ImportStatus.tsx'
 import PhotoGallery from './components/PhotoGallery.tsx'
 import { usePhotoLibrary } from './hooks/usePhotoLibrary.ts'
+import { useKeptPhotos } from './hooks/useKeptPhotos.ts'
 import { usePhotoAnalyses } from './hooks/usePhotoAnalyses.ts'
 import { useSimilarPhotoGroups } from './hooks/useSimilarPhotoGroups.ts'
 import { IMAGE_INPUT_ACCEPT } from './photos/imageFormat.ts'
@@ -17,6 +18,8 @@ function App() {
     [analyses],
   )
   const similar = useSimilarPhotoGroups(photos, analyses)
+  // 남길 사진 표시는 분석 결과와 따로 두어 선택을 바꿔도 흐림·비슷한 사진 분석이 다시 시작되지 않는다.
+  const { keptIds, setKept } = useKeptPhotos(photos)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pickerButtonRef = useRef<HTMLButtonElement>(null)
   const galleryHeadingRef = useRef<HTMLHeadingElement>(null)
@@ -86,6 +89,8 @@ function App() {
             photos={photos}
             sharpness={sharpness}
             similar={similar}
+            keptIds={keptIds}
+            onSetKept={setKept}
             headingRef={galleryHeadingRef}
             pickerButtonRef={pickerButtonRef}
             isImporting={isImporting}

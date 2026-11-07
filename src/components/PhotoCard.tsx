@@ -1,6 +1,7 @@
 import type { Photo } from '../photos/photo.ts'
 import { iconButtonClassName } from './buttonStyles.ts'
 import CloseIcon from './CloseIcon.tsx'
+import KeepButton, { KeptLabel } from './KeepButton.tsx'
 import SharpnessBadge from './SharpnessBadge.tsx'
 import { describeSharpness, sharpnessShortReason, type PhotoSharpnessState } from './sharpnessText.ts'
 
@@ -25,12 +26,14 @@ interface PhotoCardProps {
   sharpness: PhotoSharpnessState
   // 모든 사진 보기에서 이 사진이 속한 비슷한 사진 묶음 번호. 없거나 묶음 보기에서는 null
   groupNumber: number | null
-  removeButtonRef: (element: HTMLButtonElement | null) => void
+  kept: boolean
+  onToggleKept: () => void
   onRemove: () => void
 }
 
 // 갤러리와 비슷한 사진 묶음이 함께 쓰는 사진 칸. 묶음 표시는 사진 위에 겹쳐 칸 크기를 바꾸지 않는다(분석 중 재배치 방지).
-function PhotoCard({ photo, sharpness, groupNumber, removeButtonRef, onRemove }: PhotoCardProps) {
+// 남기기 버튼과 남김 표시도 항상 같은 자리를 차지해 선택을 바꿔도 칸 크기가 바뀌지 않는다.
+function PhotoCard({ photo, sharpness, groupNumber, kept, onToggleKept, onRemove }: PhotoCardProps) {
   return (
     <li className="min-w-0">
       <div className="relative">
@@ -42,9 +45,10 @@ function PhotoCard({ photo, sharpness, groupNumber, removeButtonRef, onRemove }:
           height={photo.height}
           loading="lazy"
           decoding="async"
-          className="aspect-square w-full rounded-md bg-neutral-200 object-cover"
+          className={`aspect-square w-full rounded-md bg-neutral-200 object-cover ${kept ? 'ring-3 ring-emerald-700' : ''}`}
         />
         <SharpnessBadge state={sharpness} />
+        <KeptLabel kept={kept} className="pointer-events-none absolute right-1 bottom-1" />
         {groupNumber !== null && (
           <span
             data-testid="similar-group-badge"
@@ -58,14 +62,21 @@ function PhotoCard({ photo, sharpness, groupNumber, removeButtonRef, onRemove }:
       <span id={`${photo.id}-sharpness`} className="sr-only">
         {describeSharpness(sharpness)}
       </span>
+      <KeepButton
+        photoName={photo.source.name}
+        kept={kept}
+        onToggle={onToggleKept}
+        photoId={photo.id}
+        className="mt-1.5 w-full"
+      />
       <div className="mt-1 flex items-center gap-1">
         <span aria-hidden="true" title={photo.source.name} className="min-w-0 flex-1 truncate text-xs text-neutral-700">
           {photo.source.name}
         </span>
         <button
-          ref={removeButtonRef}
           type="button"
           data-photo-id={photo.id}
+          data-photo-control="remove"
           aria-label={`${photo.source.name} 목록에서 제거`}
           title="목록에서 제거"
           onClick={onRemove}
