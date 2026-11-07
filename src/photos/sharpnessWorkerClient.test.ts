@@ -3,6 +3,8 @@ import type { GrayImage, SharpnessResult } from './sharpness.ts'
 import type { SharpnessWorkerRequest } from './sharpness.worker.ts'
 import { SHARPNESS_ANALYSIS_TIMEOUT_MS, createSharpnessWorkerAnalyzer } from './sharpnessWorkerClient.ts'
 import { createMeasurement } from '../test/measurements.ts'
+import { renderScene } from '../test/syntheticImages.ts'
+import { createPhotoFingerprint } from './photoFingerprint.ts'
 
 // jsdom에는 Web Worker가 없으므로 메시지 주고받기만 흉내 내는 가짜 Worker를 쓴다.
 class FakeWorker extends EventTarget {
@@ -144,6 +146,49 @@ describe('createSharpnessWorkerAnalyzer', () => {
     const withoutMeasurement = analyzer.measure(photo)
     workers[1]!.respond(1, { status: 'sharp' })
     await expect(withoutMeasurement).resolves.toEqual({ result: { status: 'sharp' }, measurement: null })
+  })
+
+  it('returns the blur verdict and the similarity fingerprint from one worker analysis', async () => {
+    const { workers, createWorker } = createWorkers()
+    const analyzer = createSharpnessWorkerAnalyzer({ createWorker })
+    const fingerprint = createPhotoFingerprint(renderScene(128, 96, 1))!
+    const reply = (worker: FakeWorker, index: number, data: object) =>
+      worker.dispatchEvent(new MessageEvent('message', { data: { jobId: worker.requests[index]!.request.jobId, ...data } }))
+
+    const analyzed = analyzer.analyzePhoto(photo)
+    const malformed = analyzer.analyzePhoto(photo)
+    reply(workers[0]!, 0, { result: { status: 'sharp' }, measurement: null, fingerprint })
+    // 형식이 맞지 않는 지문은 쓰지 않는다. 흐림 판정은 그대로 쓴다.
+    reply(workers[1]!, 0, { result: { status: 'blurry', cause: 'shake' }, measurement: null, fingerprint: { ...fingerprint, pixels: [1, 2] } })
+
+    await expect(analyzed).resolves.toEqual({ sharpness: { status: 'sharp' }, fingerprint })
+    await expect(malformed).resolves.toEqual({ sharpness: { status: 'blurry', cause: 'shake' }, fingerprint: null })
+    // 평가 도구의 측정 결과에는 지문을 섞지 않는다.
+    const measured = analyzer.measure(photo)
+    reply(workers[1]!, 1, { result: { status: 'sharp' }, measurement: null, fingerprint })
+    await expect(measured).resolves.toEqual({ result: { status: 'sharp' }, measurement: null })
+  })
+
+  it('leaves the fingerprint empty when the analysis fails, crashes or times out', async () => {
+    vi.useFakeTimers()
+    try {
+      const { workers, createWorker } = createWorkers()
+      const analyzer = createSharpnessWorkerAnalyzer({ createWorker, timeoutMs: 1000 })
+      const crashed = analyzer.analyzePhoto(photo)
+      workers[0]!.crash()
+      await expect(crashed).resolves.toEqual({ sharpness: { status: 'unavailable', reason: 'failed' }, fingerprint: null })
+
+      const stuck = analyzer.analyzePhoto(photo)
+      vi.advanceTimersByTime(1000)
+      await expect(stuck).resolves.toEqual({ sharpness: { status: 'unavailable', reason: 'timeout' }, fingerprint: null })
+    } finally {
+      vi.useRealTimers()
+    }
+    const unsupported = createSharpnessWorkerAnalyzer({ createWorker: null })
+    await expect(unsupported.analyzePhoto(photo)).resolves.toEqual({
+      sharpness: { status: 'unavailable', reason: 'unsupported' },
+      fingerprint: null,
+    })
   })
 
   it('reports analysis as unsupported without Web Worker', async () => {

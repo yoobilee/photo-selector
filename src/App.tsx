@@ -1,16 +1,22 @@
-import { useEffect, useRef, type ChangeEvent } from 'react'
+import { useEffect, useMemo, useRef, type ChangeEvent } from 'react'
 import EmptyState from './components/EmptyState.tsx'
 import ImportStatus from './components/ImportStatus.tsx'
 import PhotoGallery from './components/PhotoGallery.tsx'
 import { usePhotoLibrary } from './hooks/usePhotoLibrary.ts'
-import { usePhotoSharpness } from './hooks/usePhotoSharpness.ts'
+import { usePhotoAnalyses } from './hooks/usePhotoAnalyses.ts'
+import { useSimilarPhotoGroups } from './hooks/useSimilarPhotoGroups.ts'
 import { IMAGE_INPUT_ACCEPT } from './photos/imageFormat.ts'
 
 // 시각적 방향은 디자인 방향 확정 전까지 중립적인 기본 스타일을 사용한다.
 function App() {
   const { photos, progress, lastImport, addFiles, removePhoto, dismissImportSummary } =
     usePhotoLibrary()
-  const sharpness = usePhotoSharpness(photos)
+  const analyses = usePhotoAnalyses(photos)
+  const sharpness = useMemo(
+    () => new Map([...analyses].map(([photoId, analysis]) => [photoId, analysis.sharpness])),
+    [analyses],
+  )
+  const similar = useSimilarPhotoGroups(photos, analyses)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pickerButtonRef = useRef<HTMLButtonElement>(null)
   const galleryHeadingRef = useRef<HTMLHeadingElement>(null)
@@ -79,6 +85,7 @@ function App() {
           <PhotoGallery
             photos={photos}
             sharpness={sharpness}
+            similar={similar}
             headingRef={galleryHeadingRef}
             pickerButtonRef={pickerButtonRef}
             isImporting={isImporting}

@@ -53,7 +53,7 @@ const photoCard = (page: Page, name: string) => page.getByRole('listitem').filte
 // 사진 위에 겹친 시각 표시와 사진 칸 아래의 판정 사유. 같은 내용의 낭독용 설명은 accessible description으로 따로 확인한다.
 const badge = (page: Page, name: string) => photoCard(page, name).getByTestId('sharpness-badge')
 const reason = (page: Page, name: string) => photoCard(page, name).getByTestId('sharpness-reason')
-const sharpnessSummary = (page: Page) => page.locator('[aria-live="polite"]')
+const sharpnessSummary = (page: Page) => page.getByTestId('sharpness-summary')
 
 test.describe.configure({ timeout: 60_000 })
 

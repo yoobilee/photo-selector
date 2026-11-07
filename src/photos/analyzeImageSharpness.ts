@@ -1,3 +1,4 @@
+import { createPhotoFingerprint, type PhotoFingerprint } from './photoFingerprint.ts'
 import {
   classifySharpness,
   downsampleByAverage,
@@ -85,4 +86,20 @@ export function classifyAnalysisImage(image: GrayImage | null): SharpnessResult 
 // Worker 안에서 디코딩부터 판정까지 한다.
 export async function analyzeImageSharpness(file: Blob): Promise<SharpnessAnalysis> {
   return evaluateAnalysisImage(await decodeAnalysisImage(file, createOffscreenContext))
+}
+
+// 흐림 판정과 비슷한 사진 지문. 같은 분석용 이미지 한 장으로 둘 다 계산해 원본을 다시 디코딩하지 않는다.
+// 너무 작아 분석용 이미지가 없으면 지문도 없다.
+export interface PhotoImageAnalysis extends SharpnessAnalysis {
+  readonly fingerprint: PhotoFingerprint | null
+}
+
+// 흐림 판정을 먼저 하고 같은 이미지로 지문을 만든다. 지문 계산은 이미지를 바꾸지 않으므로 흐림 판정 결과에 영향이 없다.
+export function evaluatePhotoImage(image: GrayImage | null): PhotoImageAnalysis {
+  const analysis = evaluateAnalysisImage(image)
+  return { ...analysis, fingerprint: image ? createPhotoFingerprint(image) : null }
+}
+
+export async function analyzePhotoImage(file: Blob): Promise<PhotoImageAnalysis> {
+  return evaluatePhotoImage(await decodeAnalysisImage(file, createOffscreenContext))
 }

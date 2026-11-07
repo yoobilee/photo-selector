@@ -48,7 +48,7 @@ test('shows the same verdicts as the gallery, with scores that match the thresho
   // 사용자 앱(배포 빌드)의 갤러리 판정
   await page.goto('/')
   await page.getByTestId('photo-file-input').setInputFiles(files)
-  await expect(page.locator('[aria-live="polite"]')).not.toHaveText(/확인 중/, { timeout: 30_000 })
+  await expect(page.getByTestId('sharpness-summary')).not.toHaveText(/확인 중/, { timeout: 30_000 })
   const galleryVerdicts: Record<string, string> = {}
   for (const { name } of files) {
     const description = await page.getByRole('img', { name, exact: true }).evaluate(
