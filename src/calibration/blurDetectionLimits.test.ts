@@ -107,7 +107,13 @@ describe('known limits of blur detection (synthetic reproduction, not real photo
     const result = judge(blinds)
     expect(result.verdict).toBe('blurry')
     expect(result.cause).toBe('unknown')
-    expect(judge(addNoise(blinds, 0.3, 3)).verdict).toBe('low-detail')
+    const noisy = judge(addNoise(blinds, 0.3, 3))
+    expect(noisy.verdict).toBe('low-detail')
+    // 점수가 높아도 한 방향을 확인하지 못하면 선명하다고 단정할 수 없다.
+    expect(noisy.score).toBeGreaterThan(0.1)
+    expect(noisy.hasUnjudgedDirection).toBe(true)
+    expect(noisy.directionScores[0]).toBeNull()
+    expect(noisy.directionScores.slice(1).every((score) => score !== null)).toBe(true)
   })
 
   // photo-4(흐림 정답, 점수 1.335, 잡음 추정 0.32)처럼 흐린 사진이 아주 높은 점수를 받는 경우의 한 가지 재현
@@ -124,13 +130,18 @@ describe('known limits of blur detection (synthetic reproduction, not real photo
 
   // photo-5·11(선명 정답, 잡음 추정 4.5·7.0, 점수 없음)과 같은 모양의 결과
   it('gives up on a sharp photo whose whole frame is fine texture because the texture is taken as noise', () => {
-    const textured = judge(addFineTexture(gaussianBlur(renderScene(1024, 768, 11), 0.8), 10, 9))
+    const base = gaussianBlur(renderScene(1024, 768, 11), 0.8)
+    expect(judge(base).verdict).toBe('sharp')
+    const textured = judge(addFineTexture(base, 10, 9))
     expect(textured.verdict).toBe('low-detail')
     expect(textured.score).toBeNull()
     expect(textured.noise).toBeGreaterThan(3)
+    expect(textured.directionScores).toEqual([null, null, null, null])
+    expect(textured.hasUnjudgedDirection).toBe(true)
 
     const noisy = judge(addNoise(gaussianBlur(renderScene(1024, 768, 11), 0.8), 4, 3))
     expect(noisy).toMatchObject({ verdict: 'low-detail', score: null })
+    expect(noisy.directionScores).toEqual([null, null, null, null])
   })
 
   // photo-15(흐림 정답, 640×427, 0.481 bpp로 가장 강하게 압축, 점수 0.034로 임계값 바로 위)와 같은 방향의 결과

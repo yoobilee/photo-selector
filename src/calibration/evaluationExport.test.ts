@@ -31,7 +31,7 @@ const photo = (change: Partial<EvaluationPhoto> = {}): EvaluationPhoto => ({
   reviewed: true,
   verdict: 'sharp',
   unavailableReason: null,
-  measurement: createMeasurement({ score: 0.0412, hasUnjudgedDirection: false, noise: 0.37 }),
+  measurement: createMeasurement({ score: 0.0412, hasUnjudgedDirection: false, noise: 0.37, directionScores: [0.0412, 0.05, 0.07, 0.08] }),
   format: 'jpeg',
   width: 4032,
   height: 3024,
@@ -56,7 +56,7 @@ describe('evaluation export', () => {
       ),
     )
     expect(report.format).toBe(EVALUATION_FORMAT)
-    expect(report.version).toBe(3)
+    expect(report.version).toBe(4)
     expect(report.exportedAt).toBe('2026-10-30T01:02:03.000Z')
     expect(report.settings.sharpRatioThreshold).toBe(SHARP_RATIO_THRESHOLD)
     // 같은 임계값이라도 판정 규칙이 다르면 결과를 비교할 수 없으므로 규칙의 판과 흔들림·초점 불량 기준을 함께 기록한다.
@@ -85,6 +85,7 @@ describe('evaluation export', () => {
       score: 0.0412,
       noise: 0.37,
       hasUnjudgedDirection: false,
+      directionScores: [0.0412, 0.05, 0.07, 0.08],
       format: 'jpeg',
       width: 4032,
       height: 3024,
@@ -100,6 +101,7 @@ describe('evaluation export', () => {
       [
         'bitsPerPixel',
         'condition',
+        'directionScores',
         'format',
         'height',
         'hasUnjudgedDirection',
@@ -137,13 +139,38 @@ describe('evaluation export', () => {
     )
     const lines = csv.split('\r\n')
     expect(lines[0]).toBe(
-      'id,label,condition,sceneGroup,origin,reviewed,verdict,outcome,unavailableReason,score,noise,hasUnjudgedDirection,format,width,height,bitsPerPixel,device,analysisPath,userAgent',
+      'id,label,condition,sceneGroup,origin,reviewed,verdict,outcome,unavailableReason,score,noise,hasUnjudgedDirection,format,width,height,bitsPerPixel,device,analysisPath,userAgent,directionScoreHorizontal,directionScoreVertical,directionScoreDiagonalDown,directionScoreDiagonalUp',
     )
     expect(lines[1]).toBe(
-      'photo-1,sharp,outdoor,3,real-capture,true,sharp,true-negative,,0.0412,0.37,false,jpeg,4032,3024,2.5,"\'=HYPERLINK(""x""), ""따옴표""",worker,',
+      'photo-1,sharp,outdoor,3,real-capture,true,sharp,true-negative,,0.0412,0.37,false,jpeg,4032,3024,2.5,"\'=HYPERLINK(""x""), ""따옴표""",worker,,0.0412,0.05,0.07,0.08',
     )
     expect(lines[2]).toMatch(/^photo-2,,,,,false,pending,unlabeled,,,,,jpeg,/)
     expect(lines.at(-1)).toBe('')
+  })
+
+  it('preserves unjudged directions separately from absent measurements without rounding scores', () => {
+    const photos = [
+      photo({
+        verdict: 'unavailable', unavailableReason: 'low-detail',
+        measurement: createMeasurement({ score: 0.04123456789, hasUnjudgedDirection: true, directionScores: [null, 0.04123456789, 0.1, null] }),
+      }),
+      photo({
+        verdict: 'unavailable', unavailableReason: 'low-detail',
+        measurement: createMeasurement(),
+      }),
+      ...(['too-small', 'failed', 'unsupported', 'timeout'] as const).map((reason) =>
+        photo({ verdict: 'unavailable', unavailableReason: reason, measurement: null }),
+      ),
+      photo({ verdict: 'pending', measurement: null }),
+    ]
+    const report = JSON.parse(buildEvaluationJson(photos, environment, exportedAt))
+    expect(report.photos.map((row: { directionScores: unknown }) => row.directionScores)).toEqual([
+      [null, 0.04123456789, 0.1, null], [null, null, null, null], null, null, null, null, null,
+    ])
+    expect(report.photos[0]).toMatchObject({ verdict: 'unavailable', unavailableReason: 'low-detail', hasUnjudgedDirection: true, score: 0.04123456789 })
+    const csvRows = buildEvaluationCsv(photos, environment).trimEnd().split('\r\n').slice(1)
+    expect(csvRows[0]!.split(',').slice(-4)).toEqual(['', '0.04123456789', '0.1', ''])
+    for (const row of csvRows.slice(1)) expect(row.split(',').slice(-4)).toEqual(['', '', '', ''])
   })
 
   it('computes bits per pixel as a rough compression level', () => {

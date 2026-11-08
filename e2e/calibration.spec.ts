@@ -107,6 +107,14 @@ test('counts outcomes from labels and exports results without file names or netw
   expect(report.summary.counts).toMatchObject({ truePositive: 1, falseNegative: 1, falsePositive: 0 })
   expect(report.photos.map((photo: { outcome: string }) => photo.outcome)).toEqual(['false-negative', 'true-positive'])
   expect(report.environment.userAgent).toBeNull()
+  expect(report.version).toBe(4)
+  for (const photo of report.photos) {
+    // 실제 Worker → 평가 내보내기까지 방향별 점수가 보존되는지 확인한다.
+    expect(photo.directionScores).toHaveLength(4)
+    const judged = photo.directionScores.filter((score: number | null) => score !== null)
+    expect(judged.length).toBeGreaterThan(0)
+    expect(photo.score).toBe(Math.min(...judged))
+  }
 
   const results = await new AxeBuilder({ page }).analyze()
   expect(results.violations).toEqual([])

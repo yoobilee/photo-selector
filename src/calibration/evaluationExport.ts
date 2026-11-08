@@ -72,7 +72,8 @@ export interface EvaluationEnvironment {
 export const EVALUATION_FORMAT = 'photo-selector-blur-evaluation'
 // 2: 사진별 origin·reviewed 추가
 // 3: settings에 판정 규칙의 판(classifierRevision)과 흔들림·초점 불량 기준 추가
-export const EVALUATION_FORMAT_VERSION = 3
+// 4: 사진별 방향 점수 추가. 판정 규칙은 바꾸지 않는다.
+export const EVALUATION_FORMAT_VERSION = 4
 
 export function bitsPerPixel(byteSize: number, width: number, height: number): number {
   return width > 0 && height > 0 ? Math.round(((byteSize * 8) / (width * height)) * 1000) / 1000 : 0
@@ -127,6 +128,8 @@ export function buildEvaluationJson(
       score: photo.measurement?.score ?? null,
       noise: photo.measurement?.noise ?? null,
       hasUnjudgedDirection: photo.measurement?.hasUnjudgedDirection ?? null,
+      // 가로, 세로, 대각선↘, 대각선↙. 방향의 null은 판정 불가, 배열 자체의 null은 측정하지 못한 경우다.
+      directionScores: photo.measurement?.directionScores ?? null,
       format: photo.format,
       width: photo.width,
       height: photo.height,
@@ -156,6 +159,11 @@ const csvColumns = [
   'device',
   'analysisPath',
   'userAgent',
+  // 기존 열 순서를 유지하고 진단 열을 끝에 추가한다. 측정하지 못했거나 방향을 판정하지 못하면 빈 셀이다.
+  'directionScoreHorizontal',
+  'directionScoreVertical',
+  'directionScoreDiagonalDown',
+  'directionScoreDiagonalUp',
 ] as const
 
 // 쉼표·따옴표·줄바꿈이 있으면 따옴표로 감싼다. 스프레드시트가 수식으로 해석하지 않도록 =,+,-,@로 시작하는 글자 값은 앞에 '를 붙인다.
@@ -189,6 +197,10 @@ export function buildEvaluationCsv(photos: readonly EvaluationPhoto[], environme
       device: environment.device,
       analysisPath: environment.analysisPath,
       userAgent: environment.userAgent,
+      directionScoreHorizontal: photo.measurement?.directionScores[0] ?? null,
+      directionScoreVertical: photo.measurement?.directionScores[1] ?? null,
+      directionScoreDiagonalDown: photo.measurement?.directionScores[2] ?? null,
+      directionScoreDiagonalUp: photo.measurement?.directionScores[3] ?? null,
     }
     return csvColumns.map((column) => csvCell(values[column])).join(',')
   })
