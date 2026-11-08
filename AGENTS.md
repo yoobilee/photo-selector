@@ -99,7 +99,7 @@
 - 버그·실패 원인 분석: `.ai/policies/debugging.md`
 - 위험도·테스트·독립 검증·CI 기준: `.ai/policies/verification.md`
 - 리뷰 자동화 도입·변경: `.ai/policies/review-automation.md`
-- 커밋·PR·병합 메시지: `.ai/policies/git-messages.md`
+- 커밋·PR·병합 메시지와 병합 후 로컬 정리: `.ai/policies/git-messages.md`
 - 비용 없는 리뷰 게이트 설정·사용: `.ai/checklists/review-gate-setup.md`
 - 중간·높은 위험 작업 계획: `.ai/templates/WORK_PLAN.md`
 - Agent 전환: `.ai/templates/HANDOFF.md`
@@ -165,14 +165,17 @@
 - 버전 기준 파일: `package.json`의 `version` (버전 배포를 사용할 경우)
 - 태그 형식: `vX.Y.Z`
 - 배포 절차 재정의: 없음
+- 병합 후 로컬 정리: `.ai/policies/git-messages.md`의 "병합 후 로컬 정리"를 따른다. 미커밋 파일이 있거나 사용 중인 worktree, 병합된 PR head에 없는 커밋이 있는 브랜치는 정리하지 않고 보고한다.
+- 임시 산출물: 리뷰 원문, 로그, 병합 준비 자료는 세션 임시 폴더에 둔다. 저장소 루트나 저장소 밖 형제 폴더(`photo-selector-*`)에 남기지 않는다. 계속 보관할 근거는 PR 본문이나 게이트 보고서 댓글에 남긴다.
 
 ### 리뷰 자동화 설정
 
 - 사용 여부: 기본 게이트 제공, AI 실행 연동은 프로젝트별 선택
 - 추가 API 과금: 사용 안 함
 - 게이트 가변 설정: `.ai/review-config.json` (위험 경로·중간 위험 정책·사람 구현 시 기본 reviewer). 검사 이름 `independent-review`와 GitHub Actions 앱 출처 검증은 고정 계약이다.
-- 리뷰 도구·신뢰할 작성자 식별 정보: Claude 구현 PR은 개발자 로컬 Claude Code의 Codex 플러그인(`/codex:review --base main`)으로 수동 리뷰한다. 모델·추론 강도는 `.codex/config.toml`(`gpt-6.1-sol`, `high`)을 따르며 ChatGPT 구독 인증만 사용한다. 결과는 사람이 확인한다.
-- 로컬 자동 리뷰: Codex 플러그인 Stop 리뷰 게이트와 Codex GitHub Automatic reviews 모두 사용 안 함
+- 리뷰 도구·신뢰할 작성자 식별 정보: Claude 구현 PR의 기본 Codex 검토는 구현 세션 안에서 진행한다. Claude가 구현과 로컬 검증을 마친 뒤 개발자 로컬 Claude Code의 Codex 플러그인 리뷰어(`/codex:review --base main`, 또는 같은 리뷰어를 부르는 `codex-companion.mjs review --wait --base main`)를 실행한다. 지적을 수정한 뒤에는 바뀐 head만 다시 검토한다. 이 결과가 게이트 보고서의 기본 근거다. 같은 base/head는 다시 검토하지 않으며, 실행 중·스킵·한도 초과는 검토 완료가 아니다. 모델·추론 강도는 `.codex/config.toml`(`gpt-6.1-sol`, `high`)을 따르며 ChatGPT 구독 인증만 사용한다. 결과는 사람이 확인한다.
+- 별도 Codex CLI 독립 리뷰: 새 Codex 세션, `codex exec`·`codex review`, `.ai/prompts/independent-pr-review.md`를 쓰는 추가 독립 리뷰와 그 보고서 파일은 사용자가 직접 요청할 때만 만든다. 구현 Agent가 스스로 추가 리뷰 세션을 열거나 리뷰를 중복 실행하지 않는다. Codex가 구현에도 참여해 위 검토가 독립 검증이 될 수 없으면 추가 리뷰를 임의로 실행하지 말고 사용자에게 알린다.
+- 로컬 자동 리뷰: Codex 플러그인 Stop 리뷰 게이트와 Codex GitHub Automatic reviews 모두 사용 안 함. 켜면 위 검토와 중복된다.
 - 게이트 완료 기준: 최신 fingerprint·보고서 근거·관리자 확인, critical/high/medium 미해결 0건
 - Shadow 판정(관찰용): `.ai/review-config.json`의 `shadow` 설정으로 위험도별 자동 판정 후보를 Actions Summary에만 기록한다. 기존 `independent-review` 결론·병합에 영향이 없고 별도 check를 게시하지 않는다. 신뢰할 Codex GitHub 리뷰 작성자는 `chatgpt-codex-connector[bot]`(사용자 ID 199175422, 앱 ID 1144995)이다. 구현 Agent와 관리자가 같은 GitHub 인증을 공유하므로 관리자 댓글만으로 사람의 판단을 증명할 수 없다는 위험은 해결되지 않았다.
 - 병합 도구: `.github/scripts/merge-pr.mjs`(squash만, 로컬에서 명시적으로 실행). 병합 전 `--dry-run`으로 판정을 확인한다. High는 `/review-gate` 확인과 별개로 관리자가 직접 작성한 `/merge-approve <head SHA> <fingerprint>`가 필요하다. Agent는 이 승인 댓글과 `/review-gate` 확인 댓글을 대신 작성하지 않는다. 기존 게이트 성공은 check의 proof v2 근거 digest가 지금 근거와 같을 때만 신뢰하고, 판정 코드가 기본 브랜치와 다르면 병합하지 않는다. 위험도 기준 자동 병합과 Codex 리뷰 자동 요청은 제공하지 않으며 후속 Phase에서 사용자 승인을 받은 별도 높은 위험 PR로만 도입한다.
