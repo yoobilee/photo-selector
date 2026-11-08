@@ -1,5 +1,5 @@
 import type { ImportProgress, ImportSummary } from '../hooks/usePhotoLibrary.ts'
-import { SUPPORTED_FORMAT_LABEL } from '../photos/imageFormat.ts'
+import { HEIF_SUPPORT_NOTE, SUPPORTED_FORMAT_LABEL } from '../photos/imageFormat.ts'
 import type { SkipReason, SkippedFile } from '../photos/importPhotos.ts'
 import { iconButtonClassName } from './buttonStyles.ts'
 import CloseIcon from './CloseIcon.tsx'
@@ -17,6 +17,11 @@ const skipReasonGuides: ReadonlyArray<{ reason: SkipReason; title: string; descr
     reason: 'unsupported-format',
     title: '지원하지 않는 형식',
     description: `${SUPPORTED_FORMAT_LABEL} 사진만 추가할 수 있습니다.`,
+  },
+  {
+    reason: 'heif-undecodable',
+    title: '이 브라우저에서 열 수 없는 HEIC 사진',
+    description: `${HEIF_SUPPORT_NOTE} 다른 브라우저라면 사진 앱에서 JPEG로 저장한 사본을 선택하세요. 파일이 손상된 경우에도 이렇게 표시될 수 있습니다.`,
   },
   {
     reason: 'unreadable',

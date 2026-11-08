@@ -1,9 +1,10 @@
 import { createPhotoThumbnail, type PhotoThumbnail } from './createPhotoThumbnail.ts'
 import { haveSameBytes } from './haveSameBytes.ts'
-import { detectImageFormat } from './imageFormat.ts'
+import { detectImageFormat, type SupportedImageFormat } from './imageFormat.ts'
 import { releasePhoto, type Photo } from './photo.ts'
 
-export type SkipReason = 'unsupported-format' | 'unreadable' | 'duplicate'
+// heif-undecodable: HEIC·HEIF로 확인했지만 이 브라우저가 디코딩하지 못한 사진(브라우저 미지원 또는 손상)
+export type SkipReason = 'unsupported-format' | 'heif-undecodable' | 'unreadable' | 'duplicate'
 
 export interface SkippedFile {
   readonly fileName: string
@@ -50,12 +51,14 @@ async function readPhoto(
   getKnownSources: () => readonly File[],
   createThumbnail: (file: Blob) => Promise<PhotoThumbnail>,
 ): Promise<ReadPhotoOutcome> {
+  let format: SupportedImageFormat | null = null
   try {
-    const format = await detectImageFormat(file)
+    format = await detectImageFormat(file)
     if (!format) return { kind: 'skipped', reason: 'unsupported-format' }
 
     if (await isDuplicate(file, getKnownSources)) return { kind: 'skipped', reason: 'duplicate' }
 
+    // 원본 File을 그대로 디코딩해 표시용 미리보기만 만든다. HEIC도 원본을 변환하거나 대신 저장하지 않는다.
     const thumbnail = await createThumbnail(file)
     return {
       kind: 'added',
@@ -70,7 +73,8 @@ async function readPhoto(
     }
   } catch {
     // 파일 내용이나 오류 상세(메타데이터 포함)는 기록하지 않고 사유만 남긴다.
-    return { kind: 'skipped', reason: 'unreadable' }
+    // HEIC는 브라우저마다 디코딩 지원이 달라 손상 여부와 구분하지 않고 따로 안내한다.
+    return { kind: 'skipped', reason: format === 'heif' ? 'heif-undecodable' : 'unreadable' }
   }
 }
 
