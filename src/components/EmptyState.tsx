@@ -1,5 +1,5 @@
 import type { Ref } from 'react'
-import { SUPPORTED_FORMAT_LABEL } from '../photos/imageFormat.ts'
+import { HEIF_SUPPORT_NOTE, SUPPORTED_FORMAT_LABEL } from '../photos/imageFormat.ts'
 import { primaryButtonClassName } from './buttonStyles.ts'
 
 interface EmptyStateProps {
@@ -17,6 +17,7 @@ function EmptyState({ pickerButtonRef, isImporting, onPickPhotos }: EmptyStatePr
       <p className="mt-3 leading-relaxed text-neutral-700">
         여러 장을 한 번에 선택할 수 있습니다. {SUPPORTED_FORMAT_LABEL} 형식을 지원합니다.
       </p>
+      <p className="mt-2 text-sm leading-relaxed text-neutral-700">{HEIF_SUPPORT_NOTE}</p>
       <button
         ref={pickerButtonRef}
         type="button"
@@ -29,6 +30,11 @@ function EmptyState({ pickerButtonRef, isImporting, onPickPhotos }: EmptyStatePr
       <p className="mt-6 text-sm leading-relaxed text-neutral-600">
         사진은 이 기기의 브라우저 안에서만 열리며 서버로 전송되지 않습니다. 원본 파일은 변경되지
         않습니다.
+      </p>
+      {/* iPhone 사진 선택 화면은 고른 사진을 다 준비할 때까지 닫히지 않고 진행 표시도 없다(앱이 관여할 수 없는 단계). */}
+      <p className="mt-2 text-sm leading-relaxed text-neutral-600">
+        iPhone에서 사진을 고르면 기기가 사진을 먼저 준비하므로 선택 화면이 닫히기까지 시간이 걸릴 수
+        있습니다. 많이 고를수록 오래 걸립니다.
       </p>
     </section>
   )

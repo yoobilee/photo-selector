@@ -93,7 +93,10 @@ describe('App', () => {
 
     expect(screen.getByRole('heading', { level: 2, name: '정리할 사진을 선택하세요' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '사진 선택' })).toBeInTheDocument()
-    expect(screen.getByText(/JPEG, PNG, WebP 형식을 지원합니다/)).toBeInTheDocument()
+    expect(screen.getByText(/JPEG, PNG, WebP, HEIC 형식을 지원합니다/)).toBeInTheDocument()
+    // HEIC는 브라우저가 직접 열 수 있을 때만 된다는 한계와, 앱이 관여할 수 없는 iPhone 선택 화면의 준비 시간을 함께 알린다.
+    expect(screen.getByText('HEIC는 사진을 직접 열 수 있는 브라우저(iPhone·Mac의 Safari 17 이상)에서만 추가됩니다.')).toBeInTheDocument()
+    expect(screen.getByText(/선택 화면이 닫히기까지 시간이 걸릴 수 있습니다/)).toBeInTheDocument()
   })
 
   it('opens the file picker that accepts only supported formats', () => {
@@ -106,6 +109,42 @@ describe('App', () => {
     expect(clickSpy).toHaveBeenCalledTimes(1)
     expect(input).toHaveAttribute('multiple')
     expect(input).toHaveAttribute('accept', expect.stringContaining('image/webp'))
+    expect(input).toHaveAttribute('accept', expect.stringContaining('image/heic'))
+  })
+
+  it('imports a HEIC photo the browser can decode and analyses the original file', async () => {
+    render(<App />)
+    const heic = createImageFile('IMG_0001.HEIC', 'heif', [1, 2, 3])
+    const bytesBefore = await readBytes(heic)
+
+    selectFiles([heic, createImageFile('b.jpg', 'jpeg', [4])])
+
+    await findGallery(2)
+    expect(screen.getByRole('img', { name: 'IMG_0001.HEIC' })).toHaveAttribute('src', expect.stringMatching(/^blob:/))
+    // 미리보기는 원본과 다른 Blob이고, 분석에는 원본 File 자체를 넘긴다.
+    expect(objectUrls.createObjectURL).not.toHaveBeenCalledWith(heic)
+    await waitFor(() => expect(sharpnessAnalyzer.analyzedFiles).toContain(heic))
+    await finishAnalysis('IMG_0001.HEIC', { status: 'blurry', cause: 'defocus' })
+    expect(sharpnessBadgeOf('IMG_0001.HEIC')).toBe('초점 불량 의심')
+    await expect(readBytes(heic)).resolves.toEqual(bytesBefore)
+  })
+
+  it('explains HEIC photos this browser cannot open and still adds the other photos', async () => {
+    // 이 브라우저가 HEIC를 디코딩하지 못하는 경우. 파일은 한 장씩 차례로 처리하므로 첫 파일(HEIC)만 실패한다.
+    vi.mocked(createPhotoThumbnail).mockImplementationOnce(async () => {
+      throw new Error('decode failed')
+    })
+    render(<App />)
+
+    selectFiles([createImageFile('IMG_0001.HEIC', 'heif', [1]), createImageFile('b.jpg', 'jpeg', [2])])
+
+    await findGallery(1)
+    expect(screen.getByRole('status')).toHaveTextContent('사진 1장을 추가했습니다. 1개 파일은 추가하지 않았습니다.')
+    const notice = screen.getByRole('region', { name: '추가하지 않은 파일 1개' })
+    expect(within(notice).getByText('이 브라우저에서 열 수 없는 HEIC 사진 1개')).toBeInTheDocument()
+    expect(within(notice).getByText(/JPEG로 저장한 사본을 선택하세요/)).toBeInTheDocument()
+    expect(within(notice).getByText('IMG_0001.HEIC')).toBeInTheDocument()
+    expect(within(notice).queryByText(/열 수 없는 파일/)).not.toBeInTheDocument()
   })
 
   it('adds several photos and switches to the gallery', async () => {
@@ -743,6 +782,28 @@ describe('App', () => {
       expect(keptSummary()).toBe('남길 사진 1장')
       showView('모든 사진')
       expect(keepButton('b.jpg')).toHaveAttribute('aria-pressed', 'false')
+    })
+
+    it('keeps showing the preview with a notice when the original cannot be shown in the comparison', async () => {
+      await importGroupedPhotos(['a.jpg', 'b.jpg', 'c.jpg'])
+      showView('비슷한 사진끼리 보기')
+      const urlsBefore = objectUrls.liveUrls.size
+      fireEvent.click(screen.getByRole('button', { name: '묶음 1 크게 비교' }))
+      const dialog = screen.getByRole('dialog')
+
+      // 예: 브라우저가 큰 원본(HEIC 등)을 표시하지 못함. 미리보기를 그대로 두고 그 사실을 글로 알린다.
+      fireEvent.error(within(dialog).getByTestId('original-image'))
+      expect(within(dialog).getByTestId('original-preview')).toBeInTheDocument()
+      expect(within(dialog).getByText('원본을 표시하지 못해 작은 미리보기를 보여 줍니다.')).toBeInTheDocument()
+      expect(objectUrls.liveUrls.size).toBe(urlsBefore + 1)
+
+      // 다음 사진은 원본을 새로 읽으므로 안내가 사라지고, 앞 사진의 원본 URL은 해제된다.
+      fireEvent.click(within(dialog).getByRole('button', { name: '다음 사진' }))
+      expect(within(dialog).queryByText('원본을 표시하지 못해 작은 미리보기를 보여 줍니다.')).not.toBeInTheDocument()
+      expect(objectUrls.liveUrls.size).toBe(urlsBefore + 1)
+
+      fireEvent.click(within(dialog).getByRole('button', { name: '비교 닫기' }))
+      expect(objectUrls.liveUrls.size).toBe(urlsBefore)
     })
 
     it('moves keyboard focus to a neighbor when a photo is unkept in the kept-only view', async () => {
