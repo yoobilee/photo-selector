@@ -37,3 +37,16 @@ node .github/scripts/merge-pr.mjs owner/repo PR번호 squash --head <dry-run에�
 사람 승인은 GitHub 브랜치 보호로 강제하며 도구의 성공만으로 사람 승인 조건을 대체하지 않는다. CLI 응답·인증값은 오류 로그에 출력하지 않는다.
 
 브라우저에서 병합할 때도 제목을 직접 확인하고 병합 후 같은 PR의 커밋을 조회한다. 로컬 기본 브랜치를 pull했다는 사실만으로 제목 검증을 대체하지 않는다.
+
+## 병합 후 로컬 정리
+
+병합 도구는 작업 트리에 미추적 파일이 하나라도 있거나 브랜치를 체크아웃·다른 worktree에서 사용 중이면 로컬 브랜치 정리를 건너뛴다. 그래서 병합이 끝나도 브랜치와 worktree가 남을 수 있다. 실제 커밋 제목 검증을 마친 뒤 아래 순서로 정리한다. 병합 후 감사가 실패했으면 정리하지 않는다.
+
+1. main 동기화: `git fetch origin --prune` → `git switch main` → `git pull --ff-only origin main`. 거부되면 멈추고 보고한다.
+2. 완료 브랜치 판별: `gh pr view PR번호 --json state,headRefOid`로 병합된 PR의 head SHA를 조회한다. 로컬 브랜치가 그 SHA와 같거나 조상(`git merge-base --is-ancestor 브랜치 head-SHA`)일 때만 완료 브랜치로 본다. 조회 실패나 head에 없는 커밋은 정리 대상이 아니다.
+3. worktree 정리: 완료 브랜치의 worktree가 `git -C 경로 status --porcelain` 결과 없음이고, 그 폴더에서 실행 중인 개발 서버 등 프로세스가 없을 때만 `git worktree remove 경로`로 지운다. 이 명령은 ignored 파일(`node_modules` 등)도 지우므로 보존할 로컬 자료가 없는지 먼저 확인한다. 끝나면 `git worktree prune`을 실행한다.
+4. 브랜치 삭제: squash 병합이라 `git branch -d`가 거부하므로 2번 판별을 통과한 브랜치만 `git branch -D 브랜치`로 지운다. 체크아웃 중이거나 다른 worktree에서 쓰는 브랜치는 Git이 거부한다.
+5. 원격 브랜치는 GitHub 자동 삭제 설정에 맡긴다. 남아 있으면 지우지 않고 보고한다.
+6. 저장소 밖 폴더와 미추적 보고서는 Agent가 만든 것이라도 사람이 확인한 뒤 지운다.
+
+미커밋 변경을 `git reset --hard`, `git clean`, `git checkout -f`, `git stash`로 지우거나 숨기지 않는다. `git worktree remove --force`도 사용하지 않는다.
