@@ -96,7 +96,11 @@ describe('App', () => {
     expect(screen.getByText(/JPEG, PNG, WebP, HEIC 형식을 지원합니다/)).toBeInTheDocument()
     // HEIC는 브라우저가 직접 열 수 있을 때만 된다는 한계와, 앱이 관여할 수 없는 iPhone 선택 화면의 준비 시간을 함께 알린다.
     expect(screen.getByText('HEIC는 사진을 직접 열 수 있는 브라우저(iPhone·Mac의 Safari 17 이상)에서만 추가됩니다.')).toBeInTheDocument()
-    expect(screen.getByText(/선택 화면이 닫히기까지 시간이 걸릴 수 있습니다/)).toBeInTheDocument()
+    const preparationNote = screen.getByText(/사진을 여러 장 선택하면 iPhone이 사진을 준비하는 동안/)
+    expect(preparationNote).toBeVisible()
+    expect(screen.getByText(/화면이 자동으로 닫힐 때까지 기다려 주세요/)).toBeVisible()
+    expect(screen.getByText(/iCloud에 저장된 사진은 시간이 더 걸릴 수 있습니다/)).toBeVisible()
+    expect(preparationNote.compareDocumentPosition(screen.getByRole('button', { name: '사진 선택' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('opens the file picker that accepts only supported formats', () => {

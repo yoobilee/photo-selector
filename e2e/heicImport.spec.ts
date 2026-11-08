@@ -68,7 +68,9 @@ test('offers HEIC in the file picker and explains the browser limit before choos
   expect(accept).toEqual(expect.arrayContaining(['image/heic', 'image/heif', '.heic', '.heif', 'image/jpeg']))
   await expect(page.getByText('JPEG, PNG, WebP, HEIC 형식을 지원합니다.', { exact: false })).toBeVisible()
   await expect(page.getByText(/HEIC는 사진을 직접 열 수 있는 브라우저/)).toBeVisible()
-  await expect(page.getByText(/선택 화면이 닫히기까지 시간이 걸릴 수 있습니다/)).toBeVisible()
+  await expect(page.getByText(/사진을 여러 장 선택하면 iPhone이 사진을 준비하는 동안/)).toBeVisible()
+  await expect(page.getByText(/화면이 자동으로 닫힐 때까지 기다려 주세요/)).toBeVisible()
+  await expect(page.getByText(/iCloud에 저장된 사진은 시간이 더 걸릴 수 있습니다/)).toBeVisible()
 
   const hasHorizontalOverflow = await page.evaluate(
     () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
