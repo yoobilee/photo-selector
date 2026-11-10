@@ -13,6 +13,10 @@
 // 5. 길게 끌린 흔들림은 그 방향의 큰 윤곽까지 지워 3의 방향 판정에서 빠진다. 1/16 크기를 함께 보는 여러 독립 근거가 모두
 //    일치할 때만 흐림 의심으로 본다(hasConsistentShake).
 // 6. 흐림 의심이면 방향별 점수와 구역 근거로 원인(흔들림·초점 불량)을 추정하고, 근거가 부족하면 원인을 단정하지 않는다.
+// 7. 1~5로 판정 근거가 부족하면(판정 근거 부족) 같은 사진을 1/2 크기로 줄여 같은 방법으로 한 번 더 본다. 줄이면 잡음이 줄고
+//    큰 윤곽이 상대적으로 뚜렷해진다. 1/2 크기에서도 흐리고 원인 근거(흔들림 또는 초점 불량)가 일치하면 흐림 의심이다.
+//    1/2 크기에서 선명해도 원래 크기의 흐림을 숨겼을 수 있으므로 선명으로 바꾸지 않는다(판정 근거 부족 유지).
+//    실제 사진 평가 근거는 docs/sharpness-real-photo-evaluation.md.
 // 임계값의 근거와 한계는 sharpness.test.ts의 합성 이미지 측정과 README에 기록한다.
 
 // 분석용 이미지의 긴 변. 원본이 이보다 크면 줄이고, 작으면 그대로 쓴다(확대하면 보간으로 흐려져 오탐이 생긴다).
@@ -33,7 +37,12 @@ export const SHARP_RATIO_THRESHOLD = 0.025
 // 판정 규칙의 판. 같은 설정값에서도 판정이 달라지는 규칙 변경이면 올린다. 평가 결과에 기록해 다른 판의 결과와 섞지 않는다.
 // 1: 방향별 점수만으로 판정(PR #8)
 // 2: 긴 흔들림 근거(hasConsistentShake)로 흐림 의심 추가, 흐림 원인 추정(estimateBlurCause)
-export const SHARPNESS_CLASSIFIER_REVISION = 2
+// 3: 판정 근거 부족이면 1/2 크기에서 다시 보고, 그 크기에서 흐리면 흐림 의심(halfScale)
+export const SHARPNESS_CLASSIFIER_REVISION = 3
+
+// 판정 근거가 부족할 때 다시 볼 축소 배수(정수 배수 평균). 한 번만 본다. 실제 사진 개선용 묶음에서 1/4까지 더 보는 방식은
+// 추가 검출이 2장뿐이라 넣지 않았다.
+export const SHARPNESS_HALF_SCALE_FACTOR = 2
 
 // 흔들림 근거(collectShakeEvidence)에 쓰는 아주 거친 크기(1/16)의 구역 수. 분석 크기 1024×768에서 구역 하나가 16×12화소다.
 export const SHAKE_COARSE_GRID = 4
@@ -79,7 +88,8 @@ export interface ShakeEvidence {
   readonly contradictingRegions: number
 }
 
-export interface SharpnessMeasurement {
+// 한 크기(분석 크기 또는 1/2 크기)에서 잰 측정값
+export interface ScaleMeasurement {
   // 판정할 수 있는 방향 중 가장 낮은 방향의 점수. 판정할 수 있는 방향이 없으면 null
   readonly score: number | null
   // 윤곽은 있지만 잡음에 비해 약해 판정할 수 없는 방향이 있는지. 그 방향만 흐렸을 수 있으므로 선명하다고 단정하지 않는다.
@@ -92,6 +102,12 @@ export interface SharpnessMeasurement {
   readonly shake: ShakeEvidence | null
   // 서로 수직인 두 방향이 모두 흐린 구역 수(초점 불량·배경 흐림처럼 방향과 관계없는 흐림)
   readonly isotropicBlurRegions: number
+}
+
+export interface SharpnessMeasurement extends ScaleMeasurement {
+  // 분석 크기에서 판정 근거가 부족할 때만 1/SHARPNESS_HALF_SCALE_FACTOR 크기에서 다시 잰 측정값.
+  // 분석 크기에서 판정했거나 줄이면 너무 작아지면 null이다.
+  readonly halfScale: ScaleMeasurement | null
 }
 
 export type SharpnessVerdict = 'sharp' | 'blurry' | 'low-detail'
@@ -247,7 +263,20 @@ function collectShakeEvidence(
   return { direction, regions: evidence, rows: rows.size, columns: columns.size, contradictingRegions: contradicting }
 }
 
+// 분석 크기에서 재고, 판정 근거가 부족하면 1/2 크기에서도 잰다(classifySharpness 7).
 export function measureSharpness(image: GrayImage): SharpnessMeasurement {
+  const measurement = measureAtScale(image)
+  if (classifyAtScale(measurement) !== 'low-detail') return { ...measurement, halfScale: null }
+  const halfWidth = Math.floor(image.width / SHARPNESS_HALF_SCALE_FACTOR)
+  const halfHeight = Math.floor(image.height / SHARPNESS_HALF_SCALE_FACTOR)
+  const halfScale =
+    Math.min(halfWidth, halfHeight) >= SHARPNESS_MIN_EDGE
+      ? measureAtScale(downsampleByAverage(image, SHARPNESS_HALF_SCALE_FACTOR))
+      : null
+  return { ...measurement, halfScale }
+}
+
+function measureAtScale(image: GrayImage): ScaleMeasurement {
   const coarseImage = downsampleByAverage(image, SHARPNESS_COARSE_FACTOR)
   const veryCoarseImage = downsampleByAverage(coarseImage, SHARPNESS_COARSE_FACTOR)
   const noise = estimateNoise(image)
@@ -308,7 +337,7 @@ export function measureSharpness(image: GrayImage): SharpnessMeasurement {
 // 2. 끌린 방향이 선명한 반대 구역이 하나도 없다.
 // 3. 모든 방향이 흐린 구역이 근거 구역의 1/SHAKE_ISOTROPIC_LIMIT 이하다(배경 흐림·초점 불량이 원인일 수 있으면 제외).
 // 4. 끌린 방향의 수직 방향은 사진 전체 점수로도 선명하다.
-export function hasConsistentShake({ shake, isotropicBlurRegions, directionScores }: SharpnessMeasurement): boolean {
+export function hasConsistentShake({ shake, isotropicBlurRegions, directionScores }: ScaleMeasurement): boolean {
   if (!shake) return false
   const across = directionScores[PERPENDICULAR[shake.direction]!] ?? null
   return (
@@ -324,8 +353,23 @@ export function hasConsistentShake({ shake, isotropicBlurRegions, directionScore
 
 // 판정한 방향 중 하나라도 흐리면 흐림 의심이다. 판정한 방향이 모두 선명해도 흔들림 근거가 모두 일치하면 흐림 의심이다
 // (길게 끌린 흔들림은 그 방향의 윤곽까지 약해져 방향 판정에서 빠지기 때문). 모든 방향을 판정할 수 없으면 선명하다고도
-// 흐리다고도 단정하지 않는다.
+// 흐리다고도 단정하지 않는다. 분석 크기에서 판정 근거가 부족하면 1/2 크기의 흐림 의심만 받아들인다(isHalfScaleBlur).
 export function classifySharpness(measurement: SharpnessMeasurement): SharpnessVerdict {
+  const verdict = classifyAtScale(measurement)
+  if (verdict === 'low-detail' && measurement.halfScale && isHalfScaleBlur(measurement.halfScale)) return 'blurry'
+  return verdict
+}
+
+// 1/2 크기의 흐림 의심은 원인 근거가 일치할 때만 받아들인다. 1/2 크기에서 흐림이고, 흔들림 근거가 모두 일치하거나
+// 초점 불량 근거(estimateCauseAtScale의 defocus: 방향별 점수가 서로 비슷하고 모든 방향이 흐린 구역이 있음)가 맞아야 한다.
+// 일부 방향만 흐리고 다른 방향은 뚜렷하게 선명하면 장면의 방향성(흐린 배경 위 줄무늬 등)일 수 있으므로 판정 근거 부족으로 둔다.
+// 1/2 크기에서 선명해도 원래 크기의 흐림을 숨겼을 수 있으므로 선명으로 바꾸지 않는다.
+function isHalfScaleBlur(halfScale: ScaleMeasurement): boolean {
+  return classifyAtScale(halfScale) === 'blurry' && estimateCauseAtScale(halfScale) !== 'unknown'
+}
+
+// 한 크기의 측정값만으로 판정한다.
+function classifyAtScale(measurement: ScaleMeasurement): SharpnessVerdict {
   const { score, hasUnjudgedDirection } = measurement
   if (score !== null && score < SHARP_RATIO_THRESHOLD) return 'blurry'
   if (hasConsistentShake(measurement)) return 'blurry'
@@ -340,7 +384,13 @@ export function classifySharpness(measurement: SharpnessMeasurement): SharpnessV
 //      짝 안의 점수 차이가 DEFOCUS_PAIR_SPREAD배 이하다(대각선은 화소 간격이 달라 가로·세로와 점수 수준이 조금 다르다).
 //   2. 판정한 모든 방향의 점수가 서로 DEFOCUS_MAX_SPREAD배 안에 있다.
 //   3. 모든 방향이 흐린 구역이 DEFOCUS_MIN_REGIONS개 이상이다.
+// 1/2 크기에서 흐림 의심이 된 사진은 1/2 크기의 측정값으로 추정한다.
 export function estimateBlurCause(measurement: SharpnessMeasurement): BlurCause {
+  const { halfScale } = measurement
+  return estimateCauseAtScale(halfScale && classifyAtScale(measurement) !== 'blurry' ? halfScale : measurement)
+}
+
+function estimateCauseAtScale(measurement: ScaleMeasurement): BlurCause {
   if (hasConsistentShake(measurement)) return 'shake'
   const scores = measurement.directionScores
   let judgedPairs = 0

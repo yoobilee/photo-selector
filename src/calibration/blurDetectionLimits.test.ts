@@ -109,6 +109,9 @@ describe('known limits of blur detection (synthetic reproduction, not real photo
     expect(result.cause).toBe('unknown')
     const noisy = judge(addNoise(blinds, 0.3, 3))
     expect(noisy.verdict).toBe('low-detail')
+    // 1/2 크기에서는 잡음이 줄어 가로 방향이 배경만으로 흐림이 되지만, 세로 방향이 선명해 원인 근거가 맞지 않으므로 받지 않는다.
+    expect(noisy.halfScale?.score).toBeLessThan(0.025)
+    expect(Math.max(...noisy.halfScale!.directionScores.filter((score) => score !== null))).toBeGreaterThan(0.05)
     // 점수가 높아도 한 방향을 확인하지 못하면 선명하다고 단정할 수 없다.
     expect(noisy.score).toBeGreaterThan(0.1)
     expect(noisy.hasUnjudgedDirection).toBe(true)
@@ -138,6 +141,8 @@ describe('known limits of blur detection (synthetic reproduction, not real photo
     expect(textured.noise).toBeGreaterThan(3)
     expect(textured.directionScores).toEqual([null, null, null, null])
     expect(textured.hasUnjudgedDirection).toBe(true)
+    // 1/2 크기에서 다시 봐도 흐림 근거가 없어 분석 불가로 남는다(1/2 크기의 선명은 선명 판정으로 쓰지 않는다).
+    expect(textured.halfScale).not.toBeNull()
 
     const noisy = judge(addNoise(gaussianBlur(renderScene(1024, 768, 11), 0.8), 4, 3))
     expect(noisy).toMatchObject({ verdict: 'low-detail', score: null })

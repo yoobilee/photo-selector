@@ -15,6 +15,7 @@ import {
   SHARPNESS_ANALYSIS_MAX_EDGE,
   SHARPNESS_COARSE_FACTOR,
   SHARPNESS_GRID,
+  SHARPNESS_HALF_SCALE_FACTOR,
   SHARPNESS_MIN_EDGE,
   SHARPNESS_TOP_REGIONS,
   SHARP_RATIO_THRESHOLD,
@@ -73,7 +74,8 @@ export const EVALUATION_FORMAT = 'photo-selector-blur-evaluation'
 // 2: 사진별 origin·reviewed 추가
 // 3: settings에 판정 규칙의 판(classifierRevision)과 흔들림·초점 불량 기준 추가
 // 4: 사진별 방향 점수 추가. 판정 규칙은 바꾸지 않는다.
-export const EVALUATION_FORMAT_VERSION = 4
+// 5: 판정 규칙 3의 1/2 크기 재측정값(halfScale)과 settings.halfScaleFactor 추가
+export const EVALUATION_FORMAT_VERSION = 5
 
 export function bitsPerPixel(byteSize: number, width: number, height: number): number {
   return width > 0 && height > 0 ? Math.round(((byteSize * 8) / (width * height)) * 1000) / 1000 : 0
@@ -97,6 +99,7 @@ export function buildEvaluationJson(
       grid: SHARPNESS_GRID,
       coarseFactor: SHARPNESS_COARSE_FACTOR,
       topRegions: SHARPNESS_TOP_REGIONS,
+      halfScaleFactor: SHARPNESS_HALF_SCALE_FACTOR,
       structureMinStrength: STRUCTURE_MIN_STRENGTH,
       noiseMargin: NOISE_MARGIN,
       shake: {
@@ -130,6 +133,8 @@ export function buildEvaluationJson(
       hasUnjudgedDirection: photo.measurement?.hasUnjudgedDirection ?? null,
       // 가로, 세로, 대각선↘, 대각선↙. 방향의 null은 판정 불가, 배열 자체의 null은 측정하지 못한 경우다.
       directionScores: photo.measurement?.directionScores ?? null,
+      // 분석 크기에서 판정 근거가 부족해 1/2 크기에서 다시 잰 값. 다시 재지 않았거나 측정하지 못했으면 null이다.
+      halfScale: halfScaleOf(photo.measurement),
       format: photo.format,
       width: photo.width,
       height: photo.height,
@@ -137,6 +142,12 @@ export function buildEvaluationJson(
     })),
   }
   return `${JSON.stringify(report, null, 2)}\n`
+}
+
+function halfScaleOf(measurement: SharpnessMeasurement | null) {
+  const half = measurement?.halfScale
+  if (!half) return null
+  return { score: half.score, noise: half.noise, hasUnjudgedDirection: half.hasUnjudgedDirection, directionScores: half.directionScores }
 }
 
 const csvColumns = [
@@ -164,6 +175,8 @@ const csvColumns = [
   'directionScoreVertical',
   'directionScoreDiagonalDown',
   'directionScoreDiagonalUp',
+  'halfScaleScore',
+  'halfScaleNoise',
 ] as const
 
 // 쉼표·따옴표·줄바꿈이 있으면 따옴표로 감싼다. 스프레드시트가 수식으로 해석하지 않도록 =,+,-,@로 시작하는 글자 값은 앞에 '를 붙인다.
@@ -201,6 +214,8 @@ export function buildEvaluationCsv(photos: readonly EvaluationPhoto[], environme
       directionScoreVertical: photo.measurement?.directionScores[1] ?? null,
       directionScoreDiagonalDown: photo.measurement?.directionScores[2] ?? null,
       directionScoreDiagonalUp: photo.measurement?.directionScores[3] ?? null,
+      halfScaleScore: photo.measurement?.halfScale?.score ?? null,
+      halfScaleNoise: photo.measurement?.halfScale?.noise ?? null,
     }
     return csvColumns.map((column) => csvCell(values[column])).join(',')
   })

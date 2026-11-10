@@ -27,4 +27,12 @@ export default defineConfig([
       globals: globals.node,
     },
   },
+  {
+    // 개발용 실제 사진 흐림 평가 스크립트. Node에서 실행하고 일부 함수는 Playwright로 브라우저 페이지 안에서 실행한다.
+    files: ['scripts/**/*.mjs'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      globals: { ...globals.node, ...globals.browser },
+    },
+  },
 ])

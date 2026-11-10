@@ -9,6 +9,7 @@ export function createMeasurement(overrides: Partial<SharpnessMeasurement> = {})
     directionScores: [null, null, null, null],
     shake: null,
     isotropicBlurRegions: 0,
+    halfScale: null,
     ...overrides,
   }
 }
