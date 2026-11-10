@@ -4,19 +4,31 @@ import { createEvidenceGitHub } from './review-evidence-cli.mjs';
 import { collectReviewPacket, publishEvidence, prepareLocalConfirmation } from './review-evidence.mjs';
 import { evidenceWorkflow, receiptName } from './review-evidence-source.mjs';
 import { reportHash } from './review-gate-core.mjs';
+import { gitBlobSha } from './merge-pr-core.mjs';
 
 export function localFixture() {
   const fake = createFake({ risk: 'high', implementedBy: 'claude', gate: false, approval: 'none', codex: 'none', requests: 0 });
   const comments = []; const artifacts = []; const dispatches = [];
   const gh = args => {
     if (args[0] === 'workflow') { dispatches.push(JSON.parse(readFileSync(args.at(-1).slice('request=@'.length), 'utf8'))); return ''; }
+    if (args[0] !== 'api') return fake.gh(args);
     if (args[1] === `repos/${repo}/actions/runs/44`) return JSON.stringify(run);
     if (args[1] === `repos/${repo}/actions/workflows/review-evidence.yml`) return JSON.stringify({ id: 9, path: evidenceWorkflow });
     if (args[1].startsWith(`repos/${repo}/actions/runs/44/artifacts`)) return JSON.stringify([{ artifacts }]);
-    if (args[1].startsWith(`repos/${repo}/contents/.github/`)) return JSON.stringify({ sha: 'c'.repeat(40) });
-    const value = JSON.parse(fake.gh(args));
+    if (args[1].startsWith(`repos/${repo}/contents/.github/scripts/`)) {
+      const name = args[1].split('/scripts/')[1].split('?')[0];
+      return JSON.stringify({ sha: gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')) });
+    }
+    if (args[1].startsWith(`repos/${repo}/contents/${evidenceWorkflow}`)) return JSON.stringify({ sha: 'c'.repeat(40) });
+    const policy = args[1].includes('/contents/.ai/review-config.json');
+    const value = JSON.parse(fake.gh(policy ? ['api', `repos/${repo}/contents/.ai/review-config.json?ref=main`] : args));
     if (args[1] === `repos/${repo}`) { value.full_name = repo; value.id = 12; }
-    if (args[1].includes('/contents/.ai/review-config.json')) value.sha = 'f'.repeat(40);
+    if (policy) value.sha = fake.store.merged && args[1].endsWith('ref=main') ? 'a'.repeat(40) : 'f'.repeat(40);
+    if (args[1].includes('/check-runs') && fake.store.localEvidenceDigest) for (const page of value) {
+      for (const check of page.check_runs.filter(c => c.name === 'independent-review')) {
+        check.conclusion = 'success'; const proof = JSON.parse(check.external_id); proof.evidenceDigest = fake.store.localEvidenceDigest; check.external_id = JSON.stringify(proof);
+      }
+    }
     if (args[1] === `repos/${repo}/pulls/1`) value.comments += comments.length;
     if (args[1].startsWith(`repos/${repo}/issues/1/comments?`)) value.at(-1).push(...structuredClone(comments));
     return JSON.stringify(value);

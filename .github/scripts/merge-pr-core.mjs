@@ -91,7 +91,7 @@ export function createGitHub({ gh, repo }) {
       },
       issues: { listComments: many(`repos/${repo}/issues/:issue_number/comments`) },
       repos: {
-        get: one(`repos/${repo}`), getContent: one(`repos/${repo}/contents/:path?ref=:ref`),
+        get: one(`repos/${repo}`), getContent: async args => ({ data: api(`repos/${repo}/contents/${segments(args.path)}?ref=${encodeURIComponent(args.ref)}`) }),
         getCollaboratorPermissionLevel: one(`repos/${repo}/collaborators/:username/permission`),
         compareCommitsWithBasehead: one(`repos/${repo}/compare/:basehead?per_page=1`),
       },
@@ -397,7 +397,7 @@ async function evidenceUnchangedAfterMerge({ github, repo, number, expectedDiges
   const now = github.api(`repos/${repo}/pulls/${number}`);
   if (!Number.isSafeInteger(now.comments) || comments.length !== now.comments) throw new Error('댓글 전체 조회 실패');
   const { permission, canConfirm } = permissionReader({ github, repo: repoRef });
-  const basis = await collectReviewBasis({ repo: repoRef, number, comments, reviews, permission, canConfirm, github, pr: expectedPr });
+  const basis = await collectReviewBasis({ repo: repoRef, number, comments, reviews, permission, canConfirm, github, pr: expectedPr, approvedRef: expectedPr.base.sha });
   return basis.gateEvidence.digest === expectedDigest;
 }
 
@@ -441,7 +441,7 @@ async function mergeAndCleanup({ gh, git, repo, number, assessment, out, err, sl
   // 병합 후 감사: 마지막 재확인과 병합 API 사이의 근거 변경은 막을 수 없으므로 사후에 감지한다.
   // 다르거나 확인할 수 없으면 되돌리지 않고, 사람이 조사할 수 있도록 브랜치 정리도 하지 않는다.
   let unchanged;
-    try { unchanged = await evidenceUnchangedAfterMerge({ github, repo, number, expectedDigest: assessment.evidenceDigest, expectedPr: pr }); } catch { unchanged = null; }
+    try { unchanged = await evidenceUnchangedAfterMerge({ github, repo, number, expectedDigest: assessment.evidenceDigest, expectedPr: assessment.source }); } catch { unchanged = null; }
   if (unchanged !== true) {
     err(unchanged === false
       ? '[심각] 병합 후 감사: 게이트 근거(확인 댓글·보고서·High 승인·작성자 권한·변경 요청 리뷰)가 병합 직전 재확인과 다릅니다. 마지막 재확인과 병합 사이에 근거가 바뀌었을 수 있습니다.'

@@ -1,6 +1,7 @@
 import { normalizeNewlines, parseMetadata, reportHash, sha256 } from './review-gate-core.mjs';
 
 export const evidenceWorkflow = '.github/workflows/review-evidence.yml';
+export const publicationModules = ['review-evidence.mjs', 'review-evidence-source.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
 export const localHeading = '# 미인증 로컬 독립 리뷰 자료';
 export const canonical = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
@@ -26,7 +27,8 @@ export function validatePluginResult(input, target, implementedBy) {
       || input.status !== 'completed' || input.reviewComplete !== true) fail('로컬 독립 리뷰 대상·완료 상태 오류');
   if (!exact(input.findings, ['critical', 'high', 'medium', 'low', 'unknown'])
       || Object.values(input.findings).some(n => !Number.isSafeInteger(n) || n < 0)) fail('로컬 지적 집계 오류');
-  if (typeof input.report !== 'string' || !input.report.trim() || Buffer.byteLength(input.report) > 16_000) fail('로컬 리뷰 원문 오류');
+  if (typeof input.report !== 'string' || !input.report.trim()) fail('로컬 리뷰 원문 오류');
+  if (Buffer.byteLength(input.report) > 16_000) throw Object.assign(new Error('로컬 리뷰 원문 16000바이트 초과. 원문은 수집 ledger에 보존하며 자동 게시하지 않음'), { code: 'review-report-too-large' });
   if (!exact(input.source, ['kind', 'sessionId', 'jobId', 'threadId', 'turnId', 'startedAt', 'completedAt', 'outputHash'])
       || input.source.kind !== 'codex-plugin' || !['sessionId', 'jobId', 'threadId', 'turnId'].every(k => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.source[k] ?? ''))
       || !Number.isFinite(Date.parse(input.source.startedAt)) || !Number.isFinite(Date.parse(input.source.completedAt))
@@ -65,13 +67,15 @@ export function parseLocalReport(body) {
 
 // 영수증의 이름은 승인된 workflow가 댓글을 읽어 검증한 뒤 만든다. API가 실행에 연결하는 metadata만 사용한다.
 // ZIP을 실행/추출하지 않으며, 영수증은 댓글 게시 경로만 증명한다. 로컬 리뷰 실행은 여전히 미인증이다.
-export async function verifyLocalReport({ github, repo, pr, comment, fingerprint }) {
+export async function verifyLocalReport({ github, repo, pr, comment, fingerprint, approvedRef }) {
   if (!isEvidencePublisher(comment) || !id(comment.id) || comment.created_at !== comment.updated_at
       || !Number.isFinite(Date.parse(comment.created_at))) fail('로컬 보고서 작성자·수정 이력 오류');
   const { result, runId, key } = parseLocalReport(comment.body);
   const repository = `${repo.owner}/${repo.repo}`;
   const info = (await github.rest.repos.get(repo)).data;
-  const policy = (await github.rest.repos.getContent({ ...repo, path: '.ai/review-config.json', ref: info.default_branch })).data;
+  if (approvedRef !== undefined && !sha(approvedRef)) fail('게시 정책 snapshot SHA 오류');
+  const ref = approvedRef ?? info.default_branch;
+  const policy = (await github.rest.repos.getContent({ ...repo, path: '.ai/review-config.json', ref })).data;
   const target = { repository, number: pr.number, head: pr.head.sha, base: pr.base.sha, fingerprint, policySha: policy.sha };
   if (info.full_name !== repository || pr.base.ref !== info.default_branch || pr.base.repo?.full_name !== repository
       || pr.head.repo?.full_name !== repository || !sha(policy.sha) || !sha(pr.head.sha) || !sha(pr.base.sha) || !digest(fingerprint)) fail('보고서 대상 조회 오류');
@@ -85,8 +89,8 @@ export async function verifyLocalReport({ github, repo, pr, comment, fingerprint
       || run.head_repository?.full_name !== repository || !id(run.repository?.id) || run.head_repository.id !== run.repository.id
       || Date.parse(comment.created_at) < Date.parse(run.run_started_at) || Date.parse(comment.created_at) > Date.parse(run.updated_at)
       || !Number.isFinite(Date.parse(run.run_started_at)) || !Number.isFinite(Date.parse(run.updated_at))) fail('로컬 게시 workflow 실행 출처 오류');
-  for (const path of [evidenceWorkflow, '.github/scripts/review-evidence.mjs', '.github/scripts/review-evidence-source.mjs']) {
-    const approved = (await github.rest.repos.getContent({ ...repo, path, ref: info.default_branch })).data;
+  for (const path of [evidenceWorkflow, ...publicationModules.map(name => `.github/scripts/${name}`)]) {
+    const approved = (await github.rest.repos.getContent({ ...repo, path, ref })).data;
     const executed = (await github.rest.repos.getContent({ ...repo, path, ref: run.head_sha })).data;
     if (!sha(approved.sha) || approved.sha !== executed.sha) fail('게시 코드 승인 버전 불일치');
   }

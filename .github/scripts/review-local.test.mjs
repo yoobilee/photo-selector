@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localFixture } from './review-local-fixture.mjs';
 import { publishEvidence } from './review-evidence.mjs';
-import { parseLocalReport, validatePluginResult, verifyLocalReport } from './review-evidence-source.mjs';
+import { parseLocalReport, validatePluginResult, verifyLocalReport, publicationModules } from './review-evidence-source.mjs';
+import { assessMerge, runMergeTool } from './merge-pr-core.mjs';
 import { parsePluginArgs, collectPluginResult, findingsFromText, runPluginPublication } from './review-plugin-cli.mjs';
 
 test('완료 결과 봇 게시·영수증·직접 관리자 확인을 구분하고 링크·hash·확인 내용을 생성', async () => {
@@ -120,6 +121,8 @@ test('native 플러그인 완료 기록·동일 세션·출력·판정 형식을
   assert.equal(findingsFromText('No actionable defects were found.').unknown, 0);
   assert.equal(findingsFromText('Looks good.').unknown, 1);
   assert.ok(findingsFromText('No findings. The review was skipped due to rate limit.').unknown > 0);
+  assert.equal(findingsFromText('No findings. However, permission checks are missing.').unknown, 1);
+  assert.equal(findingsFromText('No actionable defects were found. Critical bug in export.').unknown, 1);
   assert.equal(findingsFromText('- [P2] bug').medium, 1);
   for (const change of [i => { i.stored.storedJob.status = 'running'; }, i => { i.stored.storedJob.status = 'failed'; },
     i => { i.stored.storedJob.status = 'cancelled'; }, i => { i.stored.storedJob.sessionId = 'other'; },
@@ -198,8 +201,67 @@ test('wrapper 리뷰 완료 직후 원격 head 변경은 완료 결과·게시�
     await assert.rejects(runPluginPublication({ options: { repository: 'owner/repo', number: 1, session: 'session-1' }, gh: f.gh, git, plugin,
       now: () => '2026-11-09T00:00:00Z', maxPolls: 1 }), /대상 변경/);
     assert.equal(f.comments.length, 0); assert.equal(f.dispatches.length, 0);
-    assert.equal(JSON.parse(readFileSync(path)).state, 'running');
+    assert.equal(JSON.parse(readFileSync(path)).state, 'captured');
+    assert.equal(JSON.parse(readFileSync(path)).output.codex.stdout, data.output.codex.stdout);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('완료 원문·job을 검증보다 먼저 보존하고 크기/조회 실패 뒤 추가 모델 호출 없이 복구', async () => {
+  const f = localFixture(); const { target } = await f.result();
+  const directory = mkdtempSync(join(tmpdir(), 'review-captured-test-')); const path = join(directory, 'ledger.json');
+  const options = { repository: 'owner/repo', number: 1, session: 'session-1' };
+  const data = pluginFixture(target); data.output.codex.stdout = 'No findings. ' + 'x'.repeat(16_001);
+  let reviews = 0, reads = 0;
+  const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? target.head : target.base;
+  const plugin = args => { if (args[0] === 'review') { reviews++; return data.output; } if (++reads === 1) throw new Error('read failed'); return data.stored; };
+  const run = () => runPluginPublication({ options, gh: f.gh, git, plugin, maxPolls: 1, now: () => '2026-11-09T00:00:00Z', out: () => {} });
+  try {
+    await assert.rejects(run(), /read failed/);
+    assert.equal(JSON.parse(readFileSync(path)).output.codex.stdout, data.output.codex.stdout);
+    await assert.rejects(run(), error => error.code === 'review-report-too-large');
+    const captured = JSON.parse(readFileSync(path)); assert.equal(captured.stored.storedJob.id, 'job-1');
+    assert.equal(reviews, 1); assert.equal(reads, 2); assert.equal(f.dispatches.length, 0);
+    await assert.rejects(run(), error => error.code === 'review-report-too-large');
+    assert.equal(reviews, 1); assert.equal(reads, 2);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('공개 사용자가 복사한 봇 문구는 정상 보고서의 재사용·확인 생성을 막지 않음', async () => {
+  const f = localFixture(); const result = await f.result(); const p = await f.publish(result); f.finish(p);
+  f.comments.push({ ...structuredClone(f.comments[0]), id: 201, user: { id: 2, login: 'peer', type: 'User' }, performed_via_github_app: null });
+  assert.equal((await f.confirm()).commentId, 200);
+  const original = structuredClone(f.run); f.context.runId = 45;
+  f.github.rest.actions.getWorkflowRun = async ({ run_id }) => ({ data: run_id === 44 ? original : { ...original, id: 45, status: 'in_progress', conclusion: null } });
+  assert.equal((await f.publish(result)).reused, true); assert.equal(f.comments.length, 2);
+});
+
+test('게시 승인 코드 목록은 실제 로컬 import 폐쇄와 같음', () => {
+  const seen = new Set();
+  const visit = name => {
+    if (seen.has(name)) return; seen.add(name);
+    for (const match of readFileSync(new URL(`./${name}`, import.meta.url), 'utf8').matchAll(/from '\.\/([^']+)'/g)) visit(match[1]);
+  };
+  visit('review-evidence.mjs');
+  assert.deepEqual([...seen].sort(), [...publicationModules].sort());
+});
+
+test('실제 병합 adapter로 봇 근거·proof v2·High 승인·병합 후 정책 snapshot 감사를 끝까지 검증', async () => {
+  const f = localFixture(); const result = await f.result(); const p = await f.publish(result); f.finish(p);
+  const c = await f.confirm(); f.addConfirmation(c.confirmation);
+  f.fake.store.localEvidenceDigest = (await f.collect()).packet.gateEvidenceDigest;
+  const withoutApproval = await assessMerge({ gh: f.gh, git: f.fake.git, repo: 'owner/repo', number: 1, expectedHead: result.target.head });
+  assert.equal(withoutApproval.ok, false);
+  assert.ok(withoutApproval.blockers.some(message => message.includes('사용자 승인')));
+  f.comments.push({ id: 400, user: { id: 1, login: 'owner', type: 'User' }, created_at: '2026-11-10T00:04:00Z', updated_at: '2026-11-10T00:04:00Z',
+    body: `/merge-approve ${result.target.head} ${result.target.fingerprint}` });
+  f.fake.store.localEvidenceDigest = (await f.collect()).packet.gateEvidenceDigest;
+  const assessment = await assessMerge({ gh: f.gh, git: f.fake.git, repo: 'owner/repo', number: 1, expectedHead: result.target.head });
+  assert.equal(assessment.ok, true, assessment.blockers.join('; '));
+  const output = [], errors = [];
+  assert.equal(await runMergeTool({ argv: ['owner/repo', '1', 'squash', '--head', result.target.head], gh: f.gh, git: f.fake.git,
+    out: text => output.push(text), err: text => errors.push(text), sleep: async () => {}, lock: () => ({ ok: true, release() {} }) }), 0, errors.join('\n'));
+  assert.ok(output.some(s => s.includes('병합 후 감사: 게이트 근거가 병합 직전 재확인과 같음')));
+  assert.equal(f.fake.store.merged, true);
 });
 
 test('로컬 ledger가 없는 다른 checkout도 이미 등록된 원격 결과를 확인하고 리뷰를 다시 실행하지 않음', async () => {

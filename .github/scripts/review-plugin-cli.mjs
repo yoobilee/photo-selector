@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { collectReviewPacket, prepareLocalConfirmation } from './review-evidence.mjs';
 import { createEvidenceGitHub, runEvidenceCli } from './review-evidence-cli.mjs';
-import { canonical, same, validatePluginResult, parseLocalReport } from './review-evidence-source.mjs';
+import { canonical, same, validatePluginResult, parseLocalReport, isEvidencePublisher } from './review-evidence-source.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 
 export function parsePluginArgs(argv, env = process.env) {
@@ -25,8 +25,9 @@ export function findingsFromText(text) {
   const levels = ['critical', 'high', 'medium', 'low'];
   const badges = [...text.matchAll(/\[P([0-3])\]/g)];
   for (const badge of badges) findings[levels[Number(badge[1])]] += 1;
-  // 모르는 산문을 지적 0건으로 추측하지 않는다. 알 수 없는 형식은 관리자 확인이 필요하다.
-  if (!badges.length && !/^(?:No actionable defects were found\.|No findings\.|No issues found\.)/i.test(text.trim())) findings.unknown = 1;
+  // 관찰한 완료·검사 문장의 전체 문법만 허용한다. 앞부분의 지적 없음 선언만으로 뒤의 산문을 지우지 않는다.
+  const clean = /^(?:No actionable defects were found\.|No findings\.|No issues found\.)(?:\s+(?:Lint passed\.|Lint and all \d+ focused tests passed\.|Build and E2E were not run\.|The full unit run encountered a sandbox EPERM in privacyGuard; build and E2E checks were not run\.))*$/i;
+  if (!clean.test(text.trim())) findings.unknown = 1;
   if (/rate limit|usage limit|quota exceeded|review (?:was )?(?:skipped|not run)|unable to (?:complete|perform) (?:the )?review/i.test(text)) findings.unknown += 1;
   if (/\[P[^\]]*\]/.test(text.replace(/\[P[0-3]\]/g, ''))) findings.unknown += 1;
   return findings;
@@ -71,13 +72,14 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
   const lockPath = `${path}.lock`;
   const lock = openSync(lockPath, 'wx', 0o600); closeSync(lock);
   try {
-    let result;
+    let result; let captured;
     if (existsSync(path)) {
       const ledger = JSON.parse(readFileSync(path, 'utf8'));
-      if (ledger.state !== 'completed' || ledger.session !== options.session || !same(ledger.target, target)) throw new Error('이전 실행 미완료·실패·다른 세션. 리뷰를 자동 재실행하지 않음');
+      if (!['completed', 'captured'].includes(ledger.state) || ledger.session !== options.session || !same(ledger.target, target)) throw new Error('이전 실행 미완료·실패·다른 세션. 리뷰를 자동 재실행하지 않음');
       result = ledger.result;
+      if (ledger.state === 'captured') captured = ledger;
     } else {
-      const existing = initial.state.comments.some(c => {
+      const existing = initial.state.comments.filter(isEvidencePublisher).some(c => {
         try { return same(parseLocalReport(c.body).result.target, target); } catch { return false; }
       });
       if (existing) {
@@ -87,12 +89,27 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       }
       const startedAt = now();
       writeFileSync(path, JSON.stringify({ state: 'running', target, session: options.session, startedAt }), { flag: 'wx', mode: 0o600 });
-      const output = plugin(['review', '--wait', '--base', target.base, '--scope', 'branch', '--json']);
-      const stored = plugin(['result', '--json']);
+      const raw = plugin(['review', '--wait', '--base', target.base, '--scope', 'branch', '--json']);
+      const output = { review: raw.review, threadId: raw.threadId, target: raw.target, codex: { status: raw.codex?.status, stdout: raw.codex?.stdout } };
+      // 플러그인 호출 직후 원문을 먼저 저장한다. 이후 job 조회·대상·크기 검증 실패가 구독 결과를 잃게 하지 않는다.
+      captured = { state: 'captured', target, session: options.session, startedAt, output };
+      writeFileSync(path, JSON.stringify(captured), { mode: 0o600 });
+    }
+    if (captured) {
+      const { output, startedAt } = captured;
+      if (!captured.stored) {
+        const raw = plugin(['result', '--json']);
+        const job = raw.storedJob;
+        const storedOutput = job?.result;
+        captured.stored = { job: { status: raw.job?.status }, storedJob: { id: job?.id, kind: job?.kind, status: job?.status, sessionId: job?.sessionId,
+          threadId: job?.threadId, turnId: job?.turnId, createdAt: job?.createdAt, completedAt: job?.completedAt,
+          result: { review: storedOutput?.review, threadId: storedOutput?.threadId, target: storedOutput?.target, codex: { status: storedOutput?.codex?.status, stdout: storedOutput?.codex?.stdout } } } };
+        writeFileSync(path, JSON.stringify(captured), { mode: 0o600 });
+      }
       checkLocal();
       const current = await collect();
       if (!same(current.packet.target, target)) throw new Error('리뷰 실행 중 원격 대상 변경');
-      result = collectPluginResult({ output, stored, target, session: options.session, startedAt, checks: current.packet.checks });
+      result = collectPluginResult({ output, stored: captured.stored, target, session: options.session, startedAt, checks: current.packet.checks });
       validatePluginResult(result, target, 'claude');
       writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result }), { mode: 0o600 });
     }
@@ -104,7 +121,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
     // 이미 등록됐으면 성공 영수증을 확인해 재사용한다. 다른 실패는 게시기가 전체 조회 후 fail-closed로 판단한다.
     const latest = await collect();
     if (!same(latest.packet.target, target)) throw new Error('게시 직전 대상 변경');
-    const already = latest.state.comments.some(c => c.body.includes(`photo-selector-review-evidence:v2 ${sha256(canonical(result))}`));
+    const already = latest.state.comments.some(c => isEvidencePublisher(c) && c.body.includes(`photo-selector-review-evidence:v2 ${sha256(canonical(result))}`));
     if (!already && !JSON.parse(readFileSync(path, 'utf8')).publicationRequested) {
       // 응답을 잃어도 같은 대상의 dispatch를 자동 재요청하지 않도록 먼저 기록한다.
       writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, publicationRequested: true }), { mode: 0o600 });
@@ -142,7 +159,8 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
         env: { ...process.env, CODEX_COMPANION_SESSION_ID: options.session },
       }));
       process.exitCode = await runPluginPublication({ options, gh: command('gh'), git: command('git'), plugin });
-    } catch {
+    } catch (error) {
+      if (error.code === 'review-report-too-large') console.error('리뷰 원문이 16000바이트를 초과했습니다. .git의 captured ledger에 원문·job을 보존했으며 자동 게시하지 않습니다.');
       console.error('리뷰 수집/게시 중단. 완료·대상·형식·기존 ledger와 Actions를 확인하세요. 자동 재시도·추가 AI 호출·관리자 확인·승인은 하지 않습니다. 원시 오류는 출력하지 않습니다.');
       process.exitCode = 1;
     }

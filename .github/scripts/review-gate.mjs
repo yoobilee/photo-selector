@@ -22,7 +22,7 @@ export function permissionReader({ github, repo }) {
 
 // 확인 댓글·연결된 보고서·변경 요청 리뷰·High 승인 댓글을 골라 판정 입력과 근거 digest를 만든다.
 // 게이트 판정, 병합 도구의 실행 직전 재확인과 병합 후 감사가 같은 함수를 쓴다.
-export async function collectReviewBasis({ repo, number, comments, reviews, permission, canConfirm, github, pr }) {
+export async function collectReviewBasis({ repo, number, comments, reviews, permission, canConfirm, github, pr, approvedRef }) {
   const withRole = async comment => ({ comment, role: await permission(comment.user) });
   let confirmation; let confirmationComment = null;
   for (const candidate of comments.filter(comment => /^\/review-gate(?:\s|$)/.test(comment.body ?? '')).sort((a,b)=>Number(b.id)-Number(a.id))) {
@@ -37,7 +37,7 @@ export async function collectReviewBasis({ repo, number, comments, reviews, perm
     if (!report) throw new Error('유효한 관리자 보고서 없음');
     if (report.user?.type === 'Bot') {
       if (!github || !pr) throw new Error('봇 보고서 출처 검증 입력 누락');
-      const verified = await verifyLocalReport({ github, repo, pr, comment: report, fingerprint: confirmation.fingerprint });
+      const verified = await verifyLocalReport({ github, repo, pr, comment: report, fingerprint: confirmation.fingerprint, approvedRef });
       if (confirmation.reviewer !== verified.result.reviewer || !confirmation.reviewComplete
           || ['critical', 'high', 'medium', 'unknown'].some(k => verified.result.findings[k] !== 0)
           || !same(confirmation.findings, verified.result.findings)) throw new Error('봇 보고서 지적·확인 불일치');

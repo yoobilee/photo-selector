@@ -211,7 +211,7 @@ export async function publishEvidence({ github, context, request }) {
     if (!same(packet.target, request.target)) fail('등록 전 대상 변경');
     const result = validatePluginResult(request.result, packet.target, state.evaluation.description.meta['implemented-by']);
     const key = localReviewKey(result);
-    const matches = state.comments.filter(comment => comment.body.includes(`photo-selector-review-evidence:v2 ${key}`));
+    const matches = state.comments.filter(comment => isEvidencePublisher(comment) && comment.body.includes(`photo-selector-review-evidence:v2 ${key}`));
     if (matches.length > 1) fail('로컬 등록 자료 중복');
     if (matches.length === 1) {
       const verified = await verifyLocalReport({ github, repo: state.repo, pr: state.current, comment: matches[0], fingerprint: packet.target.fingerprint });
@@ -244,7 +244,7 @@ export async function publishEvidence({ github, context, request }) {
 // 게시 후 실제 댓글과 영수증을 재검증한 값만 관리자가 직접 붙여 넣을 확인 내용으로 반환한다.
 export async function prepareLocalConfirmation({ github, repository, number }) {
   const { packet, state } = await collectReviewPacket({ github, repository, number });
-  const candidates = state.comments.filter(c => c.body.startsWith('# 미인증 로컬 독립 리뷰 자료\n'));
+  const candidates = state.comments.filter(c => isEvidencePublisher(c) && normalizeNewlines(c.body).startsWith('# 미인증 로컬 독립 리뷰 자료\n'));
   const matching = candidates.filter(c => {
     try { return same(parseLocalReport(c.body).result.target, packet.target); } catch { return false; }
   });
