@@ -42,6 +42,8 @@ Actions의 해당 실행 Summary에서 `fingerprint`를 복사한다. 위험도,
 
 ## 3. 필수 독립 리뷰 완료 확인
 
+Claude 구현의 로컬 Codex 플러그인 검토는 [자동 게시 절차](../../docs/local-review-publishing.md)를 기본으로 한다. 관리자 보고서 복사는 필요 없다. `미인증 로컬 독립 리뷰 자료` 봇 댓글은 승인된 게시 workflow·코드, 정확한 작성자/앱, PR 대상, 내용 hash와 실행별 영수증을 검증한 경우에만 `/review-gate`의 근거가 된다. 영수증은 게시 경로만 증명하며, 로컬 리뷰 실행·독립성은 관리자가 실제 원문과 이력으로 확인한다. `npm run review:prepare -- owner/repo PR번호 --confirmation`이 실제 댓글 링크·해시를 포함한 확인 내용을 생성한다. 봇은 확인자·승인자가 될 수 없다. 이 도입 PR과 Claude 검토 등 기존 경로는 아래 수동 관리자 보고서 절차를 유지한다.
+
 1. 구현 Agent와 다른 리뷰 Agent를 선정하고 `.ai/prompts/independent-pr-review.md`로 실제 리뷰를 수행한다. 보고서에는 현재 base/head SHA와 실행·완료 여부가 포함되어야 한다.
 2. 관리자가 실제 리뷰 결과를 읽고 확인한 보고서를 같은 PR에 댓글로 기록한다. 첫 줄을 `# 독립 리뷰 보고서`로 쓰고 실제 보고서, 원래 결과 링크·사용 도구, base/head SHA, 확인 경로, 테스트 결과와 남은 위험을 포함한다. 보고서를 읽지 않고 Agent의 자체 보고를 옮기는 것만으로 완료하지 않는다.
 3. 그 댓글로 실행된 게이트 Summary에서 최신 fingerprint, 보고서 댓글 ID와 SHA-256을 확인한다.
@@ -75,6 +77,7 @@ check run의 앱 고정만으로 같은 GitHub Actions 앱을 쓰는 다른 work
 게이트는 check의 `external_id`에 proof v2 `{"v":2,"pr","fingerprint","evidenceDigest","runId","attempt"}`를 기록한다. `evidenceDigest`는 `review-gate-core.mjs`의 `gateEvidence`가 판정 근거를 정렬된 JSON으로 만든 SHA-256이다.
 
 - 근거에 들어가는 것:
+  - 로컬 봇 보고서인 경우 승인된 게시 run·artifact ID/digest·workflow SHA도 포함한다. 출처 재검증 실패·영수증 만료/삭제는 통과가 아니다.
   - 최신 `/review-gate` 확인 댓글과 확인 댓글이 링크한 보고서: 각각 ID, 작성자 ID·login·유형, 작성·수정 시각, 본문 SHA-256, 작성자의 현재 저장소 권한
   - `admin`·`maintain`이 작성한 `/merge-approve` 댓글: 같은 정보
   - 해제되지 않은 변경 요청 리뷰: ID, 작성자 ID, 상태, 작성자의 현재 권한

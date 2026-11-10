@@ -97,7 +97,8 @@ export function gateEvidence({ confirmation = null, report = null, approvals = [
     const { comment: value, role } = item;
     if (!Number.isSafeInteger(value?.id) || !Number.isSafeInteger(value.user?.id) || typeof value.user.login !== 'string' || typeof value.user.type !== 'string'
         || !isIsoTime(value.created_at) || !isIsoTime(value.updated_at) || typeof value.body !== 'string' || typeof role !== 'string') throw new Error('근거 댓글 형식 오류');
-    return { id: value.id, userId: value.user.id, login: value.user.login, type: value.user.type, createdAt: value.created_at, updatedAt: value.updated_at, bodyHash: sha256(value.body), role };
+    return { id: value.id, userId: value.user.id, login: value.user.login, type: value.user.type, createdAt: value.created_at, updatedAt: value.updated_at, bodyHash: sha256(value.body), role,
+      ...(item.provenance ? { provenance: item.provenance } : {}) };
   };
   const review = item => {
     const { review: value, role } = item;
@@ -142,7 +143,7 @@ export function decide(description, confirmation, evidence) {
   }
   if (counts.critical || counts.high || counts.medium) return { state: 'failure', reason: '미해결 차단 지적 또는 medium 사람 판단 필요' };
   const evidenceBody = evidence && normalizeNewlines(evidence.body);
-  if (!evidence || !isReportBody(evidenceBody) || evidence.hash !== reportHash(evidenceBody) || evidence.hash !== confirmation.evidenceHash
+  if (!evidence || !(isReportBody(evidenceBody) || evidence.publisherVerified === true) || evidence.hash !== reportHash(evidenceBody) || evidence.hash !== confirmation.evidenceHash
       || !evidenceBody.includes(description.head) || !evidenceBody.includes(description.base)) {
     return { state: 'failure', reason: '리뷰 근거 누락·변경 또는 대상 SHA 불일치' };
   }

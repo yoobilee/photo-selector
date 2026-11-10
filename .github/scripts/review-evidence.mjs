@@ -1,6 +1,7 @@
 import { describe, normalizeNewlines, parseConfirmation, reportHash, sha256, validateConfig, assertPullRequestUnchanged } from './review-gate-core.mjs';
 import { evaluatePR } from './review-gate.mjs';
 import { evaluateCodexReview, evaluateRequiredChecks } from './review-shadow-core.mjs';
+import { validatePluginResult, localReviewKey, renderLocalReport, parseLocalReport, verifyLocalReport, receiptName } from './review-evidence-source.mjs';
 
 export const evidenceWorkflow = '.github/workflows/review-evidence.yml';
 export const maxRequestBytes = 60_000;
@@ -81,6 +82,7 @@ async function readState({ github, repository, number }) {
 
 // 로컬 세션 파일은 실행 증명이 아니라 제출자의 주장이다. 기존 관리자 확인을 대체하지 않는다.
 export function validateLocalResult(input, target, description) {
+  if (input?.v === 2) return { ...validatePluginResult(input, target, description.meta['implemented-by']), authentication: 'unverified-local-session' };
   if (!exactKeys(input, ['v', 'target', 'role', 'reviewer', 'status', 'reviewComplete', 'findings', 'report', 'source'])
       || input.v !== 1 || !same(input.target, target)) fail('리뷰 결과 형식 오류 또는 오래된 대상');
   if (!['self', 'independent'].includes(input.role) || !['claude', 'codex'].includes(input.reviewer)
@@ -199,12 +201,33 @@ export async function publishEvidence({ github, context, request }) {
   if (!exactKeys(request, ['v', 'target', 'collectionHash', 'result']) || request.v !== 1
       || (request.result !== null && (typeof request.result !== 'object' || Array.isArray(request.result)))
       || Buffer.byteLength(JSON.stringify(request), 'utf8') > maxRequestBytes) fail('등록 요청 형식 또는 크기 오류');
-  if (request.result !== null) fail('미인증 로컬 결과는 게시할 수 없음');
+  if (request.result !== null && request.result?.v !== 2) fail('미인증 로컬 결과는 게시할 수 없음');
   if (typeof context.requestedNumber !== 'string' || !/^[1-9][0-9]*$/.test(context.requestedNumber)
       || context.requestedNumber !== String(request.target?.number)) fail('workflow PR 번호와 자료 대상 불일치');
   const repository = await assertPublisherWorkflow({ github, context });
   if (request.target?.repository !== repository) fail('다른 저장소 등록 요청');
   const { packet, state } = await collectReviewPacket({ github, repository, number: request.target.number, result: request.result });
+  if (request.result?.v === 2) {
+    if (!same(packet.target, request.target)) fail('등록 전 대상 변경');
+    const result = validatePluginResult(request.result, packet.target, state.evaluation.description.meta['implemented-by']);
+    const key = localReviewKey(result);
+    const matches = state.comments.filter(comment => comment.body.includes(`photo-selector-review-evidence:v2 ${key}`));
+    if (matches.length > 1) fail('로컬 등록 자료 중복');
+    if (matches.length === 1) {
+      const verified = await verifyLocalReport({ github, repo: state.repo, pr: state.current, comment: matches[0], fingerprint: packet.target.fingerprint });
+      if (!same(verified.result, result)) fail('기존 로컬 결과 불일치');
+      return { ...renderLocalReport(result, verified.runId), commentId: matches[0].id,
+        commentUrl: matches[0].html_url, reused: true, approved: false };
+    }
+    if (packet.collectionHash !== request.collectionHash) fail('등록 전 근거 변경');
+    const report = renderLocalReport(result, context.runId);
+    // 쓰기 직전에 PR 전체 상태를 다시 읽는다. 실패·불명확한 쓰기는 자동 재시도하지 않는다.
+    assertPullRequestUnchanged(state.current, (await github.rest.pulls.get({ ...state.repo, pull_number: packet.target.number })).data);
+    const created = (await github.rest.issues.createComment({ ...state.repo, issue_number: packet.target.number, body: report.body })).data;
+    if (!positiveId(created?.id) || !isEvidencePublisher(created) || normalizeNewlines(created.body) !== report.body) fail('로컬 댓글 게시 결과 불명확');
+    return { ...report, commentId: created.id, commentUrl: `https://github.com/${repository}/pull/${packet.target.number}#issuecomment-${created.id}`,
+      receiptName: receiptName(created.id, report.evidenceHash), reused: false, approved: false };
+  }
   if (!same(packet.target, request.target) || packet.collectionHash !== request.collectionHash) fail('등록 전 대상·근거 변경');
   if (!['trusted-bot-api', 'legacy-gate-verified'].includes(packet.result?.authentication)) fail('게시 가능한 검증된 리뷰 근거 없음');
   const report = renderEvidenceReport(packet);
@@ -216,4 +239,23 @@ export async function publishEvidence({ github, context, request }) {
   const created = (await github.rest.issues.createComment({ ...state.repo, issue_number: packet.target.number, body: report.body })).data;
   if (!positiveId(created?.id) || !isEvidencePublisher(created) || normalizeNewlines(created.body) !== report.body) fail('보고서 게시 결과 확인 실패. 재시도 전 실제 PR 댓글 확인 필요');
   return { ...report, commentId: created.id, reused: false, approved: false };
+}
+
+// 게시 후 실제 댓글과 영수증을 재검증한 값만 관리자가 직접 붙여 넣을 확인 내용으로 반환한다.
+export async function prepareLocalConfirmation({ github, repository, number }) {
+  const { packet, state } = await collectReviewPacket({ github, repository, number });
+  const candidates = state.comments.filter(c => c.body.startsWith('# 미인증 로컬 독립 리뷰 자료\n'));
+  const matching = candidates.filter(c => {
+    try { return same(parseLocalReport(c.body).result.target, packet.target); } catch { return false; }
+  });
+  if (matching.length !== 1) fail('최신 로컬 보고서 누락·중복');
+  const comment = matching[0];
+  const verified = await verifyLocalReport({ github, repo: state.repo, pr: state.current, comment, fingerprint: packet.target.fingerprint });
+  if (state.evaluation.blocked || ['critical', 'high', 'medium', 'unknown'].some(k => verified.result.findings[k] !== 0)) fail('미해결 차단 지적');
+  const confirmation = { fingerprint: packet.target.fingerprint, decision: 'pass', reviewer: verified.result.reviewer, reviewComplete: true,
+    evidence: `https://github.com/${repository}/pull/${number}#issuecomment-${comment.id}`, evidenceHash: reportHash(comment.body),
+    findings: verified.result.findings };
+  return { target: packet.target, commentId: comment.id, commentUrl: confirmation.evidence, evidenceHash: confirmation.evidenceHash,
+    provenance: 'unverified-local-session', publisher: verified, confirmation,
+    text: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation, null, 2)}\n\`\`\``, approved: false };
 }

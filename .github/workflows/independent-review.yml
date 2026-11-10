@@ -14,6 +14,7 @@ on:
   push:
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
   issues: read

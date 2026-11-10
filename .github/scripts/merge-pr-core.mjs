@@ -35,7 +35,7 @@ export function parseArgs(argv) {
 
 // 병합 도구가 실행하는 판정 코드. 실제 병합 전에 기본 브랜치에 승인된 내용과 같은지 확인한다.
 // 이 목록과 실제 import 관계가 같은지는 테스트가 확인한다.
-export const trustedModules = ['merge-pr.mjs', 'merge-pr-core.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-gate-source.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
+export const trustedModules = ['merge-pr.mjs', 'merge-pr-core.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-gate-source.mjs', 'review-evidence-source.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
 // Git blob SHA. 작업 트리의 CRLF 변환(core.autocrlf)만 되돌려 저장소에 기록된 LF 내용과 비교한다.
 export function gitBlobSha(text) {
   const content = Buffer.from(text.replace(/\r\n/g, '\n'), 'utf8');
@@ -91,6 +91,7 @@ export function createGitHub({ gh, repo }) {
       },
       issues: { listComments: many(`repos/${repo}/issues/:issue_number/comments`) },
       repos: {
+        get: one(`repos/${repo}`), getContent: one(`repos/${repo}/contents/:path?ref=:ref`),
         getCollaboratorPermissionLevel: one(`repos/${repo}/collaborators/:username/permission`),
         compareCommitsWithBasehead: one(`repos/${repo}/compare/:basehead?per_page=1`),
       },
@@ -98,6 +99,8 @@ export function createGitHub({ gh, repo }) {
         listForRef: many(`repos/${repo}/commits/:ref/check-runs?filter=all`, 'check_runs'),
         listSuitesForRef: many(`repos/${repo}/commits/:ref/check-suites`, 'check_suites'),
       },
+      actions: { getWorkflowRun: one(`repos/${repo}/actions/runs/:run_id`), getWorkflow: one(`repos/${repo}/actions/workflows/:workflow_id`),
+        listWorkflowRunArtifacts: many(`repos/${repo}/actions/runs/:run_id/artifacts`, 'artifacts') },
     },
     graphql: async (query, variables) => {
       const args = ['api', 'graphql', '-f', `query=${query}`];
@@ -385,7 +388,7 @@ function cleanupLocal({ git, repo, branch, head, defaultBranch }) {
 
 // 병합 직후 게이트 근거를 다시 조회해 병합 직전 재확인의 digest와 비교한다. 같으면 true, 다르면 false, 확인할 수 없으면 오류.
 // 병합된 PR에는 기존 게이트 평가(열린 PR 전용)를 쓸 수 없으므로 근거 수집 함수만 같은 것을 쓴다.
-async function evidenceUnchangedAfterMerge({ github, repo, number, expectedDigest }) {
+async function evidenceUnchangedAfterMerge({ github, repo, number, expectedDigest, expectedPr }) {
   const [owner, name] = repo.split('/');
   const repoRef = { owner, repo: name };
   const comments = github.list(`repos/${repo}/issues/${number}/comments`);
@@ -394,7 +397,7 @@ async function evidenceUnchangedAfterMerge({ github, repo, number, expectedDiges
   const now = github.api(`repos/${repo}/pulls/${number}`);
   if (!Number.isSafeInteger(now.comments) || comments.length !== now.comments) throw new Error('댓글 전체 조회 실패');
   const { permission, canConfirm } = permissionReader({ github, repo: repoRef });
-  const basis = await collectReviewBasis({ repo: repoRef, number, comments, reviews, permission, canConfirm });
+  const basis = await collectReviewBasis({ repo: repoRef, number, comments, reviews, permission, canConfirm, github, pr: expectedPr });
   return basis.gateEvidence.digest === expectedDigest;
 }
 
@@ -438,7 +441,7 @@ async function mergeAndCleanup({ gh, git, repo, number, assessment, out, err, sl
   // 병합 후 감사: 마지막 재확인과 병합 API 사이의 근거 변경은 막을 수 없으므로 사후에 감지한다.
   // 다르거나 확인할 수 없으면 되돌리지 않고, 사람이 조사할 수 있도록 브랜치 정리도 하지 않는다.
   let unchanged;
-  try { unchanged = await evidenceUnchangedAfterMerge({ github, repo, number, expectedDigest: assessment.evidenceDigest }); } catch { unchanged = null; }
+    try { unchanged = await evidenceUnchangedAfterMerge({ github, repo, number, expectedDigest: assessment.evidenceDigest, expectedPr: pr }); } catch { unchanged = null; }
   if (unchanged !== true) {
     err(unchanged === false
       ? '[심각] 병합 후 감사: 게이트 근거(확인 댓글·보고서·High 승인·작성자 권한·변경 요청 리뷰)가 병합 직전 재확인과 다릅니다. 마지막 재확인과 병합 사이에 근거가 바뀌었을 수 있습니다.'
