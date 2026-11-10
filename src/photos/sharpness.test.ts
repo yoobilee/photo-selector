@@ -327,6 +327,55 @@ describe('blur cause and long camera shake', { timeout: 60_000 }, () => {
   })
 })
 
+// 판정 근거 부족이면 1/2 크기에서 다시 본다(판정 규칙 3). 실제 사진 평가(docs/sharpness-real-photo-evaluation.md)에서 채택했다.
+describe('half-scale retry for undecidable photos', { timeout: 60_000 }, () => {
+  const fullScaleOnly = (measurement: SharpnessMeasurement) => classifySharpness({ ...measurement, halfScale: null })
+
+  // 강한 초점 흐림은 1/4 크기의 큰 윤곽까지 약해져 약한 잡음만으로도 잡음 기준을 넘지 못한다(분석 불가였다).
+  it('flags strong defocus that the analysis size alone could not judge because of mild noise', () => {
+    for (const seed of SEEDS) {
+      const measurement = measureSharpness(addNoise(gaussianBlur(renderScene(1024, 768, seed), 6), 0.6, seed))
+      expect(fullScaleOnly(measurement), `seed ${seed}`).toBe('low-detail')
+      expect(measurement.halfScale, `seed ${seed}`).not.toBeNull()
+      expect([classifySharpness(measurement), estimateBlurCause(measurement)], `seed ${seed}`).toEqual(['blurry', 'defocus'])
+    }
+  })
+
+  it('measures the half scale only when the analysis size could not decide and the half image is large enough', () => {
+    expect(measureSharpness(gaussianBlur(scene(1), 0.8)).halfScale).toBeNull()
+    expect(measureSharpness(gaussianBlur(scene(1), 3)).halfScale).toBeNull()
+    expect(measureSharpness(renderUniform(WIDTH, HEIGHT)).halfScale).not.toBeNull()
+    // 1/2로 줄이면 짧은 변이 64화소보다 작다.
+    expect(measureSharpness(renderUniform(120, 100)).halfScale).toBeNull()
+    expect(classifySharpness(measureSharpness(renderUniform(120, 100)))).toBe('low-detail')
+  })
+
+  it('accepts only a half-scale blur backed by consistent cause evidence and never a half-scale sharp verdict', () => {
+    const undecided = createMeasurement({ score: null, hasUnjudgedDirection: true })
+    const defocused = createMeasurement({ score: 0.012, directionScores: [0.012, 0.013, 0.016, 0.017], isotropicBlurRegions: 20 })
+    expect(classifySharpness({ ...undecided, halfScale: defocused })).toBe('blurry')
+    expect(estimateBlurCause({ ...undecided, halfScale: defocused })).toBe('defocus')
+
+    const shaken = createMeasurement({
+      score: 0.09,
+      directionScores: [null, 0.09, 0.08, 0.08],
+      shake: { direction: 0, regions: 12, rows: 5, columns: 6, contradictingRegions: 0 },
+      isotropicBlurRegions: 2,
+    })
+    expect(classifySharpness({ ...undecided, halfScale: shaken })).toBe('blurry')
+    expect(estimateBlurCause({ ...undecided, halfScale: shaken })).toBe('shake')
+
+    // 한 방향만 흐리고 다른 방향은 뚜렷하게 선명하다(흐린 배경 위 줄무늬처럼 장면의 방향성일 수 있다).
+    const oneDirection = createMeasurement({ score: 0.01, directionScores: [0.01, 0.1, 0.06, 0.06], isotropicBlurRegions: 0 })
+    expect(classifySharpness({ ...undecided, halfScale: oneDirection })).toBe('low-detail')
+    // 1/2 크기에서 선명해도 원래 크기의 흐림을 숨겼을 수 있으므로 선명으로 바꾸지 않는다.
+    const sharpHalf = createMeasurement({ score: 0.2, directionScores: [0.2, 0.2, 0.3, 0.3] })
+    expect(classifySharpness({ ...undecided, halfScale: sharpHalf })).toBe('low-detail')
+    // 분석 크기에서 판정했다면 1/2 크기 측정값은 판정에 쓰지 않는다.
+    expect(classifySharpness({ ...createMeasurement({ score: 0.2, directionScores: [0.2, 0.2, 0.3, 0.3] }), halfScale: defocused })).toBe('sharp')
+  })
+})
+
 describe('shake evidence rules', () => {
   // 모든 근거가 일치하는 측정값. 하나씩 어긋나게 해 각 근거가 독립적으로 흔들림 판정을 막는지 확인한다.
   const consistent = createMeasurement({
