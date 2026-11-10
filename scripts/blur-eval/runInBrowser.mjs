@@ -80,6 +80,7 @@ if (args['cache-dir']) await mkdir(args['cache-dir'], { recursive: true })
 const exists = (path) => access(path).then(() => true, () => false)
 
 const results = []
+let cacheFailures = 0
 const started = performance.now()
 for (const [index, item] of items.entries()) {
   const token = `p${index}`
@@ -120,8 +121,15 @@ for (const [index, item] of items.entries()) {
         }
       }
       let cache = null
+      let cacheFailed = false
       if (wantCache) {
-        const image = maxEdge ? await decodeAt(maxEdge) : await decoder.decodeAnalysisImage(file, decoder.createContext)
+        // 캐시는 부가 산출물이다. 디코딩할 수 없는 사진은 제품 경로 결과(분석 불가 failed)를 그대로 남기고 캐시만 건너뛴다.
+        let image = null
+        try {
+          image = maxEdge ? await decodeAt(maxEdge) : await decoder.decodeAnalysisImage(file, decoder.createContext)
+        } catch {
+          cacheFailed = true
+        }
         if (image) {
           const fixed = new Uint16Array(image.pixels.length)
           for (let i = 0; i < fixed.length; i += 1) fixed[i] = Math.round(image.pixels[i] * 256)
@@ -131,7 +139,7 @@ for (const [index, item] of items.entries()) {
           cache = { width: image.width, height: image.height, base64: btoa(binary) }
         }
       }
-      return { result, measurement, analysisMs, cache }
+      return { result, measurement, analysisMs, cache, cacheFailed }
     },
     { url: `http://localhost:${port}/__eval/${token}`, wantCache, maxEdge },
   )
@@ -139,15 +147,24 @@ for (const [index, item] of items.entries()) {
     await writeFile(cachePath, Buffer.from(row.cache.base64, 'base64'))
     await writeFile(`${cachePath}.json`, JSON.stringify({ width: row.cache.width, height: row.cache.height }))
   }
-  results.push({ id: item.id, result: row.result, measurement: row.measurement, analysisMs: row.analysisMs })
+  if (row.cacheFailed) {
+    cacheFailures += 1
+    console.log(`cache skipped (decode failed): ${item.id}`)
+  }
+  // 축소 비교 모드는 제품 판정을 하지 않으므로 결과 행을 남기지 않는다.
+  if (!maxEdge) results.push({ id: item.id, result: row.result, measurement: row.measurement, analysisMs: row.analysisMs })
   if ((index + 1) % 50 === 0) console.log(`${args.browser}: ${index + 1}/${items.length}`)
 }
 const totalSeconds = (performance.now() - started) / 1000
 
 await writeFile(
   args.out,
-  JSON.stringify({ browser: args.browser, device: args.browser === 'webkit' ? 'iPhone 15 (Playwright WebKit)' : 'Desktop Chrome', userAgent, analysisPath, totalSeconds, results }, null, 1),
+  JSON.stringify(
+    { browser: args.browser, device: args.browser === 'webkit' ? 'iPhone 15 (Playwright WebKit)' : 'Desktop Chrome', userAgent, analysisPath, totalSeconds, cacheFailures, results },
+    null,
+    1,
+  ),
 )
 await browser.close()
 await server.close()
-console.log(`done ${results.length} photos in ${totalSeconds.toFixed(1)}s → ${args.out}`)
+console.log(`done ${results.length} photos (cache failures ${cacheFailures}) in ${totalSeconds.toFixed(1)}s → ${args.out}`)
