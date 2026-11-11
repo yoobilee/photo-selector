@@ -9,6 +9,13 @@ import { gitBlobSha } from './merge-pr-core.mjs';
 export function localFixture() {
   const fake = createFake({ risk: 'high', implementedBy: 'claude', gate: false, approval: 'none', codex: 'none', requests: 0 });
   const comments = []; const artifacts = []; const dispatches = [];
+  // ref별 게시 코드 버전을 지정한다. 지정한 경로의 ref가 누락되면 SHA도 누락되어 fail-closed로 검증된다.
+  const codeVersions = new Map();
+  const contentRequests = [];
+  const codeSha = (path, ref, fallback) => {
+    contentRequests.push({ path, ref });
+    return codeVersions.has(path) ? codeVersions.get(path).get(ref) : fallback;
+  };
   const gh = args => {
     if (args[0] === 'workflow') { dispatches.push(JSON.parse(readFileSync(args.at(-1).slice('request=@'.length), 'utf8'))); return ''; }
     if (args[0] !== 'api') return fake.gh(args);
@@ -16,10 +23,11 @@ export function localFixture() {
     if (args[1] === `repos/${repo}/actions/workflows/review-evidence.yml`) return JSON.stringify({ id: 9, path: evidenceWorkflow });
     if (args[1].startsWith(`repos/${repo}/actions/runs/44/artifacts`)) return JSON.stringify([{ artifacts }]);
     if (args[1].startsWith(`repos/${repo}/contents/.github/scripts/`)) {
-      const name = args[1].split('/scripts/')[1].split('?')[0];
-      return JSON.stringify({ sha: gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')) });
+      const url = new URL(args[1], 'https://api.github.com/');
+      const name = url.pathname.split('/scripts/')[1];
+      return JSON.stringify({ sha: codeSha(`.github/scripts/${name}`, url.searchParams.get('ref'), gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'))) });
     }
-    if (args[1].startsWith(`repos/${repo}/contents/${evidenceWorkflow}`)) return JSON.stringify({ sha: 'c'.repeat(40) });
+    if (args[1].startsWith(`repos/${repo}/contents/${evidenceWorkflow}`)) return JSON.stringify({ sha: codeSha(evidenceWorkflow, new URL(args[1], 'https://api.github.com/').searchParams.get('ref'), 'c'.repeat(40)) });
     const policy = args[1].includes('/contents/.ai/review-config.json');
     const value = JSON.parse(fake.gh(policy ? ['api', `repos/${repo}/contents/.ai/review-config.json?ref=main`] : args));
     if (args[1] === `repos/${repo}`) { value.full_name = repo; value.id = 12; }
@@ -41,7 +49,7 @@ export function localFixture() {
   github.rest.actions = { getWorkflowRun: async () => ({ data: run }), getWorkflow: async () => ({ data: { id: 9, path: evidenceWorkflow } }),
     listWorkflowRunArtifacts: async () => ({ data: artifacts }) };
   const original = github.rest.repos.getContent;
-  github.rest.repos.getContent = args => args.path.startsWith('.github/') ? { data: { sha: 'c'.repeat(40) } } : original(args);
+  github.rest.repos.getContent = args => args.path.startsWith('.github/') ? { data: { sha: codeSha(args.path, args.ref, 'c'.repeat(40)) } } : original(args);
   github.rest.issues.createComment = async ({ body }) => {
     const comment = { id: 200 + comments.length, user: { id: 41898282, login: 'github-actions[bot]', type: 'Bot' },
       performed_via_github_app: { id: 15368 }, created_at: '2026-11-10T00:01:00Z', updated_at: '2026-11-10T00:01:00Z', body,
@@ -68,5 +76,5 @@ export function localFixture() {
   const confirm = () => prepareLocalConfirmation({ github, repository: repo, number: 1 });
   const addConfirmation = confirmation => comments.push({ id: 300, user: { id: 1, login: 'owner', type: 'User' },
     created_at: '2026-11-10T00:03:00Z', updated_at: '2026-11-10T00:03:00Z', body: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\`` });
-  return { fake, gh, github, run, context, comments, artifacts, dispatches, collect, result, request, publish, finish, confirm, addConfirmation };
+  return { fake, gh, github, run, context, comments, artifacts, dispatches, codeVersions, contentRequests, collect, result, request, publish, finish, confirm, addConfirmation };
 }

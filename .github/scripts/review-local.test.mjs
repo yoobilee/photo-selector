@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localFixture } from './review-local-fixture.mjs';
 import { publishEvidence } from './review-evidence.mjs';
-import { parseLocalReport, validatePluginResult, verifyLocalReport, publicationModules } from './review-evidence-source.mjs';
+import { parseLocalReport, validatePluginResult, verifyLocalReport, publicationModules, evidenceWorkflow } from './review-evidence-source.mjs';
 import { assessMerge, runMergeTool } from './merge-pr-core.mjs';
 import { parsePluginArgs, collectPluginResult, findingsFromText, runPluginPublication } from './review-plugin-cli.mjs';
 
@@ -243,6 +243,41 @@ test('게시 승인 코드 목록은 실제 로컬 import 폐쇄와 같음', () 
   };
   visit('review-evidence.mjs');
   assert.deepEqual([...seen].sort(), [...publicationModules].sort());
+});
+
+test('게시 코드 전체에서 승인 기준 커밋과 실행 커밋의 SHA 불일치·누락·형식 오류를 차단', async () => {
+  for (const path of [evidenceWorkflow, ...publicationModules.map(name => `.github/scripts/${name}`)]) {
+    const f = localFixture(); const result = await f.result(); const published = await f.publish(result); f.finish(published);
+    const pr = (await f.github.rest.pulls.get({ pull_number: 1 })).data;
+    const approved = pr.base.sha;
+    const executed = f.run.head_sha;
+    const versions = new Map([[approved, '1'.repeat(40)], [executed, '2'.repeat(40)], ['main', '1'.repeat(40)]]);
+    f.codeVersions.set(path, versions);
+    const verify = () => verifyLocalReport({ github: f.github, repo: f.context.repo, pr, comment: f.comments[0], fingerprint: result.target.fingerprint, approvedRef: approved });
+    await assert.rejects(verify(), /게시 코드 승인 버전 불일치/, path);
+    versions.set(executed, '1'.repeat(40));
+    assert.equal((await verify()).runId, f.run.id, path);
+    versions.delete(executed);
+    await assert.rejects(verify(), /게시 코드 승인 버전 불일치/, `${path}: missing execution SHA`);
+    versions.set(executed, 'invalid-sha');
+    await assert.rejects(verify(), /게시 코드 승인 버전 불일치/, `${path}: malformed execution SHA`);
+    versions.set(executed, '1'.repeat(40)); versions.delete(approved);
+    await assert.rejects(verify(), /게시 코드 승인 버전 불일치/, `${path}: missing approved SHA`);
+  }
+});
+
+test('게시 코드 snapshot은 최신 main 대신 승인 기준 커밋과 실행 커밋을 대조', async () => {
+  const f = localFixture(); const result = await f.result(); const published = await f.publish(result); f.finish(published);
+  const pr = (await f.github.rest.pulls.get({ pull_number: 1 })).data;
+  const approved = pr.base.sha;
+  const executed = f.run.head_sha;
+  const paths = [evidenceWorkflow, ...publicationModules.map(name => `.github/scripts/${name}`)];
+  for (const path of paths) f.codeVersions.set(path, new Map([[approved, '1'.repeat(40)], [executed, '1'.repeat(40)], ['main', '2'.repeat(40)]]));
+  f.contentRequests.length = 0;
+  const params = { github: f.github, repo: f.context.repo, pr, comment: f.comments[0], fingerprint: result.target.fingerprint };
+  assert.equal((await verifyLocalReport({ ...params, approvedRef: approved })).runId, f.run.id);
+  assert.deepEqual(f.contentRequests.filter(request => paths.includes(request.path)), paths.flatMap(path => [{ path, ref: approved }, { path, ref: executed }]));
+  await assert.rejects(verifyLocalReport(params), /게시 코드 승인 버전 불일치/);
 });
 
 test('실제 병합 adapter로 봇 근거·proof v2·High 승인·병합 후 정책 snapshot 감사를 끝까지 검증', async () => {
