@@ -11,10 +11,12 @@ export function localFixture() {
   const comments = []; const artifacts = []; const dispatches = [];
   // ref별 게시 코드 버전을 지정한다. 지정한 경로의 ref가 누락되면 SHA도 누락되어 fail-closed로 검증된다.
   const codeVersions = new Map();
+  const mergedCodeVersions = new Map();
   const contentRequests = [];
   const codeSha = (path, ref, fallback) => {
     contentRequests.push({ path, ref });
-    return codeVersions.has(path) ? codeVersions.get(path).get(ref) : fallback;
+    const versions = fake.store.merged && mergedCodeVersions.has(path) ? mergedCodeVersions : codeVersions;
+    return versions.has(path) ? versions.get(path).get(ref) : fallback;
   };
   const gh = args => {
     if (args[0] === 'workflow') { dispatches.push(JSON.parse(readFileSync(args.at(-1).slice('request=@'.length), 'utf8'))); return ''; }
@@ -76,5 +78,5 @@ export function localFixture() {
   const confirm = () => prepareLocalConfirmation({ github, repository: repo, number: 1 });
   const addConfirmation = confirmation => comments.push({ id: 300, user: { id: 1, login: 'owner', type: 'User' },
     created_at: '2026-11-10T00:03:00Z', updated_at: '2026-11-10T00:03:00Z', body: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\`` });
-  return { fake, gh, github, run, context, comments, artifacts, dispatches, codeVersions, contentRequests, collect, result, request, publish, finish, confirm, addConfirmation };
+  return { fake, gh, github, run, context, comments, artifacts, dispatches, codeVersions, mergedCodeVersions, contentRequests, collect, result, request, publish, finish, confirm, addConfirmation };
 }

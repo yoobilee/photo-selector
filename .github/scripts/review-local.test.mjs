@@ -276,12 +276,20 @@ test('게시 코드 snapshot은 최신 main 대신 승인 기준 커밋과 실�
   f.contentRequests.length = 0;
   const params = { github: f.github, repo: f.context.repo, pr, comment: f.comments[0], fingerprint: result.target.fingerprint };
   assert.equal((await verifyLocalReport({ ...params, approvedRef: approved })).runId, f.run.id);
-  assert.deepEqual(f.contentRequests.filter(request => paths.includes(request.path)), paths.flatMap(path => [{ path, ref: approved }, { path, ref: executed }]));
+  const requests = f.contentRequests.filter(request => paths.includes(request.path));
+  assert.equal(requests.length, paths.length * 2);
+  for (const path of paths) assert.deepEqual(requests.filter(request => request.path === path).map(request => request.ref).sort(), [approved, executed].sort());
   await assert.rejects(verifyLocalReport(params), /게시 코드 승인 버전 불일치/);
 });
 
 test('실제 병합 adapter로 봇 근거·proof v2·High 승인·병합 후 정책 snapshot 감사를 끝까지 검증', async () => {
   const f = localFixture(); const result = await f.result(); const p = await f.publish(result); f.finish(p);
+  const codePath = '.github/scripts/review-evidence.mjs';
+  const approvedRef = result.target.base;
+  const executedRef = f.run.head_sha;
+  const beforeMerge = new Map([['main', '1'.repeat(40)], [approvedRef, '1'.repeat(40)], [executedRef, '1'.repeat(40)]]);
+  f.codeVersions.set(codePath, beforeMerge);
+  f.mergedCodeVersions.set(codePath, new Map([['main', '2'.repeat(40)], [approvedRef, '1'.repeat(40)], [executedRef, '1'.repeat(40)]]));
   const c = await f.confirm(); f.addConfirmation(c.confirmation);
   f.fake.store.localEvidenceDigest = (await f.collect()).packet.gateEvidenceDigest;
   const withoutApproval = await assessMerge({ gh: f.gh, git: f.fake.git, repo: 'owner/repo', number: 1, expectedHead: result.target.head });
@@ -292,11 +300,18 @@ test('실제 병합 adapter로 봇 근거·proof v2·High 승인·병합 후 정
   f.fake.store.localEvidenceDigest = (await f.collect()).packet.gateEvidenceDigest;
   const assessment = await assessMerge({ gh: f.gh, git: f.fake.git, repo: 'owner/repo', number: 1, expectedHead: result.target.head });
   assert.equal(assessment.ok, true, assessment.blockers.join('; '));
+  beforeMerge.set(executedRef, '3'.repeat(40));
+  const mismatched = await assessMerge({ gh: f.gh, git: f.fake.git, repo: 'owner/repo', number: 1, expectedHead: result.target.head });
+  assert.equal(mismatched.ok, false);
+  assert.ok(mismatched.blockers.some(message => message.includes('기존 게이트 평가 실패')));
+  beforeMerge.set(executedRef, '1'.repeat(40));
   const output = [], errors = [];
-  assert.equal(await runMergeTool({ argv: ['owner/repo', '1', 'squash', '--head', result.target.head], gh: f.gh, git: f.fake.git,
+  const gh = args => { const value = f.gh(args); if (args[0] === 'pr' && args[1] === 'merge') f.contentRequests.length = 0; return value; };
+  assert.equal(await runMergeTool({ argv: ['owner/repo', '1', 'squash', '--head', result.target.head], gh, git: f.fake.git,
     out: text => output.push(text), err: text => errors.push(text), sleep: async () => {}, lock: () => ({ ok: true, release() {} }) }), 0, errors.join('\n'));
   assert.ok(output.some(s => s.includes('병합 후 감사: 게이트 근거가 병합 직전 재확인과 같음')));
   assert.equal(f.fake.store.merged, true);
+  assert.deepEqual(f.contentRequests.filter(request => request.path === codePath).map(request => request.ref).sort(), [approvedRef, executedRef].sort());
 });
 
 test('로컬 ledger가 없는 다른 checkout도 이미 등록된 원격 결과를 확인하고 리뷰를 다시 실행하지 않음', async () => {
