@@ -9,6 +9,8 @@
 
 ## 1. 도입 시 프로젝트 설정
 
+Photo Selector의 로컬 plugin 자동 게시는 `docs/local-review-publishing.md`의 v2 미인증 자료·게시 영수증 경계를 따른다. 기존 게시 workflow가 로컬 결과를 자료로 전달하는 것은 허용하지만 독립 리뷰 실행 인증으로 승격하지 않는다. 관리자는 원문·실행·독립성을 확인한 뒤 `/review-gate`를 직접 작성하고 High의 `/merge-approve`도 직접 작성한다. 같은 계정 인증으로 사람의 입력을 기술적으로 증명할 수 없다는 한계를 유지한다. 완전한 인증 격리를 도입하려면 별도 App/비관리자 실행 인증·사람 전용 승인 환경에 대한 사용자 결정과 실제 검증이 필요하다.
+
 - 기본 게이트의 실행 설정은 `.ai/review-config.json` 하나에서 관리한다. `AGENTS.md`의 설명과 PR 라벨은 실행 설정을 대체하지 않는다.
 - 가변 설정은 위험 경로·중간 위험 검증 여부와 사람 구현 시 기본 reviewer다. 검사 이름 `independent-review`는 고정 계약이고, 결과는 GitHub Actions 앱의 check run으로 게시한다. 동명 commit status를 통과 근거로 사용하지 않는다.
 - 병합 도구는 실제 workflow 출처·검사 fingerprint를 확인하고 현재 리뷰 근거를 재평가한다. GitHub의 strict required checks와 게시 앱 고정을 함께 검증하며, 미설정·조회 실패는 병합 차단이다. 브라우저 병합은 같은 확인을 사람이 수행한다.

@@ -465,6 +465,8 @@ Claude Code로 구현한 변경은 [Codex plugin for Claude Code](https://github
 
 이 플러그인은 기존 CI, 필요한 독립 검증, PR 결과 기록과 사람 확인을 대체하지 않습니다.
 
+기존에는 로컬 리뷰 결과를 관리자가 보고서 파일에서 복사해야 했습니다. 이제 [자동 게시 wrapper](docs/local-review-publishing.md)가 같은 native 플러그인 검토 1회와 Actions 봇 게시를 연결합니다. 로컬 결과는 계속 **미인증 자료**이며, 승인된 게시 실행·댓글 해시·영수증을 확인한 뒤 관리자가 `/review-gate`와 `/merge-approve`를 직접 작성합니다. 관리자 인증 공유와 로컬 실행 인증의 한계는 해결됐다고 취급하지 않습니다.
+
 ## GitHub 리뷰 게이트
 
 기본 `independent-review` 게이트는 **AI를 호출하지 않고**, 최신 변경에 대한 리뷰 근거와 관리자의 확인 기록을 검사합니다. Codex 리뷰 실행과는 별개의 검사입니다. 자동 병합은 사용하지 않습니다.

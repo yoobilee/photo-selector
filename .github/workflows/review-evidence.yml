@@ -36,18 +36,33 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Collect and record evidence with the workflow token
+        id: publish
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             const { publishEvidence } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/review-evidence.mjs`);
             try {
               const request = JSON.parse(context.payload.inputs.request);
-              if (request?.result !== null) throw new Error('미인증 로컬 결과는 게시할 수 없음');
               const publisherContext = { repo: context.repo, eventName: context.eventName, ref: context.ref, sha: context.sha, runId: context.runId, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT), requestedNumber: context.payload.inputs.pr_number };
               const result = await publishEvidence({ github, context: publisherContext, request });
+              if (result.receiptName) {
+                const { writeFileSync } = await import('node:fs');
+                const { join } = await import('node:path');
+                writeFileSync(join(process.env.RUNNER_TEMP, 'review-evidence-receipt.json'), JSON.stringify({ commentId: result.commentId, commentUrl: result.commentUrl, evidenceHash: result.evidenceHash }), { encoding: 'utf8', flag: 'wx' });
+                core.setOutput('receipt-name', result.receiptName);
+              }
               core.summary.addHeading('리뷰 자료 기록 — 관리자 확인 아님');
               core.summary.addRaw(`보고서 댓글 ID: ${result.commentId}\n\n보고서 SHA-256: ${result.evidenceHash}\n\n중복 재사용: ${result.reused}\n`);
               await core.summary.write();
             } catch {
               core.setFailed('자료 등록 실패. 입력·전체 조회·최신성·실행 출처·기존 댓글을 확인하세요. 자동 재시도·승인하지 않습니다.');
             }
+      # 영수증 이름 자체에 댓글 ID·본문 hash를 연결한다. 로컬 리뷰 실행의 인증서는 아니다.
+      - name: Record publication receipt
+        if: steps.publish.outputs.receipt-name != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.publish.outputs.receipt-name }}
+          path: ${{ runner.temp }}/review-evidence-receipt.json
+          if-no-files-found: error
+          retention-days: 90

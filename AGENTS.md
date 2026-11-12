@@ -180,6 +180,7 @@
 - Shadow 판정(관찰용): `.ai/review-config.json`의 `shadow` 설정으로 위험도별 자동 판정 후보를 Actions Summary에만 기록한다. 기존 `independent-review` 결론·병합에 영향이 없고 별도 check를 게시하지 않는다. 신뢰할 Codex GitHub 리뷰 작성자는 `chatgpt-codex-connector[bot]`(사용자 ID 199175422, 앱 ID 1144995)이다. 구현 Agent와 관리자가 같은 GitHub 인증을 공유하므로 관리자 댓글만으로 사람의 판단을 증명할 수 없다는 위험은 해결되지 않았다.
 - 병합 도구: `.github/scripts/merge-pr.mjs`(squash만, 로컬에서 명시적으로 실행). 병합 전 `--dry-run`으로 판정을 확인한다. High는 `/review-gate` 확인과 별개로 관리자가 직접 작성한 `/merge-approve <head SHA> <fingerprint>`가 필요하다. Agent는 이 승인 댓글과 `/review-gate` 확인 댓글을 대신 작성하지 않는다. 기존 게이트 성공은 check의 proof v2 근거 digest가 지금 근거와 같을 때만 신뢰하고, 판정 코드가 기본 브랜치와 다르면 병합하지 않는다. 위험도 기준 자동 병합과 Codex 리뷰 자동 요청은 제공하지 않으며 후속 Phase에서 사용자 승인을 받은 별도 높은 위험 PR로만 도입한다.
 - AI 요청 방식: 프로젝트에서 확정, 게이트에서 자동 호출하지 않음
+- 로컬 리뷰 자동 게시: Claude 구현 PR에서는 `npm run review:publish -- owner/repo PR번호 --plugin-root <설치된 플러그인 루트> --session <현재 Claude 세션 ID>`로 기존 native reviewer 1회와 게시를 연결한다. 같은 base/head에 별도 `/codex:review`를 중복 실행하지 않는다. `docs/local-review-publishing.md`의 미인증 표시·게시 영수증·관리자 직접 확인을 유지한다. Codex 구현 PR은 이 경로를 독립 검증으로 쓰지 않는다. 관리자 보고서 수동 복사는 앞으로 기본 흐름에서 필요 없지만 `/review-gate`와 `/merge-approve`는 계속 관리자가 직접 작성한다. main 도입 전 실환경 게시를 활성화하지 않는다.
 - AI 자동 재시도: 기본 0회, 실패·한도 초과는 사람 확인
 - 동일 리뷰 식별: 저장소·PR·base/head SHA·위험도·구현 Agent·설정 fingerprint
 - 인증 토큰: 기본 게이트 미사용, 리뷰 실행 연동 시에만 Environment Secrets 사용

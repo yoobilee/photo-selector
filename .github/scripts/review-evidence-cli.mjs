@@ -1,24 +1,26 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, rmdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createGitHub } from './merge-pr-core.mjs';
-import { collectReviewPacket, reportRequest, renderEvidenceReport, maxRequestBytes } from './review-evidence.mjs';
+import { collectReviewPacket, reportRequest, renderEvidenceReport, prepareLocalConfirmation, maxRequestBytes } from './review-evidence.mjs';
 
-export const usage = '사용법: npm run review:prepare -- owner/repo PR번호 [--result 결과.json] [--output 자료.json] [--dispatch]';
+export const usage = '사용법: npm run review:prepare -- owner/repo PR번호 [--result 결과.json] [--output 자료.json] [--dispatch|--confirmation]';
 export function parseEvidenceArgs(argv) {
   const [repository, rawNumber, ...rest] = argv;
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '') || !/^[1-9][0-9]*$/.test(rawNumber ?? '')
       || !Number.isSafeInteger(Number(rawNumber))) return null;
-  const options = { repository, number: Number(rawNumber), resultPath: null, outputPath: null, dispatch: false };
+  const options = { repository, number: Number(rawNumber), resultPath: null, outputPath: null, dispatch: false, confirmation: false };
   for (let index = 0; index < rest.length; index += 1) {
     if (rest[index] === '--result' && !options.resultPath && rest[index + 1] && !rest[index + 1].startsWith('--')) options.resultPath = rest[++index];
     else if (rest[index] === '--output' && !options.outputPath && rest[index + 1] && !rest[index + 1].startsWith('--')) options.outputPath = rest[++index];
     else if (rest[index] === '--dispatch' && !options.dispatch) options.dispatch = true;
+    else if (rest[index] === '--confirmation' && !options.confirmation) options.confirmation = true;
     else return null;
   }
-  return options;
+  return options.confirmation && (options.dispatch || options.resultPath || options.outputPath) ? null : options;
 }
 
 // 읽기 전용 gh adapter를 재사용한다. 사용자 인증으로 댓글·확인·승인을 쓰는 endpoint는 추가하지 않는다.
@@ -41,8 +43,12 @@ export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = 
       if (result === null) throw new Error('결과 파일이 null임');
     }
     const github = createEvidenceGitHub(gh, options.repository);
+    if (options.confirmation) {
+      out(JSON.stringify(await prepareLocalConfirmation({ github, repository: options.repository, number: options.number }), null, 2));
+      return 0;
+    }
     const { packet, state } = await collectReviewPacket({ github, repository: options.repository, number: options.number, result });
-    const report = packet.result ? renderEvidenceReport(packet) : null;
+    const report = packet.result && packet.result.v !== 2 ? renderEvidenceReport(packet) : null;
     const text = JSON.stringify({ ...packet, report,
       localResultTemplate: { v: 1, target: packet.target, role: 'independent', reviewer: state.evaluation.description.reviewer,
         status: 'running', reviewComplete: false, findings: null, report: null, source: { kind: 'local-session', sessionId: null } },
@@ -52,19 +58,17 @@ export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = 
       out('리뷰 자료를 UTF-8 파일로 저장했습니다. 기존 파일은 덮어쓰지 않습니다.');
     } else out(text);
     if (options.dispatch) {
-      if (result !== null) throw new Error('미인증 로컬 결과는 로컬 출력만 허용');
-      if (!report) throw new Error('유효한 리뷰 결과 없음');
+      if (result !== null && result.v !== 2) throw new Error('미인증 로컬 결과는 로컬 출력만 허용');
+      if (!report && result?.v !== 2) throw new Error('유효한 리뷰 결과 없음');
       // 기본 브랜치 도입 전에는 등록을 요청하지 않는다. 임의 ref·workflow·token을 지정하는 옵션이 없다.
       await github.rest.repos.getContent({ path: '.github/workflows/review-evidence.yml', ref: state.defaultBranch });
-      const directory = mkdtempSync(join(tmpdir(), 'photo-selector-review-request-'));
-      const path = join(directory, 'request.json');
+      const path = join(tmpdir(), `photo-selector-review-request-${randomUUID()}.json`);
       try {
-        writeFileSync(path, JSON.stringify(reportRequest(packet, result)), { encoding: 'utf8', mode: 0o600 });
+        writeFileSync(path, JSON.stringify(reportRequest(packet, result)), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
         gh(['workflow', 'run', 'review-evidence.yml', '--repo', options.repository, '--ref', state.defaultBranch,
           '--field', `pr_number=${options.number}`, '--field', `request=@${path}`]);
       } finally {
         rmSync(path, { force: true });
-        rmdirSync(directory);
       }
       out('보고서 등록 workflow를 요청했습니다. 요청은 등록 완료·관리자 확인·게이트 통과가 아닙니다. 중복 요청 전 실제 실행 결과를 확인하세요.');
     }

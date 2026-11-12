@@ -362,7 +362,8 @@ test('보고서 workflow는 기본 token·기본 ref·데이터 입력만 사용
   assert.match(workflow, /requestedNumber: context\.payload\.inputs\.pr_number/);
   assert.doesNotMatch(workflow, /fromJSON/);
   assert.match(workflow, /JSON\.parse\(context\.payload\.inputs\.request\)/);
-  assert.match(workflow, /if \(request\?\.result !== null\) throw new Error/);
+  assert.match(workflow, /receipt-name/);
+  assert.match(workflow, /actions\/upload-artifact@[a-f0-9]{40}/);
   assert.doesNotMatch(workflow, /secrets\.|github-token:|pull_request_target:|checks: write|contents: write|actions: write|npm |run:|reviewPendingDeployments|\/review-gate|\/merge-approve/);
 });
 

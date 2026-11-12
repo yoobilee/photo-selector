@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, parseConfirmation, decide, validateConfig, blockingReviews, isReportBody, normalizeNewlines, reportHash, assertPullRequestUnchanged, gateEvidence, isApprovalComment } from './review-gate-core.mjs';
 import { formatShadowSummary } from './review-shadow-core.mjs';
 import { evaluateShadow } from './review-shadow.mjs';
+import { same, verifyLocalReport } from './review-evidence-source.mjs';
 
 // 저장소 권한 조회. 협업자가 아님(404)만 권한 없음으로 보고 그 밖의 실패는 그대로 던진다.
 export function permissionReader({ github, repo }) {
@@ -21,21 +22,30 @@ export function permissionReader({ github, repo }) {
 
 // 확인 댓글·연결된 보고서·변경 요청 리뷰·High 승인 댓글을 골라 판정 입력과 근거 digest를 만든다.
 // 게이트 판정, 병합 도구의 실행 직전 재확인과 병합 후 감사가 같은 함수를 쓴다.
-export async function collectReviewBasis({ repo, number, comments, reviews, permission, canConfirm }) {
+export async function collectReviewBasis({ repo, number, comments, reviews, permission, canConfirm, github, pr, approvedRef }) {
   const withRole = async comment => ({ comment, role: await permission(comment.user) });
   let confirmation; let confirmationComment = null;
   for (const candidate of comments.filter(comment => /^\/review-gate(?:\s|$)/.test(comment.body ?? '')).sort((a,b)=>Number(b.id)-Number(a.id))) {
     if (await canConfirm(candidate.user)) { confirmationComment=candidate; confirmation=parseConfirmation(candidate.body); break; }
   }
-  let evidence; let reportComment = null;
+  let evidence; let reportComment = null; let provenance = null;
   if (confirmation?.evidence) {
     const prefix=`https://github.com/${repo.owner}/${repo.repo}/pull/${number}#issuecomment-`;
     const url=confirmation.evidence;
     if (typeof url!=='string' || !url.startsWith(prefix) || !/^\d+$/.test(url.slice(prefix.length))) throw new Error('다른 PR 또는 잘못된 근거 링크');
     const report=comments.find(comment=>String(comment.id)===url.slice(prefix.length));
-    if (!report || !isReportBody(report.body) || !await canConfirm(report.user)) throw new Error('유효한 관리자 보고서 없음');
+    if (!report) throw new Error('유효한 관리자 보고서 없음');
+    if (report.user?.type === 'Bot') {
+      if (!github || !pr) throw new Error('봇 보고서 출처 검증 입력 누락');
+      const verified = await verifyLocalReport({ github, repo, pr, comment: report, fingerprint: confirmation.fingerprint, approvedRef });
+      if (confirmation.reviewer !== verified.result.reviewer || !confirmation.reviewComplete
+          || ['critical', 'high', 'medium', 'unknown'].some(k => verified.result.findings[k] !== 0)
+          || !same(confirmation.findings, verified.result.findings)) throw new Error('봇 보고서 지적·확인 불일치');
+      provenance = { key: verified.key, runId: verified.runId, artifactId: verified.artifactId,
+        artifactDigest: verified.artifactDigest, workflowSha: verified.workflowSha };
+    } else if (!isReportBody(report.body) || !await canConfirm(report.user)) throw new Error('유효한 관리자 보고서 없음');
     const reportBody=normalizeNewlines(report.body);
-    evidence={body:reportBody,hash:reportHash(reportBody)};
+    evidence={body:reportBody,hash:reportHash(reportBody), ...(provenance ? { publisherVerified: true } : {})};
     reportComment=report;
   }
   let blocked=false;
@@ -48,7 +58,7 @@ export async function collectReviewBasis({ repo, number, comments, reviews, perm
   const approvals=[];
   for (const comment of comments) if (isApprovalComment(comment.body) && await canConfirm(comment.user)) approvals.push(await withRole(comment));
   const basis=gateEvidence({
-    confirmation:confirmationComment && await withRole(confirmationComment), report:reportComment && await withRole(reportComment), approvals, blocking,
+    confirmation:confirmationComment && await withRole(confirmationComment), report:reportComment && { ...await withRole(reportComment), ...(provenance ? { provenance } : {}) }, approvals, blocking,
   });
   return {confirmation,evidence,blocked,gateEvidence:basis};
 }
@@ -70,7 +80,7 @@ export async function evaluatePR({ github, repo, pr, config, summary }) {
     }
   }
   const reviews=await github.paginate(github.rest.pulls.listReviews,{...repo,pull_number:pr.number,per_page:100});
-  const {confirmation,evidence,blocked,gateEvidence:basis}=await collectReviewBasis({repo,number:pr.number,comments,reviews,permission,canConfirm});
+  const {confirmation,evidence,blocked,gateEvidence:basis}=await collectReviewBasis({repo,number:pr.number,comments,reviews,permission,canConfirm,github,pr});
   let decision=decide(description,confirmation,evidence);
   if (blocked) decision={state:'failure',reason:'해제되지 않은 변경 요청 리뷰가 남아 있습니다.'};
   const now=(await github.rest.pulls.get({...repo,pull_number:pr.number})).data;
