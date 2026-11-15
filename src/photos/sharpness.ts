@@ -17,6 +17,8 @@
 //    큰 윤곽이 상대적으로 뚜렷해진다. 1/2 크기에서도 흐리고 원인 근거(흔들림 또는 초점 불량)가 일치하면 흐림 의심이다.
 //    1/2 크기에서 선명해도 원래 크기의 흐림을 숨겼을 수 있으므로 선명으로 바꾸지 않는다(판정 근거 부족 유지).
 //    실제 사진 평가 근거는 docs/sharpness-real-photo-evaluation.md.
+// 8. 점수가 임계값을 조금 넘었을 뿐(SHARP_CONFIRM_FACTOR배 미만)인데 초점 불량 근거(방향별 점수가 고르고 모든 방향이 흐린 구역이
+//    있음)가 함께 있으면 선명으로 확정하지 않고 판정 근거 부족으로 둔다(7의 1/2 크기 재판정 대상).
 // 임계값의 근거와 한계는 sharpness.test.ts의 합성 이미지 측정과 README에 기록한다.
 
 // 분석용 이미지의 긴 변. 원본이 이보다 크면 줄이고, 작으면 그대로 쓴다(확대하면 보간으로 흐려져 오탐이 생긴다).
@@ -33,12 +35,17 @@ export const STRUCTURE_MIN_STRENGTH = 30
 export const NOISE_MARGIN = 4
 // 점수가 이 값 이상이면 선명하다.
 export const SHARP_RATIO_THRESHOLD = 0.025
+// 점수가 임계값 이상이어도 이 배수보다 낮고 초점 불량 근거(estimateCauseAtScale의 defocus)가 있으면 선명으로 확정하지 않는다.
+// 실제 초점 불량 사진은 대부분 구역이 고르게 흐린데 가장 선명한 몇 구역이 임계값을 조금 넘어 선명으로 판정되는 경우가 많았다.
+// 흐림 근거와 약한 선명 근거가 함께 있으면 판정 근거 부족으로 둔다(docs/sharpness-browser-consistency.md).
+export const SHARP_CONFIRM_FACTOR = 2
 
 // 판정 규칙의 판. 같은 설정값에서도 판정이 달라지는 규칙 변경이면 올린다. 평가 결과에 기록해 다른 판의 결과와 섞지 않는다.
 // 1: 방향별 점수만으로 판정(PR #8)
 // 2: 긴 흔들림 근거(hasConsistentShake)로 흐림 의심 추가, 흐림 원인 추정(estimateBlurCause)
 // 3: 판정 근거 부족이면 1/2 크기에서 다시 보고, 그 크기에서 흐리면 흐림 의심(halfScale)
-export const SHARPNESS_CLASSIFIER_REVISION = 3
+// 4: 점수가 임계값의 SHARP_CONFIRM_FACTOR배보다 낮고 초점 불량 근거가 있으면 선명 대신 판정 근거 부족
+export const SHARPNESS_CLASSIFIER_REVISION = 4
 
 // 판정 근거가 부족할 때 다시 볼 축소 배수(정수 배수 평균). 한 번만 본다. 실제 사진 개선용 묶음에서 1/4까지 더 보는 방식은
 // 추가 검출이 2장뿐이라 넣지 않았다.
@@ -368,13 +375,15 @@ function isHalfScaleBlur(halfScale: ScaleMeasurement): boolean {
   return classifyAtScale(halfScale) === 'blurry' && estimateCauseAtScale(halfScale) !== 'unknown'
 }
 
-// 한 크기의 측정값만으로 판정한다.
+// 한 크기의 측정값만으로 판정한다. 선명 근거가 약하고(임계값의 SHARP_CONFIRM_FACTOR배 미만) 초점 불량 근거가 있으면
+// 선명으로 확정하지 않는다. 흐림으로 바꾸지도 않는다.
 function classifyAtScale(measurement: ScaleMeasurement): SharpnessVerdict {
   const { score, hasUnjudgedDirection } = measurement
   if (score !== null && score < SHARP_RATIO_THRESHOLD) return 'blurry'
   if (hasConsistentShake(measurement)) return 'blurry'
-  if (score === null) return 'low-detail'
-  return hasUnjudgedDirection ? 'low-detail' : 'sharp'
+  if (score === null || hasUnjudgedDirection) return 'low-detail'
+  if (score < SHARP_RATIO_THRESHOLD * SHARP_CONFIRM_FACTOR && estimateCauseAtScale(measurement) === 'defocus') return 'low-detail'
+  return 'sharp'
 }
 
 // 흐림 의심 사진의 원인을 추정한다. 방향별 점수는 보조 근거이며 원인을 확정하지 않는다. 근거가 부족하면 unknown이다.

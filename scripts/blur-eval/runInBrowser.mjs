@@ -43,8 +43,10 @@ const profile = profiles[args.browser]
 if (!profile) throw new Error(`unknown browser ${args.browser}`)
 
 const port = Number(args.port)
-// 파일 변경 감시·HMR을 끈다. 평가 중 저장소 파일을 고치면 페이지가 다시 불러와져 실행이 끊긴다.
-const server = await createServer({ server: { port, strictPort: true, hmr: false, watch: null }, logLevel: 'error' })
+// 파일 변경 감시·HMR·WebSocket을 끈다. Vite 클라이언트는 WebSocket이 한 번 열린 뒤 끊기면 페이지를 다시 불러오고
+// (hmr: false여도 연결은 열린다), 그러면 실행 중인 평가가 "Execution context was destroyed"로 끊긴다.
+// 서버 메시지(의존성 재최적화 등)는 실행 기록에 남도록 info로 출력한다.
+const server = await createServer({ server: { port, strictPort: true, hmr: false, ws: false, watch: null }, logLevel: 'info' })
 await server.listen()
 const browser = await profile.engine.launch()
 const context = await browser.newContext({ ...profile.device })
@@ -57,10 +59,18 @@ await page.route(`http://localhost:${port}/__eval/**`, async (route) => {
   return route.fulfill({ status: 200, body: await readFile(item.path), contentType: item.contentType })
 })
 await page.goto(`http://localhost:${port}/calibration.html`)
+// 평가 도중 페이지가 바뀌거나 죽으면 원인을 기록에 남긴다(실패한 사진은 page.evaluate 오류로 중단된다).
+page.on('framenavigated', (frame) => {
+  if (frame === page.mainFrame()) console.log(`[diagnostic] page navigated: ${frame.url()}`)
+})
+page.on('crash', () => console.log('[diagnostic] page crashed'))
+page.on('console', (message) => {
+  if (message.text().startsWith('[vite]')) console.log(`[diagnostic] page console ${message.type()}: ${message.text().slice(0, 300)}`)
+})
 await page.evaluate(async () => {
   const client = await import('/src/photos/sharpnessWorkerClient.ts')
   const decode = await import('/src/photos/analyzeImageSharpness.ts')
-  const sharpness = await import('/src/photos/sharpness.ts')
+  const area = await import('/src/photos/analysisDownsample.ts')
   // 제품과 같은 캔버스를 쓴다. OffscreenCanvas가 없는 브라우저(예: Windows용 Playwright WebKit)는 canvas 요소로 디코딩한다.
   const createElementContext = (width, height) => {
     const canvas = document.createElement('canvas')
@@ -69,7 +79,7 @@ await page.evaluate(async () => {
     return canvas.getContext('2d', { willReadFrequently: true })
   }
   const createContext = typeof OffscreenCanvas === 'undefined' ? createElementContext : decode.createOffscreenContext
-  const decoder = { ...decode, createContext, toGrayscaleForEval: sharpness.toGrayscale, downsampleForEval: sharpness.downsampleByAverage }
+  const decoder = { ...decode, createContext, createAnalysisDownsampler: area.createAnalysisDownsampler }
   const state = { analyzer: client.createSharpnessWorkerAnalyzer(), decoder, path: client.getAnalysisPath() }
   Object.assign(globalThis, { __blurEval: state })
 })
@@ -100,22 +110,26 @@ for (const [index, item] of items.entries()) {
         ;({ result, measurement } = await analyzer.measure(file))
         analysisMs = performance.now() - begin
       }
-      // 축소 영향 비교용: 분석 크기만 바꾸고 제품과 같은 방식(2배로 그린 뒤 2×2 평균)으로 디코딩한다.
+      // 축소 영향 비교용: 분석 크기만 바꾸고 제품과 같은 방식(원본을 1:1 띠로 읽어 createAnalysisDownsampler)으로 디코딩한다.
+      // 평가용이라 원본 폭 그대로 한 띠를 읽는다(제품의 타일 폭 상한은 결과에 영향이 없다).
       const decodeAt = async (edge) => {
         const bitmap = await createImageBitmap(file)
         try {
           const scale = Math.min(1, edge / Math.max(bitmap.width, bitmap.height))
           const width = Math.round(bitmap.width * scale)
           const height = Math.round(bitmap.height * scale)
-          const factor = bitmap.width >= width * 2 && bitmap.height >= height * 2 ? 2 : 1
-          const context = decoder.createContext(width * factor, height * factor)
-          const canvas = context.canvas
+          const strip = Math.max(1, Math.floor(1_048_576 / bitmap.width))
+          const context = decoder.createContext(bitmap.width, strip)
+          const downsampler = decoder.createAnalysisDownsampler(bitmap.width, bitmap.height, { width, height })
+          context.imageSmoothingEnabled = false
           context.fillStyle = '#ffffff'
-          context.fillRect(0, 0, canvas.width, canvas.height)
-          context.imageSmoothingQuality = 'high'
-          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-          const gray = decoder.toGrayscaleForEval(context.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)
-          return factor === 2 ? decoder.downsampleForEval(gray, 2) : gray
+          for (let top = 0; top < bitmap.height; top += strip) {
+            const rows = Math.min(strip, bitmap.height - top)
+            context.fillRect(0, 0, bitmap.width, rows)
+            context.drawImage(bitmap, 0, top, bitmap.width, rows, 0, 0, bitmap.width, rows)
+            downsampler.addRows(context.getImageData(0, 0, bitmap.width, rows).data, top)
+          }
+          return downsampler.finish()
         } finally {
           bitmap.close()
         }

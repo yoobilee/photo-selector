@@ -18,6 +18,7 @@ import {
   SHARPNESS_HALF_SCALE_FACTOR,
   SHARPNESS_MIN_EDGE,
   SHARPNESS_TOP_REGIONS,
+  SHARP_CONFIRM_FACTOR,
   SHARP_RATIO_THRESHOLD,
   STRUCTURE_MIN_STRENGTH,
 } from '../photos/sharpness.ts'
@@ -94,6 +95,7 @@ export function buildEvaluationJson(
     settings: {
       classifierRevision: SHARPNESS_CLASSIFIER_REVISION,
       sharpRatioThreshold: SHARP_RATIO_THRESHOLD,
+      sharpConfirmFactor: SHARP_CONFIRM_FACTOR,
       analysisMaxEdge: SHARPNESS_ANALYSIS_MAX_EDGE,
       minEdge: SHARPNESS_MIN_EDGE,
       grid: SHARPNESS_GRID,

@@ -1,11 +1,10 @@
+import { createAnalysisDownsampler } from './analysisDownsample.ts'
 import { createPhotoFingerprint, type PhotoFingerprint } from './photoFingerprint.ts'
 import {
   classifySharpness,
-  downsampleByAverage,
   estimateBlurCause,
   getAnalysisSize,
   measureSharpness,
-  toGrayscale,
   type GrayImage,
   type SharpnessMeasurement,
   type SharpnessResult,
@@ -30,28 +29,55 @@ export interface SharpnessAnalysis {
   readonly measurement: SharpnessMeasurement | null
 }
 
+// 원본을 읽는 캔버스 한 장의 최대 폭과 최대 화소 수. 원본 크기 캔버스를 만들지 않고 이 크기씩 나눠 읽는다.
+// 화소 수 상한은 띠 한 줄 묶음(RGBA 약 1MB)이다. 띠마다 읽은 화소는 바로 버려지므로 작게 나눠야 수거 전에 쌓이는
+// 메모리가 줄어든다(24MP 사진에서 4MB 띠보다 최대 메모리가 낮았다). 폭 상한은 브라우저 캔버스 크기 제한보다 충분히 작다.
+export const ANALYSIS_TILE_EDGE = 4096
+export const ANALYSIS_STRIP_PIXELS = 262_144
+
 // 원본 Blob을 디코딩해 분석 크기의 밝기 이미지를 만든다. 판정하기에 너무 작으면 null이다.
-// 원본은 읽기만 하며, 디코딩한 원본 크기 화소와 캔버스는 끝나면 바로 해제한다. 디코딩 실패는 오류로 전달된다.
+// 원본은 읽기만 하며, 디코딩한 화소와 캔버스는 끝나면 바로 해제한다. 디코딩 실패는 오류로 전달된다.
+//
+// 캔버스로 크게 줄이면 브라우저(Chromium·WebKit)마다 보간 방식이 달라 같은 사진의 미세 경계와 잡음 추정이 달라지고
+// 판정이 갈린다(docs/sharpness-browser-consistency.md). 그래서 캔버스는 원본을 축소 없이 1:1로 옮기는 데만 쓰고,
+// 띠 단위로 읽은 화소를 createAnalysisDownsampler(면적 평균 + 기존 캔버스 경로의 8비트 구조)로 줄인다.
+// 원본 크기의 전체 화소 배열은 만들지 않는다.
 export async function decodeAnalysisImage(file: Blob, createContext: CreateAnalysisContext): Promise<GrayImage | null> {
   const bitmap = await createImageBitmap(file)
   try {
     const size = getAnalysisSize(bitmap.width, bitmap.height)
     if (!size) return null
 
-    // 브라우저마다 크게 줄일 때의 보간 방식이 달라 미세 경계가 달라진다. 원본이 충분히 크면 두 배 크기로 그린 뒤
-    // 2×2 평균으로 줄여 브라우저 차이를 줄인다.
-    const factor = bitmap.width >= size.width * 2 && bitmap.height >= size.height * 2 ? 2 : 1
-    const width = size.width * factor
-    const height = size.height * factor
-    const context = createContext(width, height)
+    const { width, height } = bitmap
+    const tileWidth = Math.min(width, ANALYSIS_TILE_EDGE)
+    const stripHeight = Math.max(1, Math.min(height, Math.floor(ANALYSIS_STRIP_PIXELS / width)))
+    const context = createContext(tileWidth, stripHeight)
     if (!context) throw new Error('2D canvas context is unavailable')
     try {
+      // 1:1 복사이므로 보간이 끼지 않게 끈다.
+      context.imageSmoothingEnabled = false
       context.fillStyle = ANALYSIS_BACKGROUND
-      context.fillRect(0, 0, width, height)
-      context.imageSmoothingQuality = 'high'
-      context.drawImage(bitmap, 0, 0, width, height)
-      const gray = toGrayscale(context.getImageData(0, 0, width, height).data, width, height)
-      return factor === 2 ? downsampleByAverage(gray, 2) : gray
+      const downsampler = createAnalysisDownsampler(width, height, size)
+      // 폭이 타일보다 넓으면 타일들을 이 버퍼에 이어 붙여 원본 행을 만든다.
+      const rows = tileWidth === width ? null : new Uint8ClampedArray(width * stripHeight * 4)
+      for (let top = 0; top < height; top += stripHeight) {
+        const count = Math.min(stripHeight, height - top)
+        for (let left = 0; left < width; left += tileWidth) {
+          const span = Math.min(tileWidth, width - left)
+          context.fillRect(0, 0, span, count)
+          context.drawImage(bitmap, left, top, span, count, 0, 0, span, count)
+          const tile = context.getImageData(0, 0, span, count).data
+          if (!rows) {
+            downsampler.addRows(tile, top)
+            continue
+          }
+          for (let row = 0; row < count; row += 1) {
+            rows.set(tile.subarray(row * span * 4, (row + 1) * span * 4), (row * width + left) * 4)
+          }
+        }
+        if (rows) downsampler.addRows(rows.subarray(0, width * count * 4), top)
+      }
+      return downsampler.finish()
     } finally {
       context.canvas.width = 0
       context.canvas.height = 0
