@@ -21,6 +21,7 @@ import { classifyAnalysisImage, evaluateAnalysisImage } from './analyzeImageShar
 import {
   SHAKE_MIN_REGIONS,
   SHAKE_MIN_SPREAD,
+  SHARP_CONFIRM_FACTOR,
   SHARP_RATIO_THRESHOLD,
   classifySharpness,
   downsampleByAverage,
@@ -146,6 +147,24 @@ describe('sharpness verdict', () => {
     expect(classifySharpness(createMeasurement({ score: SHARP_RATIO_THRESHOLD / 2, hasUnjudgedDirection: true }))).toBe('blurry')
     expect(classifySharpness(createMeasurement({ score: SHARP_RATIO_THRESHOLD * 2, hasUnjudgedDirection: true }))).toBe('low-detail')
     expect(classifySharpness(createMeasurement({ score: SHARP_RATIO_THRESHOLD }))).toBe('sharp')
+  })
+
+  // 실제 초점 불량 사진은 대부분 구역이 고르게 흐린데 가장 선명한 구역 몇 개가 임계값을 조금 넘어 선명으로 판정되곤 했다.
+  // 선명 근거가 약하고 초점 불량 근거가 함께 있으면 선명으로 확정하지 않는다. 흐림으로 바꾸지도 않는다.
+  it('withholds a sharp verdict when the sharp evidence is weak and the photo shows the defocus pattern', () => {
+    const weak = SHARP_RATIO_THRESHOLD * 1.6
+    const evenWeak = [weak, weak * 1.05, weak * 1.1, weak * 1.15]
+    const defocusPattern = { score: weak, directionScores: evenWeak, isotropicBlurRegions: 5 }
+    expect(classifySharpness(createMeasurement(defocusPattern))).toBe('low-detail')
+    // 모든 방향이 흐린 구역이 없으면 흐림 근거가 없으므로 그대로 선명이다.
+    expect(classifySharpness(createMeasurement({ ...defocusPattern, isotropicBlurRegions: 0 }))).toBe('sharp')
+    // 방향별 점수가 고르지 않으면(한 방향만 약함) 초점 불량 근거가 아니다.
+    expect(classifySharpness(createMeasurement({ ...defocusPattern, directionScores: [weak, weak * 3, weak * 3, weak * 3] }))).toBe('sharp')
+    // 점수가 충분히 높으면 초점 불량처럼 보이는 구역이 있어도(배경 흐림) 선명이다.
+    const confident = SHARP_RATIO_THRESHOLD * SHARP_CONFIRM_FACTOR
+    expect(
+      classifySharpness(createMeasurement({ ...defocusPattern, score: confident, directionScores: evenWeak.map((value) => (value / weak) * confident) })),
+    ).toBe('sharp')
   })
 
   it('maps verdicts to results without treating undecidable photos as blurry', () => {

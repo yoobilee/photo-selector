@@ -11,6 +11,7 @@ import {
   SHAKE_SCALE_LOSS,
   SHARPNESS_CLASSIFIER_REVISION,
   SHARPNESS_HALF_SCALE_FACTOR,
+  SHARP_CONFIRM_FACTOR,
   SHARP_RATIO_THRESHOLD,
 } from '../photos/sharpness.ts'
 import {
@@ -61,6 +62,7 @@ describe('evaluation export', () => {
     expect(report.settings.halfScaleFactor).toBe(SHARPNESS_HALF_SCALE_FACTOR)
     expect(report.exportedAt).toBe('2026-10-30T01:02:03.000Z')
     expect(report.settings.sharpRatioThreshold).toBe(SHARP_RATIO_THRESHOLD)
+    expect(report.settings.sharpConfirmFactor).toBe(SHARP_CONFIRM_FACTOR)
     // 같은 임계값이라도 판정 규칙이 다르면 결과를 비교할 수 없으므로 규칙의 판과 흔들림·초점 불량 기준을 함께 기록한다.
     expect(report.settings.classifierRevision).toBe(SHARPNESS_CLASSIFIER_REVISION)
     expect(report.settings.shake).toEqual({
