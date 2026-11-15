@@ -4,33 +4,23 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { collectReviewPacket, prepareLocalConfirmation } from './review-evidence.mjs';
 import { createEvidenceGitHub, runEvidenceCli } from './review-evidence-cli.mjs';
-import { canonical, same, validatePluginResult, parseLocalReport, isEvidencePublisher } from './review-evidence-source.mjs';
+import { canonical, same, validatePluginResult, localReportsForTarget } from './review-evidence-source.mjs';
+import { findingsFromText, parserVersion } from './review-result-parser.mjs';
+export { findingsFromText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 
 export function parsePluginArgs(argv, env = process.env) {
   const [repository, rawNumber, ...rest] = argv;
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '') || !/^[1-9][0-9]*$/.test(rawNumber ?? '') || !Number.isSafeInteger(Number(rawNumber))) return null;
-  const options = { repository, number: Number(rawNumber), pluginRoot: null, session: env.CODEX_COMPANION_SESSION_ID ?? env.CLAUDE_SESSION_ID ?? null };
+  const options = { repository, number: Number(rawNumber), pluginRoot: null, recover: false, session: env.CODEX_COMPANION_SESSION_ID ?? env.CLAUDE_SESSION_ID ?? null };
   const seen = new Set();
   for (let i = 0; i < rest.length; i += 2) {
+    if (rest[i] === '--recover' && !options.recover) { options.recover = true; i -= 1; continue; }
     const key = { '--plugin-root': 'pluginRoot', '--session': 'session' }[rest[i]];
     if (!key || seen.has(key) || !rest[i + 1] || rest[i + 1].startsWith('--')) return null;
     options[key] = rest[i + 1]; seen.add(key);
   }
   return options.pluginRoot && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(options.session ?? '') ? options : null;
-}
-
-export function findingsFromText(text) {
-  const findings = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
-  const levels = ['critical', 'high', 'medium', 'low'];
-  const badges = [...text.matchAll(/\[P([0-3])\]/g)];
-  for (const badge of badges) findings[levels[Number(badge[1])]] += 1;
-  // 관찰한 완료·검사 문장의 전체 문법만 허용한다. 앞부분의 지적 없음 선언만으로 뒤의 산문을 지우지 않는다.
-  const clean = /^(?:No actionable defects were found\.|No findings\.|No issues found\.)(?:\s+(?:Lint passed\.|Lint and all \d+ focused tests passed\.|Build and E2E were not run\.|The full unit run encountered a sandbox EPERM in privacyGuard; build and E2E checks were not run\.))*$/i;
-  if (!clean.test(text.trim())) findings.unknown = 1;
-  if (/rate limit|usage limit|quota exceeded|review (?:was )?(?:skipped|not run)|unable to (?:complete|perform) (?:the )?review/i.test(text)) findings.unknown += 1;
-  if (/\[P[^\]]*\]/.test(text.replace(/\[P[0-3]\]/g, ''))) findings.unknown += 1;
-  return findings;
 }
 
 export function collectPluginResult({ output, stored, target, session, startedAt, checks }) {
@@ -68,20 +58,40 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
   checkLocal();
   // 설명·정책만 바뀌어도 같은 base/head 리뷰를 다시 호출하지 않고 대상 불일치로 중단한다.
   const key = sha256(canonical({ repository: target.repository, number: target.number, head: target.head, base: target.base }));
-  const path = git(['rev-parse', '--git-path', `photo-selector-review-${key}.json`]).trim();
-  const lockPath = `${path}.lock`;
+  const originalPath = git(['rev-parse', '--git-path', `photo-selector-review-${key}.json`]).trim();
+  const recoveredPath = `${originalPath}.recovered.json`;
+  const path = options.recover || existsSync(recoveredPath) ? recoveredPath : originalPath;
+  // Normal execution and recovery share one lock and publication state.
+  const lockPath = `${originalPath}.lock`;
   const lock = openSync(lockPath, 'wx', 0o600); closeSync(lock);
   try {
     let result; let captured;
+    if (options.recover && !existsSync(path)) {
+      if (!existsSync(originalPath)) throw new Error('No completed ledger to recover');
+      const originalText = readFileSync(originalPath, 'utf8');
+      const original = JSON.parse(originalText);
+      if (original.state !== 'completed' || original.session !== options.session || !same(original.target, target)
+          || original.publicationRequested || original.publication) throw new Error('Recovery requires an unpublished completed target');
+      validatePluginResult(original.result, target, 'claude');
+      const stored = plugin(['result', '--json']); // Read the existing native job, never invoke review.
+      const job = stored.storedJob;
+      if (job?.id !== original.result.source.jobId || job?.threadId !== original.result.source.threadId
+          || job?.turnId !== original.result.source.turnId || job?.completedAt !== original.result.source.completedAt
+          || job?.result?.codex?.stdout?.replace(/\r\n?/g, '\n') !== original.result.report) throw new Error('Recovery job/source mismatch');
+      const recovered = collectPluginResult({ output: job.result, stored, target, session: options.session,
+        startedAt: original.result.source.startedAt, checks: initial.packet.checks });
+      validatePluginResult(recovered, target, 'claude');
+      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result: recovered,
+        recovery: { originalLedgerHash: sha256(originalText), parserVersion } }), { flag: 'wx', mode: 0o600 });
+    }
     if (existsSync(path)) {
       const ledger = JSON.parse(readFileSync(path, 'utf8'));
       if (!['completed', 'captured'].includes(ledger.state) || ledger.session !== options.session || !same(ledger.target, target)) throw new Error('이전 실행 미완료·실패·다른 세션. 리뷰를 자동 재실행하지 않음');
       result = ledger.result;
       if (ledger.state === 'captured') captured = ledger;
     } else {
-      const existing = initial.state.comments.filter(isEvidencePublisher).some(c => {
-        try { return same(parseLocalReport(c.body).result.target, target); } catch { return false; }
-      });
+      if (options.recover) throw new Error('Recovery cannot start a model review');
+      const existing = localReportsForTarget(initial.state.comments, target).length > 0;
       if (existing) {
         // 다른 checkout/세션에서 이미 게시한 결과도 원격 영수증으로 확인한다. 로컬 ledger가 없다고 새 리뷰하지 않는다.
         out(JSON.stringify({ state: 'published-awaiting-human', ...await prepareLocalConfirmation({ github, repository: options.repository, number: options.number }) }, null, 2));
@@ -121,10 +131,10 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
     // 이미 등록됐으면 성공 영수증을 확인해 재사용한다. 다른 실패는 게시기가 전체 조회 후 fail-closed로 판단한다.
     const latest = await collect();
     if (!same(latest.packet.target, target)) throw new Error('게시 직전 대상 변경');
-    const already = latest.state.comments.some(c => isEvidencePublisher(c) && c.body.includes(`photo-selector-review-evidence:v2 ${sha256(canonical(result))}`));
+    const already = localReportsForTarget(latest.state.comments, target).length > 0;
     if (!already && !JSON.parse(readFileSync(path, 'utf8')).publicationRequested) {
       // 응답을 잃어도 같은 대상의 dispatch를 자동 재요청하지 않도록 먼저 기록한다.
-      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, publicationRequested: true }), { mode: 0o600 });
+      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, recovery: JSON.parse(readFileSync(path, 'utf8')).recovery, publicationRequested: true }), { mode: 0o600 });
       const status = await runEvidenceCli({ argv: [options.repository, String(options.number), '--result', 'plugin-result.json', '--dispatch'], gh,
         readFile: () => JSON.stringify(result), out: () => {}, err: () => {} });
       if (status !== 0) throw new Error('게시 요청 실패. 자동 재시도하지 않음');
@@ -134,7 +144,8 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       if (!same(current.packet.target, target)) throw new Error('게시 대기 중 대상 변경');
       try {
         const confirmed = await prepareLocalConfirmation({ github, repository: options.repository, number: options.number });
-        writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, publicationRequested: true,
+        if (!same(confirmed.publisher.result, result)) throw new Error('Existing publication belongs to a different result');
+        writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, recovery: JSON.parse(readFileSync(path, 'utf8')).recovery, publicationRequested: true,
           publication: { commentUrl: confirmed.commentUrl, evidenceHash: confirmed.evidenceHash } }), { mode: 0o600 });
         out(JSON.stringify({ state: 'published-awaiting-human', ...confirmed }, null, 2));
         return 0;

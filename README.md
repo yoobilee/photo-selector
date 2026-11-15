@@ -490,6 +490,8 @@ Claude Code로 구현한 변경은 [Codex plugin for Claude Code](https://github
 
 ## GitHub 리뷰 게이트
 
+PR #23의 Codex 리뷰는 완료됐지만 실제 응답 문장이 수집기의 허용 문법과 달라 자동 게시가 중단됐습니다. 이제 관찰한 전체 문장을 수집기·서버가 함께 검사하고, 미완료·모호한 문장·지적 혼재는 계속 차단합니다. 게시하지 않은 완료 결과는 [모델 재호출 없는 복구](docs/local-review-publishing.md#문장-수집-실패-뒤-기존-완료-결과-복구)로 별도 파생 기록에 재분류할 수 있습니다. 원래 ledger를 덮어쓰거나 옛 리뷰를 바뀐 base에 연결하지 않습니다. 실제 봇 게시·영수증 검증은 main 도입 후 다음 Claude 구현 PR에서 별도 확인해야 합니다.
+
 기본 `independent-review` 게이트는 **AI를 호출하지 않고**, 최신 변경에 대한 리뷰 근거와 관리자의 확인 기록을 검사합니다. Codex 리뷰 실행과는 별개의 검사입니다. 자동 병합은 사용하지 않습니다.
 
 게이트는 같은 실행에서 위험도별 **Shadow 판정**도 계산해 Actions Summary에만 남깁니다. Low·Medium·High 자동 판정 후보 여부, 필수 CI, Codex GitHub 리뷰 결과, 사용자 승인, 기존 게이트와의 차이를 보여 주며 병합 조건에는 쓰이지 않습니다. 설정과 판정 기준은 [리뷰 게이트 설정](.ai/checklists/review-gate-setup.md#6-shadow-판정관찰용)에 있습니다.

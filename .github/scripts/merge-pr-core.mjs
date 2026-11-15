@@ -35,7 +35,7 @@ export function parseArgs(argv) {
 
 // 병합 도구가 실행하는 판정 코드. 실제 병합 전에 기본 브랜치에 승인된 내용과 같은지 확인한다.
 // 이 목록과 실제 import 관계가 같은지는 테스트가 확인한다.
-export const trustedModules = ['merge-pr.mjs', 'merge-pr-core.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-gate-source.mjs', 'review-evidence-source.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
+export const trustedModules = ['merge-pr.mjs', 'merge-pr-core.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-gate-source.mjs', 'review-evidence-source.mjs', 'review-result-parser.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
 // Git blob SHA. 작업 트리의 CRLF 변환(core.autocrlf)만 되돌려 저장소에 기록된 LF 내용과 비교한다.
 export function gitBlobSha(text) {
   const content = Buffer.from(text.replace(/\r\n/g, '\n'), 'utf8');
@@ -99,7 +99,7 @@ export function createGitHub({ gh, repo }) {
         listForRef: many(`repos/${repo}/commits/:ref/check-runs?filter=all`, 'check_runs'),
         listSuitesForRef: many(`repos/${repo}/commits/:ref/check-suites`, 'check_suites'),
       },
-      actions: { getWorkflowRun: one(`repos/${repo}/actions/runs/:run_id`), getWorkflow: one(`repos/${repo}/actions/workflows/:workflow_id`),
+      actions: { listWorkflowRuns: many(`repos/${repo}/actions/runs?head_sha=:head_sha`, 'workflow_runs'), getWorkflowRun: one(`repos/${repo}/actions/runs/:run_id`), getWorkflow: one(`repos/${repo}/actions/workflows/:workflow_id`),
         listWorkflowRunArtifacts: many(`repos/${repo}/actions/runs/:run_id/artifacts`, 'artifacts') },
     },
     graphql: async (query, variables) => {

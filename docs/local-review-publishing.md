@@ -34,6 +34,26 @@ npm run review:prepare -- yoobilee/photo-selector <PR번호> --confirmation
 
 ## 실패·중복·복구
 
+### 문장 수집 실패 뒤 기존 완료 결과 복구
+
+PR #23에서 실제 완료 문장이 기존 허용 문법 밖이라 `unknown: 1`로 분류됐다. 수집기와 서버는 이제 같은 parser로 관찰한 전체 문장을 검사한다. 검사 생략·Build/E2E 미실행은 원문 그대로 보존하며, 임의 후속 산문·실패·한도·미완료·지적 혼재는 `unknown` 또는 차단 지적으로 남긴다. 서버는 원문보다 지적 수를 줄인 제출도 거부한다.
+
+동일 대상의 **아직 게시 요청하지 않은 completed ledger**가 있을 때만 다음 복구 명령을 사용한다.
+
+```text
+npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설치된 Codex 플러그인 루트> --session <원래 Claude 세션 ID> --recover
+```
+
+`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
+
+PR #23처럼 이미 병합됐거나 base가 바뀐 결과는 복구 게시 대상으로 삼지 않는다. parser 수정은 옛 결과를 새 base에 재연결하는 허가가 아니다.
+
+봇 게시기는 결과 JSON hash 외에도 같은 저장소·PR·base/head의 기존 봇 보고서를 대조한다. 다른 parser 집계나 job으로 바뀌었어도 같은 대상의 두 번째 댓글은 쓰지 않는다. 기존 댓글이 손상됐거나 영수증이 누락됐으면 사람이 조사해야 하며 자동 재게시하지 않는다.
+
+게시 전과 `/review-gate` 내용 준비 시 현재 필수 CI의 성공·앱·check suite·pull_request run·저장소·head·workflow blob을 자동 검증한다. CI workflow 자체가 바뀐 경우에는 자동 게시를 중단하고 별도 수동 검증이 필요하다. 이 검사는 리뷰어가 로컬에서 검사를 실행했다는 증명이 아니며 관리자 직접 확인과 High의 `/merge-approve`는 그대로다.
+
+이 변경의 도입 PR은 Codex 구현이므로 Claude Code 독립 리뷰 및 기존 수동 관리자 보고서 경로로 검증한다. main 도입 이후 다음 정상 Claude 구현 PR에서 실제 Actions 댓글·영수증·중복 방지를 확인하기 전에는 Issue #22의 실환경 검증을 완료 처리하지 않는다. 단일 Environment 승인과 자동 병합은 이번 단계에 포함하지 않는다.
+
 - `.git/photo-selector-review-<대상 식별자>.json`과 `.lock`은 로컬 실행 기록이며 보안 증거가 아니다. 동일 repo·PR·base/head에서는 완료 결과를 재사용한다. 본문·정책·세션이 바뀌면 자동 재검토하지 않고 중단한다. running ledger/lock은 프로세스 상태와 기존 plugin job을 사람이 확인하기 전 지우지 않는다.
 - native 호출이 JSON 결과를 반환하면 즉시 `captured`로 원문을 먼저 저장하고 job ID·기록도 검증 전에 저장한다. job 조회 실패는 다음 실행에서 조회만 재시도하고 리뷰를 다시 호출하지 않는다. 원문 16,000바이트 상한 초과는 이유를 알리고 원문·job을 보존한다. 대상을 임의로 재연결하거나 원문을 잘라 완료 결과로 만들지 않는다. JSON 응답 자체를 받기 전 실패한 running 기록은 plugin 원본 job을 사람이 조사해야 한다.
 - 같은 결과가 게시됐으면 정확한 원문·성공한 게시 실행·영수증을 검증해 재사용한다. 유사 봇 문구·다른 PR 결과는 사용하지 않는다. 중복 댓글이면 차단한다.

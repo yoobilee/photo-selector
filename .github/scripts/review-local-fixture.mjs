@@ -30,6 +30,7 @@ export function localFixture() {
       return JSON.stringify({ sha: codeSha(`.github/scripts/${name}`, url.searchParams.get('ref'), gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'))) });
     }
     if (args[1].startsWith(`repos/${repo}/contents/${evidenceWorkflow}`)) return JSON.stringify({ sha: codeSha(evidenceWorkflow, new URL(args[1], 'https://api.github.com/').searchParams.get('ref'), 'c'.repeat(40)) });
+    if (args[1].startsWith(`repos/${repo}/contents/.github/workflows/ci.yml`)) return JSON.stringify({ sha: codeSha('.github/workflows/ci.yml', new URL(args[1], 'https://api.github.com/').searchParams.get('ref'), 'c'.repeat(40)) });
     const policy = args[1].includes('/contents/.ai/review-config.json');
     const value = JSON.parse(fake.gh(policy ? ['api', `repos/${repo}/contents/.ai/review-config.json?ref=main`] : args));
     if (args[1] === `repos/${repo}`) { value.full_name = repo; value.id = 12; }
@@ -48,7 +49,7 @@ export function localFixture() {
   const run = { id: 44, workflow_id: 9, path: evidenceWorkflow, event: 'workflow_dispatch', run_attempt: 1, head_sha: context.sha,
     head_branch: 'main', status: 'in_progress', conclusion: null, repository: { id: 12, full_name: repo }, head_repository: { id: 12, full_name: repo },
     actor: { id: 1, login: 'owner', type: 'User' }, run_started_at: '2026-11-10T00:00:00Z', updated_at: '2026-11-10T00:02:00Z' };
-  github.rest.actions = { getWorkflowRun: async () => ({ data: run }), getWorkflow: async () => ({ data: { id: 9, path: evidenceWorkflow } }),
+  github.rest.actions = { ...github.rest.actions, getWorkflowRun: async () => ({ data: run }), getWorkflow: async () => ({ data: { id: 9, path: evidenceWorkflow } }),
     listWorkflowRunArtifacts: async () => ({ data: artifacts }) };
   const original = github.rest.repos.getContent;
   github.rest.repos.getContent = args => args.path.startsWith('.github/') ? { data: { sha: codeSha(args.path, args.ref, 'c'.repeat(40)) } } : original(args);

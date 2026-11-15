@@ -113,6 +113,113 @@ function pluginFixture(target) {
   return { output, stored: { job: { status: 'completed' }, storedJob: job } };
 }
 
+const observedReport = 'No actionable defects were found in the changes against the specified base. Lint, 46 targeted unit tests, and 31 merge-tool tests passed; four platform-specific tests were skipped. Build and E2E checks were not run.';
+
+test('PR23 관찰 문법 전체만 수용하고 혼재·모호함·미완료는 unknown 유지', () => {
+  assert.equal(findingsFromText(observedReport).unknown, 0);
+  assert.equal(findingsFromText(observedReport.replaceAll('. ', '.\r\n')).unknown, 0);
+  for (const text of ['', 'Looks good.', observedReport + ' Hidden issue.', observedReport + ' [P2] bug',
+    'No findings. Review was skipped.', 'No findings. quota exceeded', 'No findings.Unrecognised',
+    observedReport.replace('passed;', 'failed;'), observedReport.replace('four', 'unknown')]) {
+    assert.ok(findingsFromText(text).unknown > 0, text);
+  }
+  assert.equal(findingsFromText(observedReport + ' [P2] bug').medium, 1);
+  const args = ['owner/repo', '1', '--plugin-root', '/plugin', '--session', 'session-1'];
+  assert.equal(parsePluginArgs([...args, '--recover'], {}).recover, true);
+  assert.equal(parsePluginArgs([...args, '--recover', '--recover'], {}), null);
+});
+
+test('완료 결과 복구는 result만 조회하고 원래 ledger 보존·재실행/중복 dispatch 금지', async () => {
+  const f = localFixture(); const { target } = await f.result();
+  const data = pluginFixture(target); data.output.codex.stdout = observedReport;
+  const original = collectPluginResult({ ...data, target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+  original.findings.unknown = 1; // Immutable old parser result.
+  const directory = mkdtempSync(join(tmpdir(), 'review-recover-test-')); const path = join(directory, 'ledger.json');
+  const originalText = JSON.stringify({ state: 'completed', session: 'session-1', target, result: original });
+  const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? target.head : target.base;
+  let reads = 0;
+  const plugin = args => { assert.deepEqual(args, ['result', '--json']); reads++; return data.stored; };
+  const run = (recover = true) => runPluginPublication({ options: { repository: 'owner/repo', number: 1, session: 'session-1', recover },
+    gh: f.gh, git, plugin, maxPolls: 1, out: () => {} });
+  try {
+    await assert.rejects(run(), /No completed ledger/); assert.equal(reads, 0);
+    writeFileSync(path, originalText);
+    await assert.rejects(run(), /완료를 확인하지 못함/);
+    const recovered = JSON.parse(readFileSync(path + '.recovered.json'));
+    assert.equal(recovered.result.findings.unknown, 0);
+    assert.equal(recovered.result.report, original.report);
+    assert.equal(recovered.recovery.parserVersion, 2);
+    await assert.rejects(run(), /완료를 확인하지 못함/);
+    await assert.rejects(run(false), /완료를 확인하지 못함/);
+    assert.equal(reads, 1); assert.equal(f.dispatches.length, 1);
+    const p = await f.publish(recovered.result); f.finish(p);
+    assert.equal(await run(), 0);
+    assert.equal(readFileSync(path, 'utf8'), originalText);
+    assert.ok(JSON.parse(readFileSync(path + '.recovered.json')).recovery.originalLedgerHash);
+    assert.equal(reads, 1); assert.equal(f.comments.length, 1);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('복구의 대상·job 불일치와 이미 요청한 결과는 새 모델/게시 없이 차단', async () => {
+  for (const kind of ['target', 'job', 'requested', 'unknown']) {
+    const f = localFixture(); const { target } = await f.result(); const data = pluginFixture(target);
+    if (kind === 'unknown') data.output.codex.stdout = 'Uncertain review.';
+    const r = collectPluginResult({ ...data, target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+    const ledger = { state: 'completed', session: 'session-1', target: structuredClone(target), result: r };
+    if (kind === 'target') ledger.target.head = 'e'.repeat(40);
+    if (kind === 'requested') ledger.publicationRequested = true;
+    if (kind === 'job') data.stored.storedJob.id = 'different-job';
+    const directory = mkdtempSync(join(tmpdir(), 'review-recover-deny-')); const path = join(directory, 'ledger.json');
+    const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? target.head : target.base;
+    const originalText = JSON.stringify(ledger); writeFileSync(path, originalText);
+    try {
+      const run = () => runPluginPublication({ options: { repository: 'owner/repo', number: 1, session: 'session-1', recover: true },
+        gh: f.gh, git, plugin: args => { assert.equal(args[0], 'result'); return data.stored; }, maxPolls: 1, out: () => {} });
+      if (kind === 'unknown') assert.equal(await run(), 2); else await assert.rejects(run());
+      assert.equal(f.dispatches.length, 0); assert.equal(f.comments.length, 0); assert.equal(readFileSync(path, 'utf8'), originalText);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('같은 base/head의 다른 결과 집계·job·fingerprint는 두 번째 댓글이 아님', async () => {
+  const f = localFixture(); const r = await f.result(); const p = await f.publish(r); f.finish(p);
+  for (const mutate of [x => { x.findings.low = 1; }, x => { x.source.jobId = 'different-job'; }, x => { x.target.fingerprint = '0'.repeat(64); }]) {
+    const changed = structuredClone(r); mutate(changed); await assert.rejects(f.publish(changed));
+    assert.equal(f.comments.length, 1);
+  }
+});
+
+test('wrapper는 다른 job의 기존 게시를 현재 ledger의 성공으로 인정하지 않음', async () => {
+  const f = localFixture(); const r = await f.result(); const p = await f.publish(r); f.finish(p);
+  const directory = mkdtempSync(join(tmpdir(), 'review-job-conflict-')); const path = join(directory, 'ledger.json');
+  const changed = structuredClone(r); changed.source.jobId = 'different-job';
+  writeFileSync(path, JSON.stringify({ state: 'completed', target: r.target, session: 'session-1', result: changed }));
+  const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? r.target.head : r.target.base;
+  try {
+    await assert.rejects(runPluginPublication({ options: { repository: 'owner/repo', number: 1, session: 'session-1' },
+      gh: f.gh, git, plugin: () => assert.fail('No model call'), maxPolls: 1, out: () => assert.fail('No successful confirmation') }));
+    assert.equal(f.dispatches.length, 0); assert.equal(f.comments.length, 1);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('서버는 원문 지적 축소 및 실패/다른 workflow CI를 차단', async () => {
+  const f = localFixture(); const r = await f.result();
+  r.report = 'No findings. [P2] Missing permission.';
+  const { reportHash } = await import('./review-gate-core.mjs'); r.source.outputHash = reportHash(r.report);
+  await assert.rejects(f.publish(r), /축소/); assert.equal(f.comments.length, 0);
+  for (const kind of ['failed', 'wrong-source']) {
+    const f = localFixture(); const r = await f.result();
+    if (kind === 'failed') {
+      const get = f.github.rest.checks.listForRef;
+      f.github.rest.checks.listForRef = async args => { const response = await get(args); for (const c of response.data) if (c.name === 'verify') c.conclusion = 'failure'; return response; };
+    } else {
+      const get = f.github.rest.actions.listWorkflowRuns;
+      f.github.rest.actions.listWorkflowRuns = async args => { const response = await get(args); for (const run of response.data) run.event = 'workflow_dispatch'; return response; };
+    }
+    await assert.rejects(f.publish(r), /필수 CI/); assert.equal(f.comments.length, 0);
+  }
+});
+
 test('native 플러그인 완료 기록·동일 세션·출력·판정 형식을 검사하고 원문·미실행 한계를 보존', async () => {
   const target = (await localFixture().result()).target; const fixture = pluginFixture(target);
   const input = { ...fixture, target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] };
