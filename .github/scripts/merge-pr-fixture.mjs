@@ -43,7 +43,7 @@ export function createFake(options = {}, store = {}) {
     risk: 'high', implementedBy: 'claude', gate: true, codex: 'clean', approval: 'valid', requests: 1, lastEditedAt: null,
     ci: 'success', ciSource: 'ok', behindBy: 0, strict: true, enforceAdmins: true, verifyPinned: true, prChecks: true, gateCheck: 'ok',
     code: 'same', deleteOnMerge: true, remoteAfterMerge: 'deleted', otherHeadPr: false, otherBasePr: false, branchProtected: false,
-    headChangeAtChecks: null, merge: 'ok', badSubject: false, apiError: null, state: 'open', draft: false, headRepo: repo, local: {},
+    headChangeAtChecks: null, merge: 'ok', badSubject: false, mergeBody: false, apiError: null, state: 'open', draft: false, headRepo: repo, local: {},
     ...options,
   };
   const local = { repo: true, exists: true, sha: head, current: 'main', otherWorktree: false, dirty: false, ...o.local };
@@ -226,7 +226,8 @@ export function createFake(options = {}, store = {}) {
       const local = gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'));
       return { sha: o.code === 'changed' && name === 'review-gate-core.mjs' ? '0'.repeat(40) : local };
     }
-    if (p === `repos/${repo}/commits/${mergeSha}`) return { commit: { message: o.badSubject ? 'Merge pull request #1' : `${title}\n\nCloses #7` } };
+    // 기본은 제목 한 줄만 저장된 병합 커밋. mergeBody는 본문이 남은 병합(정책 위반)을 흉내 낸다.
+    if (p === `repos/${repo}/commits/${mergeSha}`) return { commit: { message: o.badSubject ? 'Merge pull request #1' : o.mergeBody ? `${title}\n\nCloses #7` : `${title}\n` } };
     if (p === `repos/${repo}/git/ref/heads/${branch}`) {
       if (!store.remote.exists) throw failure('Not Found', 404);
       return { ref: `refs/heads/${branch}`, object: { sha: store.remote.sha } };
@@ -250,7 +251,8 @@ export function createFake(options = {}, store = {}) {
       // 마지막 확인과 병합 API 호출 사이 push(남는 경합)와 GitHub의 --match-head-commit 거부를 흉내 낸다.
       if (o.headChangeAtMerge) store.head = newHead;
       if (value('--match-head-commit') !== store.head) throw failure('head changed', 409);
-      if (value('--subject') !== title || readFileSync(value('--body-file'), 'utf8') !== body) throw failure('message mismatch', 422);
+      // 병합 커밋은 제목 한 줄만 쓴다. 빈 본문을 명시하지 않으면 저장소 기본값(커밋 목록)이 들어가므로 거부한다.
+      if (value('--subject') !== title || !args.includes('--body') || value('--body') !== '' || args.includes('--body-file')) throw failure('message mismatch', 422);
       if (o.merge === 'fail') throw failure('merge failed', 405);
       store.merged = true;
       // 마지막 재확인 뒤 병합 API 처리 중 근거가 바뀐 상황(병합 후 감사 대상).

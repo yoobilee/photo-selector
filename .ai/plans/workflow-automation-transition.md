@@ -71,7 +71,7 @@ GitHub Environment `photo-selector-high-risk-merge`를 사용한다.
 
 - required reviewer는 실제 관리자 user ID, prevent self-review=true, administrator bypass=false, 허용 deployment branch는 정확한 main만.
 - 실제 workflow 시작 주체는 자동화 App으로 한다. 관리자가 직접 시작하고 self-review 금지에 걸리면 규칙을 끄지 말고 올바른 주체로 새 실행을 준비한다.
-- GitHub Actions 실행 Summary와 승인 job에 PR 링크, 변경 요약, base/head, 위험 이유, CI·독립 리뷰 링크, 차단 지적 수, squash 제목·본문, stateDigest를 표시한다. 사용자에게 숫자를 옮기게 하지 않는다.
+- GitHub Actions 실행 Summary와 승인 job에 PR 링크, 변경 요약, base/head, 위험 이유, CI·독립 리뷰 링크, 차단 지적 수, squash 제목, stateDigest를 표시한다. 사용자에게 숫자를 옮기게 하지 않는다.
 - 정상 사용자 흐름은 알림 링크 → Review deployments → 해당 환경의 Approve and deploy. 별도 댓글·명령어·추가 PR 승인 버튼을 요구하지 않는다. 거절하면 병합하지 않는다.
 - 배포의 GitHub SHA는 main일 수 있으므로 이것을 PR HEAD 승인으로 간주하지 않는다. **승인 전에 고정한 PR 상태 digest를 해당 run/attempt·환경 ID에 결합**한다. 승인 후 최신 HEAD를 새로 채택하지 않는다.
 - 서버 API의 review history에서 실제 승인자 ID·environment·run·시각을 확인한다. 승인 전 artifact/receipt digest, run/attempt 연결과 rerun 시 승인 재사용 방지를 실제 응답 fixture로 검증한다. API로 확정 못 하면 차단한다.
@@ -81,11 +81,11 @@ GitHub Environment `photo-selector-high-risk-merge`를 사용한다.
 
 ## 7. 자동 병합과 최신성 계약
 
-stateDigest는 저장소/PR/base/head, 제목·본문·검증된 squash 요약, 파일 목록, 정책/판정 코드 SHA, 위험도/구현자, CI check ID·앱·run·attempt·결론, receipt ID·reportHash·원본 수정 시각, 유효 변경 요청·현재 권한으로 계산한다. 승인 receipt 자체는 이 digest에 포함하지 않아 순환을 피한다.
+stateDigest는 저장소/PR/base/head, PR 제목·본문, 파일 목록, 정책/판정 코드 SHA, 위험도/구현자, CI check ID·앱·run·attempt·결론, receipt ID·reportHash·원본 수정 시각, 유효 변경 요청·현재 권한으로 계산한다. 승인 receipt 자체는 이 digest에 포함하지 않아 순환을 피한다.
 
 기본 브랜치의 고정 코드만 API 조회·조건부 squash를 실행한다. PR별 단일 실행 잠금, head 예상값, strict 보호, 필수 검사 성공을 요구한다. 파일·base·본문·리뷰·CI 재실행·권한·승인 취소 중 하나가 바뀌면 이전 승인은 무효다. 일반 작업도 동일 최신성 검사를 통과한 경우만 자동 병합한다.
 
-squash 제목은 검증된 PR 제목, 본문은 검증된 변경 요약·테스트·리뷰·남은 제한·의도한 Issue 종료 키워드다. 전체 게이트 JSON이나 로그를 붙이지 않는다. 요약 hash도 승인 대상에 포함한다. 병합 후 PR API merge_commit_sha로 제목·본문·main 포함 여부와 당시 근거를 감사한다. 감사 실패는 브랜치 정리를 멈추고 실제 병합 사실과 경고를 보고한다.
+squash 메시지는 검증된 PR 제목 한 줄이며 본문은 빈 값으로 명시한다([커밋·PR·병합 메시지](../policies/git-messages.md#본문-없음)). 변경 요약·테스트·리뷰·남은 제한·의도한 Issue 종료 키워드는 PR 본문에 둔다. 병합 후 PR API merge_commit_sha로 제목·본문 없음·main 포함 여부와 당시 근거를 감사한다. 감사 실패는 브랜치 정리를 멈추고 실제 병합 사실과 경고를 보고한다.
 
 GitHub 병합 API의 HEAD 고정은 base/본문/리뷰/권한 전체를 원자적으로 고정하지 않는다. 마지막 조회 이후의 경쟁 구간이 남음을 명시하며 strict 보호·최종 재조회·사후 감사를 모두 유지한다. 이것을 해결한 것처럼 표시하지 않는다.
 

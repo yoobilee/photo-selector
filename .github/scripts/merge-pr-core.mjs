@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertPullRequestUnchanged, pullRequestSnapshot, validTitle } from './review-gate-core.mjs';
@@ -404,15 +404,13 @@ async function evidenceUnchangedAfterMerge({ github, repo, number, expectedDiges
 async function mergeAndCleanup({ gh, git, repo, number, assessment, out, err, sleep }) {
   const github = createGitHub({ gh, repo });
   const { pr, head, defaultBranch } = assessment;
-  let directory; let merged = false; let after;
+  let merged = false; let after;
   try {
-    // 셸 문자열을 만들지 않고 인수 배열과 UTF-8 파일로 제목·본문·Issue 자동 종료 키워드를 그대로 보존한다.
-    directory = mkdtempSync(join(tmpdir(), 'merge-pr-'));
-    const bodyFile = join(directory, 'body.txt');
-    writeFileSync(bodyFile, pr.body, { encoding: 'utf8', mode: 0o600 });
     try {
       // squash만 사용하고 관리자 우회·GitHub auto-merge·gh의 브랜치 삭제 옵션은 쓰지 않는다.
-      gh(['pr', 'merge', String(number), '--repo', repo, '--squash', '--match-head-commit', head, '--subject', pr.title, '--body-file', bodyFile]);
+      // 병합 커밋은 PR 제목 한 줄만 쓴다. 본문을 생략하면 저장소 기본값(커밋 목록)이 들어가므로 빈 본문을 명시한다.
+      // Issue 연결·자동 종료 키워드는 PR 본문에 있으며 GitHub가 PR 병합 시 처리한다. 셸 문자열 없이 인수 배열로 전달한다.
+      gh(['pr', 'merge', String(number), '--repo', repo, '--squash', '--match-head-commit', head, '--subject', pr.title, '--body', '']);
     } catch {
       // 실패 응답이어도 실제로는 병합됐을 수 있다. 다시 병합하지 않고 실제 상태만 조회한다.
       let now;
@@ -426,8 +424,11 @@ async function mergeAndCleanup({ gh, git, repo, number, assessment, out, err, sl
     merged = true;
     after = github.api(`repos/${repo}/pulls/${number}`);
     if (!after.merged || !shaPattern.test(after.merge_commit_sha ?? '') || after.head?.sha !== head) throw new Error('병합 결과 조회 실패');
-    const subject = github.api(`repos/${repo}/commits/${after.merge_commit_sha}`).commit.message.split('\n')[0];
+    const message = github.api(`repos/${repo}/commits/${after.merge_commit_sha}`).commit.message;
+    const subject = message.split('\n')[0];
     if (subject !== pr.title || !validTitle(subject)) throw new Error('저장된 병합 제목 불일치');
+    // 제목 뒤 줄바꿈만 허용한다. 본문·트레일러가 있으면 정책 위반이며 이미 병합됐으므로 사람에게 알린다.
+    if (message.replace(/\n+$/, '') !== subject) throw new Error('저장된 병합 커밋에 본문이 있음');
     out(`병합과 실제 제목 검증 완료: ${after.merge_commit_sha}`);
     out(subject);
   } catch {
@@ -435,8 +436,6 @@ async function mergeAndCleanup({ gh, git, repo, number, assessment, out, err, sl
       ? '병합 명령은 완료됐지만 사후 검증이 실패했습니다. PR과 실제 병합 커밋을 사람이 확인하세요. 재병합·이력 재작성·브랜치 정리는 하지 않습니다.'
       : '병합 준비 또는 병합 명령이 실패했습니다. GitHub PR 상태를 확인하세요. 원시 오류·인증값은 출력하지 않습니다.');
     return 1;
-  } finally {
-    if (directory) rmSync(directory, { recursive: true, force: true });
   }
   // 병합 후 감사: 마지막 재확인과 병합 API 사이의 근거 변경은 막을 수 없으므로 사후에 감지한다.
   // 다르거나 확인할 수 없으면 되돌리지 않고, 사람이 조사할 수 있도록 브랜치 정리도 하지 않는다.

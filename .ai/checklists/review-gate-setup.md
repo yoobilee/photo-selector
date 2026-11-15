@@ -207,8 +207,8 @@ node .github/scripts/merge-pr.mjs owner/repo PR번호 squash --head <SHA>       
 2. 첫 점검을 한다.
 3. 실행 직전에 전체를 다시 점검한다. head, fingerprint, 근거 digest, 위험도가 그대로여야 한다.
 4. 최종 재확인을 한다.
-5. `gh pr merge --squash --match-head-commit <head>`로 병합한다.
-6. 실제 병합 커밋 제목을 검증한다.
+5. `gh pr merge --squash --match-head-commit <head> --subject <PR 제목> --body ""`로 병합한다. 본문은 빈 값으로 명시한다(저장소 기본값은 커밋 목록을 본문으로 넣는다).
+6. 실제 병합 커밋 메시지가 PR 제목 한 줄뿐인지(본문 없음) 검증한다.
 7. 병합 후 감사를 한다.
 8. 브랜치를 정리한다.
 

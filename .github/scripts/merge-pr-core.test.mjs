@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseArgs, runMergeTool, trustedModules } from './merge-pr-core.mjs';
-import { createFake, sideEffects, head, newHead } from './merge-pr-fixture.mjs';
+import { createFake, sideEffects, head, newHead, title } from './merge-pr-fixture.mjs';
 
 // 가짜 gh·git을 직접 주입하므로 Windows·macOS·Linux 모두에서 실행한다.
 async function run(options = {}, flags = [], { locked = false, store = {} } = {}) {
@@ -334,6 +334,24 @@ test('병합 실패는 재시도하지 않고, 실패 응답 뒤 실제 병합�
   assert.equal(subject.status, 1);
   assert.match(subject.err, /사후 검증이 실패/);
   assert.equal(subject.effects.length, 1, '브랜치 정리 없음');
+  // 제목이 같아도 본문·트레일러가 저장됐으면 제목 한 줄 정책 위반이다. 되돌리지 않고 정리하지 않는다.
+  const withBody = await run({ mergeBody: true });
+  assert.equal(withBody.status, 1);
+  assert.match(withBody.err, /사후 검증이 실패/);
+  assert.equal(withBody.effects.length, 1, '브랜치 정리 없음');
+});
+
+test('squash 병합은 PR 제목 한 줄과 빈 본문을 명시하고 PR 본문을 커밋에 넣지 않음', async () => {
+  const r = await run();
+  assert.equal(r.status, 0, r.err);
+  assert.equal(r.merges.length, 1);
+  const merge = r.merges[0];
+  const value = flag => merge[merge.indexOf(flag) + 1];
+  assert.ok(merge.includes('--body'));
+  assert.equal(value('--body'), '');
+  assert.ok(!merge.includes('--body-file'));
+  assert.equal(value('--subject'), title);
+  assert.ok(!merge.some(arg => arg.includes('Closes #7')), 'PR 본문의 Issue 종료 키워드를 커밋에 넣지 않음');
 });
 
 test('원격 브랜치: 자동 삭제가 안 됐을 때만 조건을 모두 확인하고 SHA 조건부 삭제', async () => {

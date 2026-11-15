@@ -33,13 +33,16 @@ test('CI에서는 병합 도구 CLI 테스트를 Linux에서 실행', () => {
   if (process.env.CI) assert.equal(process.platform, 'linux', 'CI에서 병합 도구 테스트가 건너뛰어졌습니다.');
 });
 
-linuxTest('한글·셸 기호·Issue 본문과 예상 head를 squash 병합 인수로 보존', () => {
+linuxTest('한글·셸 기호 제목과 예상 head를 squash 병합 인수로 보존하고 본문은 빈 값으로 명시', () => {
   const { result, merges } = run();
   assert.equal(result.status, 0, result.stderr);
   assert.equal(merges.length, 1);
   const merge = merges[0];
   assert.equal(merge[merge.indexOf('--match-head-commit') + 1], head);
   assert.equal(merge[merge.indexOf('--subject') + 1], title);
+  assert.ok(merge.includes('--body'));
+  assert.equal(merge[merge.indexOf('--body') + 1], '');
+  assert.ok(!merge.includes('--body-file'));
   assert.ok(merge.includes('--squash'));
   assert.match(result.stdout, /병합과 실제 제목 검증 완료/);
 });
