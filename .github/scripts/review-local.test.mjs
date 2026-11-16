@@ -7,7 +7,7 @@ import { localFixture } from './review-local-fixture.mjs';
 import { publishEvidence } from './review-evidence.mjs';
 import { parseLocalReport, renderLocalReport, validatePluginResult, verifyLocalReport, publicationModules, evidenceWorkflow } from './review-evidence-source.mjs';
 import { assessMerge, runMergeTool } from './merge-pr-core.mjs';
-import { parsePluginArgs, collectPluginResult, findingsFromText, runPluginPublication } from './review-plugin-cli.mjs';
+import { parsePluginArgs, collectPluginResult, findingsFromText, runPluginPublication, pluginPublicationFailureMessage } from './review-plugin-cli.mjs';
 
 test('완료 결과 봇 게시·영수증·직접 관리자 확인을 구분하고 링크·hash·확인 내용을 생성', async () => {
   const f = localFixture(); const result = await f.result();
@@ -106,6 +106,20 @@ test('게시 직전 마지막 PR 재조회에서 head가 바뀌면 댓글을 쓰
   assert.equal(f.comments.length, 0);
 });
 
+test('CLI 중단 안내는 요청 전·불명확·충돌을 구분하고 원시 오류를 출력하지 않음', () => {
+  for (const [code, pattern] of [
+    ['review-publication-preflight', /같은 명령을 직접 재실행/],
+    ['review-publication-uncertain', /불명확.*자동 재요청하지 않습니다/],
+    ['review-publication-conflict', /게시 결과 충돌/],
+    ['review-report-too-large', /16000바이트/],
+    ['unexpected', /원시 오류는 출력하지 않습니다/],
+    ['toString', /원시 오류는 출력하지 않습니다/],
+  ]) {
+    const text = pluginPublicationFailureMessage({ code, message: 'private API response' });
+    assert.match(text, pattern); assert.doesNotMatch(text, /private API response/);
+  }
+});
+
 function pluginFixture(target) {
   const output = { review: 'Review', threadId: 'thread-1', target: { mode: 'branch', baseRef: target.base }, codex: { status: 0, stdout: 'No actionable defects were found. Build and E2E were not run.' } };
   const job = { id: 'job-1', kind: 'review', status: 'completed', sessionId: 'session-1', threadId: 'thread-1', turnId: 'turn-1',
@@ -135,7 +149,12 @@ test('CI 진행 중 완료 원문 보존 → 성공 후 모델 재호출 없이 
   const w = await wrapperFixture(t); const { f, path, calls } = w;
   Object.assign(f.ci.check, { status: 'in_progress', conclusion: null });
   Object.assign(f.ci.run, { status: 'in_progress', conclusion: null });
-  await assert.rejects(w.run(), /필수 CI/);
+  await assert.rejects(w.run(), error => {
+    assert.match(error.message, /필수 CI/);
+    assert.equal(error.code, 'review-publication-preflight');
+    assert.match(pluginPublicationFailureMessage(error), /CI/);
+    return true;
+  });
   const completed = readFileSync(path, 'utf8'); const ledger = JSON.parse(completed);
   assert.equal(ledger.state, 'completed'); assert.equal(ledger.publicationRequested, undefined);
   assert.equal(ledger.result.report, w.data.output.codex.stdout);
@@ -164,14 +183,23 @@ test('dispatch 준비 실패는 ledger 불변·재처리 가능, 실제 요청 �
     if (args[0] === 'api' && args[1].includes('/contents/.github/workflows/review-evidence.yml')) throw new Error('unavailable');
     return f.gh(args);
   };
-  await assert.rejects(w.run({ gh: unavailable }), /요청 전/);
+  await assert.rejects(w.run({ gh: unavailable }), error => {
+    assert.equal(error.code, 'review-publication-preflight');
+    assert.match(pluginPublicationFailureMessage(error), /같은 명령을 직접 재실행/);
+    return true;
+  });
   const completed = readFileSync(path, 'utf8');
   assert.equal(JSON.parse(completed).publicationRequested, undefined);
   await assert.rejects(w.run({ gh: unavailable }), /요청 전/);
   assert.equal(readFileSync(path, 'utf8'), completed);
   assert.equal(f.dispatches.length, 0);
   const uncertain = args => { const response = f.gh(args); if (args[0] === 'workflow') throw new Error('response lost'); return response; };
-  await assert.rejects(w.run({ gh: uncertain }), /자동 재시도하지 않음/);
+  await assert.rejects(w.run({ gh: uncertain }), error => {
+    assert.equal(error.code, 'review-publication-uncertain');
+    assert.match(pluginPublicationFailureMessage(error), /불명확.*자동 재요청하지 않습니다/);
+    assert.doesNotMatch(pluginPublicationFailureMessage(error), /재실행할 수/);
+    return true;
+  });
   const requested = readFileSync(path, 'utf8');
   assert.equal(JSON.parse(requested).publicationRequested, true);
   await assert.rejects(w.run({ maxPolls: 1 }), /완료를 확인하지 못함/);
@@ -270,10 +298,15 @@ test('CI 사전 확인 직후 head·CI 변경은 서버가 재검증하고 댓�
       }
       return response;
     };
-    await assert.rejects(w.run({ gh, maxPolls: 1 }));
-    await assert.rejects(publishEvidence({ github: w.f.github, context: w.f.context, request: w.f.dispatches[0] }));
+    await assert.rejects(w.run({ gh, maxPolls: 1 }), kind === 'head' ? /게시 대기 중 대상 변경/ : /완료를 확인하지 못함/);
+    await assert.rejects(publishEvidence({ github: w.f.github, context: w.f.context, request: w.f.dispatches[0] }), kind === 'head' ? /대상/ : /등록 전 근거 변경/);
+    if (kind === 'ci') {
+      // 갱신된 collectionHash로 앞선 근거 변경 방어를 통과시켜 CI 재검증 자체도 확인한다.
+      const freshRequest = await w.f.request(w.f.dispatches[0].result);
+      await assert.rejects(publishEvidence({ github: w.f.github, context: w.f.context, request: freshRequest }), /필수 CI 미통과/);
+    }
     assert.equal(w.f.dispatches.length, 1); assert.equal(w.f.comments.length, 0);
-    await assert.rejects(w.run({ maxPolls: 1 }));
+    await assert.rejects(w.run({ maxPolls: 1 }), kind === 'head' ? /로컬 검토 대상 SHA 불일치/ : /완료를 확인하지 못함/);
     assert.equal(w.calls.reviews, 1); assert.equal(w.f.dispatches.length, 1);
   });
 });

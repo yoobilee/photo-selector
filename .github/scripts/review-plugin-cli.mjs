@@ -9,6 +9,17 @@ import { findingsFromText, parserVersion } from './review-result-parser.mjs';
 export { findingsFromText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 
+// CLI에는 원시 오류/API 응답 대신 이 고정 안내만 출력한다.
+export function pluginPublicationFailureMessage(error) {
+  const messages = {
+    'review-publication-preflight': '게시 요청 전 중단했습니다. 필수 CI의 완료·성공과 workflow 출처 및 요청 준비 상태를 확인하세요. 문제가 해소되면 같은 명령을 직접 재실행할 수 있으며 완료 결과를 재사용하고 모델을 다시 호출하지 않습니다.',
+    'review-publication-uncertain': '게시 요청의 성공 여부가 불명확합니다. 자동 재요청하지 않습니다. 기존 ledger를 보존하고 Actions 실행·실제 댓글·영수증을 확인하세요.',
+    'review-publication-conflict': '게시 결과 충돌: 같은 대상에 다른 job/결과 또는 중복 보고서가 이미 게시됐습니다. 기존 ledger·댓글·영수증을 보존하고 확인하세요.',
+    'review-report-too-large': '리뷰 원문이 16000바이트를 초과했습니다. .git의 captured ledger에 원문·job을 보존했으며 자동 게시하지 않습니다.',
+  };
+  return Object.hasOwn(messages, error?.code) ? messages[error.code] : '리뷰 수집/게시 중단. 완료·대상·형식·기존 ledger와 Actions를 확인하세요. 자동 재시도·추가 AI 호출·관리자 확인·승인은 하지 않습니다. 원시 오류는 출력하지 않습니다.';
+}
+
 export function parsePluginArgs(argv, env = process.env) {
   const [repository, rawNumber, ...rest] = argv;
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? '') || !/^[1-9][0-9]*$/.test(rawNumber ?? '') || !Number.isSafeInteger(Number(rawNumber))) return null;
@@ -156,9 +167,12 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
           } catch (error) { preflightError = error; throw error; }
         } });
       if (status !== 0) {
-        if (preflightError) throw preflightError;
-        if (!JSON.parse(readFileSync(path, 'utf8')).publicationRequested) throw new Error('게시 요청 전 준비 실패. 완료 결과를 보존했으며 모델 재호출 없이 재실행 가능');
-        throw new Error('게시 요청 실패·결과 불명확. 자동 재시도하지 않음');
+        if (preflightError) {
+          if (preflightError.code !== 'review-publication-conflict') preflightError.code = 'review-publication-preflight';
+          throw preflightError;
+        }
+        if (!JSON.parse(readFileSync(path, 'utf8')).publicationRequested) throw Object.assign(new Error('게시 요청 전 준비 실패. 완료 결과를 보존했으며 모델 재호출 없이 재실행 가능'), { code: 'review-publication-preflight' });
+        throw Object.assign(new Error('게시 요청 실패·결과 불명확. 자동 재시도하지 않음'), { code: 'review-publication-uncertain' });
       }
     }
     for (let i = 0; i < maxPolls; i++) {
@@ -198,9 +212,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
       }));
       process.exitCode = await runPluginPublication({ options, gh: command('gh'), git: command('git'), plugin });
     } catch (error) {
-      if (error.code === 'review-publication-conflict') console.error('게시 결과 충돌: 같은 대상에 다른 job/결과 또는 중복 보고서가 이미 게시됐습니다. 기존 ledger·댓글·영수증을 보존하고 확인하세요.');
-      if (error.code === 'review-report-too-large') console.error('리뷰 원문이 16000바이트를 초과했습니다. .git의 captured ledger에 원문·job을 보존했으며 자동 게시하지 않습니다.');
-      console.error('리뷰 수집/게시 중단. 완료·대상·형식·기존 ledger와 Actions를 확인하세요. 자동 재시도·추가 AI 호출·관리자 확인·승인은 하지 않습니다. 원시 오류는 출력하지 않습니다.');
+      console.error(pluginPublicationFailureMessage(error));
       process.exitCode = 1;
     }
   }
