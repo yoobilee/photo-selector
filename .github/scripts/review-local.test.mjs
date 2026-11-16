@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localFixture } from './review-local-fixture.mjs';
 import { publishEvidence } from './review-evidence.mjs';
-import { parseLocalReport, validatePluginResult, verifyLocalReport, publicationModules, evidenceWorkflow } from './review-evidence-source.mjs';
+import { parseLocalReport, renderLocalReport, validatePluginResult, verifyLocalReport, publicationModules, evidenceWorkflow } from './review-evidence-source.mjs';
 import { assessMerge, runMergeTool } from './merge-pr-core.mjs';
 import { parsePluginArgs, collectPluginResult, findingsFromText, runPluginPublication } from './review-plugin-cli.mjs';
 
@@ -113,6 +113,210 @@ function pluginFixture(target) {
   return { output, stored: { job: { status: 'completed' }, storedJob: job } };
 }
 
+async function wrapperFixture(t, f = localFixture()) {
+  const { target } = await f.result();
+  const directory = mkdtempSync(join(tmpdir(), 'review-preflight-test-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'ledger.json');
+  const data = pluginFixture(target);
+  const calls = { reviews: 0, reads: 0, sleeps: 0 };
+  const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? target.head : target.base;
+  const plugin = args => {
+    if (args[0] === 'review') { calls.reviews++; return data.output; }
+    assert.deepEqual(args, ['result', '--json']); calls.reads++; return data.stored;
+  };
+  const options = { repository: 'owner/repo', number: 1, session: 'session-1' };
+  const run = (overrides = {}) => runPluginPublication({ options, gh: f.gh, git, plugin,
+    now: () => '2026-11-09T00:00:00Z', maxPolls: 3, sleep: async () => { calls.sleeps++; }, out: () => {}, ...overrides });
+  return { f, path, target, data, calls, options, run };
+}
+
+test('CI 진행 중 완료 원문 보존 → 성공 후 모델 재호출 없이 한 번 게시·영수증 재사용', async t => {
+  const w = await wrapperFixture(t); const { f, path, calls } = w;
+  Object.assign(f.ci.check, { status: 'in_progress', conclusion: null });
+  Object.assign(f.ci.run, { status: 'in_progress', conclusion: null });
+  await assert.rejects(w.run(), /필수 CI/);
+  const completed = readFileSync(path, 'utf8'); const ledger = JSON.parse(completed);
+  assert.equal(ledger.state, 'completed'); assert.equal(ledger.publicationRequested, undefined);
+  assert.equal(ledger.result.report, w.data.output.codex.stdout);
+  assert.equal(ledger.result.checks.find(c => c.name === 'GitHub check: verify').status, 'unknown');
+  await assert.rejects(w.run(), /필수 CI/);
+  assert.equal(readFileSync(path, 'utf8'), completed);
+  assert.equal(calls.reviews, 1); assert.equal(f.dispatches.length, 0); assert.equal(f.comments.length, 0);
+  Object.assign(f.ci.check, { status: 'completed', conclusion: 'success' });
+  Object.assign(f.ci.run, { status: 'completed', conclusion: 'success' });
+  await assert.rejects(w.run({ maxPolls: 1 }), /완료를 확인하지 못함/);
+  const requested = JSON.parse(readFileSync(path));
+  assert.deepEqual(requested.result, ledger.result); // Unknown check claims are never upgraded.
+  assert.equal(f.dispatches.length, 1);
+  const published = await f.publish(requested.result); f.finish(published);
+  const evidence = JSON.stringify({ comments: f.comments, artifacts: f.artifacts });
+  assert.equal(await w.run(), 0); assert.equal(await w.run(), 0);
+  assert.equal(calls.reviews, 1); assert.equal(calls.reads, 1);
+  assert.equal(f.dispatches.length, 1); assert.equal(f.comments.length, 1);
+  assert.equal(JSON.stringify({ comments: f.comments, artifacts: f.artifacts }), evidence);
+});
+
+test('dispatch 준비 실패는 ledger 불변·재처리 가능, 실제 요청 응답 유실은 재요청 금지', async t => {
+  const w = await wrapperFixture(t); const { f, path } = w;
+  // Fail after result collection, while checking that the publisher exists on main.
+  const unavailable = args => {
+    if (args[0] === 'api' && args[1].includes('/contents/.github/workflows/review-evidence.yml')) throw new Error('unavailable');
+    return f.gh(args);
+  };
+  await assert.rejects(w.run({ gh: unavailable }), /요청 전/);
+  const completed = readFileSync(path, 'utf8');
+  assert.equal(JSON.parse(completed).publicationRequested, undefined);
+  await assert.rejects(w.run({ gh: unavailable }), /요청 전/);
+  assert.equal(readFileSync(path, 'utf8'), completed);
+  assert.equal(f.dispatches.length, 0);
+  const uncertain = args => { const response = f.gh(args); if (args[0] === 'workflow') throw new Error('response lost'); return response; };
+  await assert.rejects(w.run({ gh: uncertain }), /자동 재시도하지 않음/);
+  const requested = readFileSync(path, 'utf8');
+  assert.equal(JSON.parse(requested).publicationRequested, true);
+  await assert.rejects(w.run({ maxPolls: 1 }), /완료를 확인하지 못함/);
+  assert.equal(readFileSync(path, 'utf8'), requested);
+  assert.equal(w.calls.reviews, 1); assert.equal(f.dispatches.length, 1); assert.equal(f.comments.length, 0);
+});
+
+test('복구 파생 결과도 CI 대기 중 원본 ledger·원문을 보존하고 성공 뒤 한 번만 요청', async t => {
+  const w = await wrapperFixture(t); const { f, data, path } = w;
+  data.output.codex.stdout = observedReport;
+  const result = collectPluginResult({ ...data, target: w.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+  result.findings.unknown = 1;
+  const original = JSON.stringify({ state: 'completed', target: w.target, session: 'session-1', result });
+  writeFileSync(path, original);
+  Object.assign(f.ci.check, { status: 'in_progress', conclusion: null });
+  const recover = () => w.run({ options: { ...w.options, recover: true }, maxPolls: 1 });
+  await assert.rejects(recover(), /필수 CI/);
+  const recovered = readFileSync(path + '.recovered.json', 'utf8');
+  assert.equal(JSON.parse(recovered).publicationRequested, undefined);
+  await assert.rejects(recover(), /필수 CI/);
+  assert.equal(readFileSync(path + '.recovered.json', 'utf8'), recovered);
+  Object.assign(f.ci.check, { status: 'completed', conclusion: 'success' });
+  await assert.rejects(recover(), /완료를 확인하지 못함/);
+  const p = await f.publish(JSON.parse(readFileSync(path + '.recovered.json')).result); f.finish(p);
+  assert.equal(await recover(), 0); assert.equal(await w.run(), 0);
+  assert.equal(readFileSync(path, 'utf8'), original);
+  assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1);
+  assert.equal(f.dispatches.length, 1); assert.equal(f.comments.length, 1);
+});
+
+test('게시 대기 중 다른 job 보고서가 도착하면 영수증 대기나 일반 timeout 대신 충돌', async t => {
+  const w = await wrapperFixture(t);
+  const result = await w.f.result(); // Different job and result from the wrapper's native result.
+  result.source.jobId = 'other-job';
+  let published = false;
+  const gh = args => {
+    const response = w.f.gh(args);
+    if (args[0] === 'workflow') published = true;
+    return response;
+  };
+  await assert.rejects(w.run({ gh, sleep: async () => {
+    assert.equal(published, true);
+    const p = await w.f.publish(result); w.f.finish(p);
+  } }), /게시 결과 충돌/);
+  const original = readFileSync(w.path, 'utf8');
+  await assert.rejects(w.run(), /게시 결과 충돌/);
+  assert.equal(readFileSync(w.path, 'utf8'), original);
+  assert.equal(w.calls.reviews, 1); assert.equal(w.f.dispatches.length, 1); assert.equal(w.f.comments.length, 1);
+});
+
+test('필수 CI workflow·실행·대상·검사 경계를 wrapper·서버·확인에서 동일하게 차단', async t => {
+  const cases = [
+    ['pending', f => Object.assign(f.ci.check, { status: 'in_progress', conclusion: null })],
+    ['failed', f => { f.ci.check.conclusion = 'failure'; }],
+    ['unknown', f => { f.ci.check.conclusion = null; }],
+    ['missing run', f => { f.ci.count = 0; }],
+    ['duplicate run', f => { f.ci.count = 2; }],
+    ['workflow', f => { f.ci.run.path = '.github/workflows/other.yml'; }],
+    ['event', f => { f.ci.run.event = 'push'; }],
+    ['repository', f => { f.ci.run.repository = { full_name: 'other/repo' }; }],
+    ['head repository', f => { f.ci.run.head_repository = { full_name: 'other/repo' }; }],
+    ['head', f => { f.ci.run.head_sha = 'a'.repeat(40); }],
+    ['suite', f => { f.ci.run.check_suite_id = 999; }],
+    ['run pending', f => { f.ci.run.status = 'in_progress'; }],
+    ['run failure', f => { f.ci.run.conclusion = 'failure'; }],
+    ['check app', f => { f.ci.check.app = { id: 1 }; }],
+    ['check head', f => { f.ci.check.head_sha = 'a'.repeat(40); }],
+    ['workflow changed', (f, target) => f.codeVersions.set('.github/workflows/ci.yml', new Map([[target.base, 'c'.repeat(40)], [target.head, 'a'.repeat(40)]]))],
+    ['workflow missing', (f, target) => f.codeVersions.set('.github/workflows/ci.yml', new Map([[target.base, 'c'.repeat(40)]]))],
+  ];
+  for (const [name, mutate] of cases) await t.test(name, async t => {
+    const w = await wrapperFixture(t); const { f } = w;
+    const result = await f.result(); mutate(f, result.target);
+    await assert.rejects(w.run(), /필수 CI/);
+    const before = readFileSync(w.path, 'utf8');
+    assert.equal(JSON.parse(before).publicationRequested, undefined);
+    await assert.rejects(w.run(), /필수 CI/);
+    assert.equal(readFileSync(w.path, 'utf8'), before);
+    await assert.rejects(f.publish(result), /필수 CI/);
+    assert.equal(w.calls.reviews, 1); assert.equal(f.dispatches.length, 0); assert.equal(f.comments.length, 0);
+    const confirmedFixture = localFixture(); const r = await confirmedFixture.result();
+    const p = await confirmedFixture.publish(r); confirmedFixture.finish(p);
+    mutate(confirmedFixture, r.target);
+    await assert.rejects(confirmedFixture.confirm(), /필수 CI/);
+  });
+});
+
+test('CI 사전 확인 직후 head·CI 변경은 서버가 재검증하고 댓글을 만들지 않음', async t => {
+  for (const kind of ['head', 'ci']) await t.test(kind, async t => {
+    const w = await wrapperFixture(t);
+    const gh = args => {
+      const response = w.f.gh(args);
+      if (args[0] === 'workflow') {
+        if (kind === 'head') w.f.fake.store.head = 'e'.repeat(40);
+        else w.f.ci.check.conclusion = 'failure';
+      }
+      return response;
+    };
+    await assert.rejects(w.run({ gh, maxPolls: 1 }));
+    await assert.rejects(publishEvidence({ github: w.f.github, context: w.f.context, request: w.f.dispatches[0] }));
+    assert.equal(w.f.dispatches.length, 1); assert.equal(w.f.comments.length, 0);
+    await assert.rejects(w.run({ maxPolls: 1 }));
+    assert.equal(w.calls.reviews, 1); assert.equal(w.f.dispatches.length, 1);
+  });
+});
+
+test('복구는 running/captured 및 다른 세션 ledger를 조회·쓰기·모델 호출 없이 거부', async t => {
+  for (const kind of ['running', 'captured', 'session']) await t.test(kind, async t => {
+    const w = await wrapperFixture(t); const result = await w.f.result();
+    const text = JSON.stringify({ state: kind === 'session' ? 'completed' : kind,
+      session: kind === 'session' ? 'other-session' : 'session-1', target: w.target, result });
+    writeFileSync(w.path, text);
+    await assert.rejects(w.run({ options: { ...w.options, recover: true } }), /unpublished completed target/);
+    if (kind !== 'captured') await assert.rejects(w.run(), /미완료·실패·다른 세션/);
+    assert.equal(readFileSync(w.path, 'utf8'), text); assert.equal(existsSync(w.path + '.recovered.json'), false);
+    assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 0);
+    assert.equal(w.f.dispatches.length, 0); assert.equal(w.f.comments.length, 0);
+  });
+});
+
+test('손상·과거 v1 봇 보고서는 게시·확인·wrapper 모두 무시하지 않고 원문·영수증을 보존', async t => {
+  for (const kind of ['malformed', 'v1', 'tampered', 'missing target', 'missing source']) await t.test(kind, async t => {
+    const f = localFixture(); const r = await f.result(); const p = await f.publish(r); f.finish(p);
+    const bad = structuredClone(f.comments[0]); bad.id = 201;
+    if (kind === 'malformed') bad.body = '# 미인증 로컬 독립 리뷰 자료\n\nbroken';
+    if (kind === 'v1') bad.body = '# 미인증 로컬 독립 리뷰 자료\n\n<!-- photo-selector-review-evidence:v1 old -->';
+    if (kind === 'tampered') bad.body += 'changed';
+    if (kind === 'missing target' || kind === 'missing source') {
+      const invalid = structuredClone(r);
+      delete invalid[kind === 'missing target' ? 'target' : 'source'];
+      bad.body = renderLocalReport(invalid, 44).body;
+    }
+    f.comments.push(bad);
+    const before = JSON.stringify({ comments: f.comments, artifacts: f.artifacts });
+    const w = await wrapperFixture(t, f);
+    await assert.rejects(f.confirm());
+    const originalRun = structuredClone(f.run); f.context.runId = 45;
+    f.github.rest.actions.getWorkflowRun = async ({ run_id }) => ({ data: run_id === 44 ? originalRun : { ...originalRun, id: 45, status: 'in_progress', conclusion: null } });
+    await assert.rejects(f.publish(r));
+    await assert.rejects(w.run());
+    assert.equal(existsSync(w.path), false); assert.equal(w.calls.reviews, 0);
+    assert.equal(f.dispatches.length, 0); assert.equal(JSON.stringify({ comments: f.comments, artifacts: f.artifacts }), before);
+  });
+});
+
 const observedReport = 'No actionable defects were found in the changes against the specified base. Lint, 46 targeted unit tests, and 31 merge-tool tests passed; four platform-specific tests were skipped. Build and E2E checks were not run.';
 
 test('PR23 관찰 문법 전체만 수용하고 혼재·모호함·미완료는 unknown 유지', () => {
@@ -197,7 +401,8 @@ test('wrapper는 다른 job의 기존 게시를 현재 ledger의 성공으로 �
   const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? r.target.head : r.target.base;
   try {
     await assert.rejects(runPluginPublication({ options: { repository: 'owner/repo', number: 1, session: 'session-1' },
-      gh: f.gh, git, plugin: () => assert.fail('No model call'), maxPolls: 1, out: () => assert.fail('No successful confirmation') }));
+      gh: f.gh, git, plugin: () => assert.fail('No model call'), maxPolls: 3,
+      sleep: () => assert.fail('Conflict must not poll'), out: () => assert.fail('No successful confirmation') }), /게시 결과 충돌/);
     assert.equal(f.dispatches.length, 0); assert.equal(f.comments.length, 1);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });

@@ -1,7 +1,7 @@
 import { describe, normalizeNewlines, parseConfirmation, reportHash, sha256, validateConfig, assertPullRequestUnchanged } from './review-gate-core.mjs';
 import { evaluatePR } from './review-gate.mjs';
 import { evaluateCodexReview, evaluateRequiredChecks } from './review-shadow-core.mjs';
-import { validatePluginResult, localReportsForTarget, verifyEvidenceCi, localReviewKey, renderLocalReport, parseLocalReport, verifyLocalReport, receiptName } from './review-evidence-source.mjs';
+import { validatePluginResult, localReportsForTarget, verifyEvidenceCi, renderLocalReport, verifyLocalReport, receiptName } from './review-evidence-source.mjs';
 
 export const evidenceWorkflow = '.github/workflows/review-evidence.yml';
 export const maxRequestBytes = 60_000;
@@ -244,10 +244,8 @@ export async function publishEvidence({ github, context, request }) {
 // 게시 후 실제 댓글과 영수증을 재검증한 값만 관리자가 직접 붙여 넣을 확인 내용으로 반환한다.
 export async function prepareLocalConfirmation({ github, repository, number }) {
   const { packet, state } = await collectReviewPacket({ github, repository, number });
-  const candidates = state.comments.filter(c => isEvidencePublisher(c) && normalizeNewlines(c.body).startsWith('# 미인증 로컬 독립 리뷰 자료\n'));
-  const matching = candidates.filter(c => {
-    try { return same(parseLocalReport(c.body).result.target, packet.target); } catch { return false; }
-  });
+  // 게시 경로와 동일하게 손상·구형·대상 불명 보고서를 무시하지 않는다.
+  const matching = localReportsForTarget(state.comments, packet.target);
   if (matching.length !== 1) fail('최신 로컬 보고서 누락·중복');
   const comment = matching[0];
   const verified = await verifyLocalReport({ github, repo: state.repo, pr: state.current, comment, fingerprint: packet.target.fingerprint });

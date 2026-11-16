@@ -13,7 +13,13 @@ export function localReportsForTarget(comments, target) {
   return comments.filter(isEvidencePublisher).filter(comment => {
     if (!normalizeNewlines(comment.body).startsWith(`${localHeading}\n`)) return false;
     // A malformed bot report is not permission to publish another result.
-    return sameReviewTarget(parseLocalReport(comment.body).result.target, target);
+    const { result } = parseLocalReport(comment.body);
+    const recorded = result.target;
+    if (!exact(recorded, ['repository', 'number', 'head', 'base', 'fingerprint', 'policySha'])
+        || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(recorded.repository) || !id(recorded.number)
+        || !sha(recorded.head) || !sha(recorded.base) || !digest(recorded.fingerprint) || !sha(recorded.policySha)) fail('로컬 봇 보고서 대상 형식 오류');
+    validatePluginResult(result, recorded, 'claude');
+    return sameReviewTarget(recorded, target);
   });
 }
 const id = value => Number.isSafeInteger(value) && value > 0;

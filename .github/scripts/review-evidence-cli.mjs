@@ -31,7 +31,8 @@ export function createEvidenceGitHub(gh, repository) {
   return github;
 }
 
-export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = console.log, err = console.error }) {
+export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = console.log, err = console.error,
+  beforeDispatch = async () => {} }) {
   const options = parseEvidenceArgs(argv);
   if (!options) { err(usage); return 1; }
   try {
@@ -65,6 +66,8 @@ export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = 
       const path = join(tmpdir(), `photo-selector-review-request-${randomUUID()}.json`);
       try {
         writeFileSync(path, JSON.stringify(reportRequest(packet, result)), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+        // Finish all preparation before the wrapper records an irreversible request attempt.
+        await beforeDispatch({ packet, state });
         gh(['workflow', 'run', 'review-evidence.yml', '--repo', options.repository, '--ref', state.defaultBranch,
           '--field', `pr_number=${options.number}`, '--field', `request=@${path}`]);
       } finally {

@@ -13,6 +13,8 @@ export function localFixture() {
   const codeVersions = new Map();
   const mergedCodeVersions = new Map();
   const contentRequests = [];
+  // Both the shell adapter and server adapter see the same CI mutations.
+  const ci = { check: {}, run: {}, count: 1 };
   const codeSha = (path, ref, fallback) => {
     contentRequests.push({ path, ref });
     const versions = fake.store.merged && mergedCodeVersions.has(path) ? mergedCodeVersions : codeVersions;
@@ -35,6 +37,12 @@ export function localFixture() {
     const value = JSON.parse(fake.gh(policy ? ['api', `repos/${repo}/contents/.ai/review-config.json?ref=main`] : args));
     if (args[1] === `repos/${repo}`) { value.full_name = repo; value.id = 12; }
     if (policy) value.sha = fake.store.merged && args[1].endsWith('ref=main') ? 'a'.repeat(40) : 'f'.repeat(40);
+    if (args[1].includes('/check-runs')) for (const page of value) {
+      for (const check of page.check_runs.filter(c => c.name === 'verify')) Object.assign(check, structuredClone(ci.check));
+    }
+    if (args[1].startsWith(`repos/${repo}/actions/runs?`)) for (const page of value) {
+      page.workflow_runs = page.workflow_runs.flatMap(run => Array.from({ length: ci.count }, () => ({ ...run, ...structuredClone(ci.run) })));
+    }
     if (args[1].includes('/check-runs') && fake.store.localEvidenceDigest) for (const page of value) {
       for (const check of page.check_runs.filter(c => c.name === 'independent-review')) {
         check.conclusion = 'success'; const proof = JSON.parse(check.external_id); proof.evidenceDigest = fake.store.localEvidenceDigest; check.external_id = JSON.stringify(proof);
@@ -79,5 +87,5 @@ export function localFixture() {
   const confirm = () => prepareLocalConfirmation({ github, repository: repo, number: 1 });
   const addConfirmation = confirmation => comments.push({ id: 300, user: { id: 1, login: 'owner', type: 'User' },
     created_at: '2026-11-10T00:03:00Z', updated_at: '2026-11-10T00:03:00Z', body: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\`` });
-  return { fake, gh, github, run, context, comments, artifacts, dispatches, codeVersions, mergedCodeVersions, contentRequests, collect, result, request, publish, finish, confirm, addConfirmation };
+  return { fake, gh, github, run, context, comments, artifacts, dispatches, ci, codeVersions, mergedCodeVersions, contentRequests, collect, result, request, publish, finish, confirm, addConfirmation };
 }

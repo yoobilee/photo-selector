@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { collectReviewPacket, prepareLocalConfirmation } from './review-evidence.mjs';
 import { createEvidenceGitHub, runEvidenceCli } from './review-evidence-cli.mjs';
-import { canonical, same, validatePluginResult, localReportsForTarget } from './review-evidence-source.mjs';
+import { canonical, same, validatePluginResult, localReportsForTarget, parseLocalReport, verifyEvidenceCi } from './review-evidence-source.mjs';
 import { findingsFromText, parserVersion } from './review-result-parser.mjs';
 export { findingsFromText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
@@ -128,30 +128,57 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       out(JSON.stringify({ state: 'review-needs-attention', result, published: false }));
       return 2;
     }
-    // 이미 등록됐으면 성공 영수증을 확인해 재사용한다. 다른 실패는 게시기가 전체 조회 후 fail-closed로 판단한다.
+    const existingPublication = state => {
+      const matches = localReportsForTarget(state.comments, target);
+      if (matches.length > 1 || matches.some(c => !same(parseLocalReport(c.body).result, result))) {
+        throw Object.assign(new Error('게시 결과 충돌: 같은 대상에 다른 job/결과 또는 중복 보고서가 이미 게시됨'), { code: 'review-publication-conflict' });
+      }
+      return matches.length > 0;
+    };
+    // 이미 등록됐으면 성공 영수증을 확인해 재사용한다. 충돌·손상은 대기 실패로 숨기지 않는다.
     const latest = await collect();
     if (!same(latest.packet.target, target)) throw new Error('게시 직전 대상 변경');
-    const already = localReportsForTarget(latest.state.comments, target).length > 0;
+    const already = existingPublication(latest.state);
     if (!already && !JSON.parse(readFileSync(path, 'utf8')).publicationRequested) {
-      // 응답을 잃어도 같은 대상의 dispatch를 자동 재요청하지 않도록 먼저 기록한다.
-      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, recovery: JSON.parse(readFileSync(path, 'utf8')).recovery, publicationRequested: true }), { mode: 0o600 });
+      let preflightError;
       const status = await runEvidenceCli({ argv: [options.repository, String(options.number), '--result', 'plugin-result.json', '--dispatch'], gh,
-        readFile: () => JSON.stringify(result), out: () => {}, err: () => {} });
-      if (status !== 0) throw new Error('게시 요청 실패. 자동 재시도하지 않음');
+        readFile: () => JSON.stringify(result), out: () => {}, err: () => {},
+        beforeDispatch: async ({ packet, state }) => {
+          try {
+            checkLocal();
+            if (!same(packet.target, target)) throw new Error('게시 요청 전 대상 변경');
+            if (existingPublication(state)) throw new Error('게시 요청 전 보고서 도착. 재실행하여 영수증 확인 필요');
+            await verifyEvidenceCi({ github, repo: state.repo, pr: state.current, config: state.config, checkRuns: state.checkRuns });
+            // 서버도 CI·대상을 다시 검사한다. 이 확인과 원격 요청은 원자적이지 않다.
+            // 요청 응답을 잃어도 재요청하지 않도록 실제 dispatch 직전에만 기록한다.
+            const ledger = JSON.parse(readFileSync(path, 'utf8'));
+            writeFileSync(path, JSON.stringify({ ...ledger, publicationRequested: true }), { mode: 0o600 });
+          } catch (error) { preflightError = error; throw error; }
+        } });
+      if (status !== 0) {
+        if (preflightError) throw preflightError;
+        if (!JSON.parse(readFileSync(path, 'utf8')).publicationRequested) throw new Error('게시 요청 전 준비 실패. 완료 결과를 보존했으며 모델 재호출 없이 재실행 가능');
+        throw new Error('게시 요청 실패·결과 불명확. 자동 재시도하지 않음');
+      }
     }
     for (let i = 0; i < maxPolls; i++) {
       const current = await collect();
       if (!same(current.packet.target, target)) throw new Error('게시 대기 중 대상 변경');
+      existingPublication(current.state);
+      let confirmed;
       try {
-        const confirmed = await prepareLocalConfirmation({ github, repository: options.repository, number: options.number });
-        if (!same(confirmed.publisher.result, result)) throw new Error('Existing publication belongs to a different result');
-        writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, recovery: JSON.parse(readFileSync(path, 'utf8')).recovery, publicationRequested: true,
-          publication: { commentUrl: confirmed.commentUrl, evidenceHash: confirmed.evidenceHash } }), { mode: 0o600 });
-        out(JSON.stringify({ state: 'published-awaiting-human', ...confirmed }, null, 2));
-        return 0;
+        confirmed = await prepareLocalConfirmation({ github, repository: options.repository, number: options.number });
       } catch {
         if (i + 1 < maxPolls) await sleep(5000);
+        continue;
       }
+      if (!same(confirmed.publisher.result, result)) {
+        throw Object.assign(new Error('게시 결과 충돌: 같은 대상에 다른 job/결과가 이미 게시됨'), { code: 'review-publication-conflict' });
+      }
+      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, recovery: JSON.parse(readFileSync(path, 'utf8')).recovery, publicationRequested: true,
+        publication: { commentUrl: confirmed.commentUrl, evidenceHash: confirmed.evidenceHash } }), { mode: 0o600 });
+      out(JSON.stringify({ state: 'published-awaiting-human', ...confirmed }, null, 2));
+      return 0;
     }
     throw new Error('게시·영수증 완료를 확인하지 못함. 요청을 반복하지 말고 Actions와 실제 댓글 확인 필요');
   } finally { unlinkSync(lockPath); }
@@ -171,6 +198,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
       }));
       process.exitCode = await runPluginPublication({ options, gh: command('gh'), git: command('git'), plugin });
     } catch (error) {
+      if (error.code === 'review-publication-conflict') console.error('게시 결과 충돌: 같은 대상에 다른 job/결과 또는 중복 보고서가 이미 게시됐습니다. 기존 ledger·댓글·영수증을 보존하고 확인하세요.');
       if (error.code === 'review-report-too-large') console.error('리뷰 원문이 16000바이트를 초과했습니다. .git의 captured ledger에 원문·job을 보존했으며 자동 게시하지 않습니다.');
       console.error('리뷰 수집/게시 중단. 완료·대상·형식·기존 ledger와 Actions를 확인하세요. 자동 재시도·추가 AI 호출·관리자 확인·승인은 하지 않습니다. 원시 오류는 출력하지 않습니다.');
       process.exitCode = 1;
