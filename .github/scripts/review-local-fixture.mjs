@@ -13,6 +13,8 @@ export function localFixture() {
   const codeVersions = new Map();
   const mergedCodeVersions = new Map();
   const contentRequests = [];
+  // Both the shell adapter and server adapter see the same CI mutations.
+  const ci = { check: {}, run: {}, count: 1 };
   const codeSha = (path, ref, fallback) => {
     contentRequests.push({ path, ref });
     const versions = fake.store.merged && mergedCodeVersions.has(path) ? mergedCodeVersions : codeVersions;
@@ -30,10 +32,17 @@ export function localFixture() {
       return JSON.stringify({ sha: codeSha(`.github/scripts/${name}`, url.searchParams.get('ref'), gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'))) });
     }
     if (args[1].startsWith(`repos/${repo}/contents/${evidenceWorkflow}`)) return JSON.stringify({ sha: codeSha(evidenceWorkflow, new URL(args[1], 'https://api.github.com/').searchParams.get('ref'), 'c'.repeat(40)) });
+    if (args[1].startsWith(`repos/${repo}/contents/.github/workflows/ci.yml`)) return JSON.stringify({ sha: codeSha('.github/workflows/ci.yml', new URL(args[1], 'https://api.github.com/').searchParams.get('ref'), 'c'.repeat(40)) });
     const policy = args[1].includes('/contents/.ai/review-config.json');
     const value = JSON.parse(fake.gh(policy ? ['api', `repos/${repo}/contents/.ai/review-config.json?ref=main`] : args));
     if (args[1] === `repos/${repo}`) { value.full_name = repo; value.id = 12; }
     if (policy) value.sha = fake.store.merged && args[1].endsWith('ref=main') ? 'a'.repeat(40) : 'f'.repeat(40);
+    if (args[1].includes('/check-runs')) for (const page of value) {
+      for (const check of page.check_runs.filter(c => c.name === 'verify')) Object.assign(check, structuredClone(ci.check));
+    }
+    if (args[1].startsWith(`repos/${repo}/actions/runs?`)) for (const page of value) {
+      page.workflow_runs = page.workflow_runs.flatMap(run => Array.from({ length: ci.count }, () => ({ ...run, ...structuredClone(ci.run) })));
+    }
     if (args[1].includes('/check-runs') && fake.store.localEvidenceDigest) for (const page of value) {
       for (const check of page.check_runs.filter(c => c.name === 'independent-review')) {
         check.conclusion = 'success'; const proof = JSON.parse(check.external_id); proof.evidenceDigest = fake.store.localEvidenceDigest; check.external_id = JSON.stringify(proof);
@@ -48,7 +57,7 @@ export function localFixture() {
   const run = { id: 44, workflow_id: 9, path: evidenceWorkflow, event: 'workflow_dispatch', run_attempt: 1, head_sha: context.sha,
     head_branch: 'main', status: 'in_progress', conclusion: null, repository: { id: 12, full_name: repo }, head_repository: { id: 12, full_name: repo },
     actor: { id: 1, login: 'owner', type: 'User' }, run_started_at: '2026-11-10T00:00:00Z', updated_at: '2026-11-10T00:02:00Z' };
-  github.rest.actions = { getWorkflowRun: async () => ({ data: run }), getWorkflow: async () => ({ data: { id: 9, path: evidenceWorkflow } }),
+  github.rest.actions = { ...github.rest.actions, getWorkflowRun: async () => ({ data: run }), getWorkflow: async () => ({ data: { id: 9, path: evidenceWorkflow } }),
     listWorkflowRunArtifacts: async () => ({ data: artifacts }) };
   const original = github.rest.repos.getContent;
   github.rest.repos.getContent = args => args.path.startsWith('.github/') ? { data: { sha: codeSha(args.path, args.ref, 'c'.repeat(40)) } } : original(args);
@@ -78,5 +87,5 @@ export function localFixture() {
   const confirm = () => prepareLocalConfirmation({ github, repository: repo, number: 1 });
   const addConfirmation = confirmation => comments.push({ id: 300, user: { id: 1, login: 'owner', type: 'User' },
     created_at: '2026-11-10T00:03:00Z', updated_at: '2026-11-10T00:03:00Z', body: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation)}\n\`\`\`` });
-  return { fake, gh, github, run, context, comments, artifacts, dispatches, codeVersions, mergedCodeVersions, contentRequests, collect, result, request, publish, finish, confirm, addConfirmation };
+  return { fake, gh, github, run, context, comments, artifacts, dispatches, ci, codeVersions, mergedCodeVersions, contentRequests, collect, result, request, publish, finish, confirm, addConfirmation };
 }

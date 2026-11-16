@@ -1,11 +1,27 @@
 import { normalizeNewlines, parseMetadata, reportHash, sha256 } from './review-gate-core.mjs';
+import { findingsFromText } from './review-result-parser.mjs';
+import { latestCheckRun } from './review-shadow-core.mjs';
 
 export const evidenceWorkflow = '.github/workflows/review-evidence.yml';
-export const publicationModules = ['review-evidence.mjs', 'review-evidence-source.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
+export const publicationModules = ['review-evidence.mjs', 'review-evidence-source.mjs', 'review-result-parser.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
 export const localHeading = '# 미인증 로컬 독립 리뷰 자료';
 export const canonical = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 export const same = (a, b) => canonical(a) === canonical(b);
+export const sameReviewTarget = (a, b) => ['repository', 'number', 'head', 'base'].every(key => a?.[key] === b?.[key]);
+export function localReportsForTarget(comments, target) {
+  return comments.filter(isEvidencePublisher).filter(comment => {
+    if (!normalizeNewlines(comment.body).startsWith(`${localHeading}\n`)) return false;
+    // A malformed bot report is not permission to publish another result.
+    const { result } = parseLocalReport(comment.body);
+    const recorded = result.target;
+    if (!exact(recorded, ['repository', 'number', 'head', 'base', 'fingerprint', 'policySha'])
+        || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(recorded.repository) || !id(recorded.number)
+        || !sha(recorded.head) || !sha(recorded.base) || !digest(recorded.fingerprint) || !sha(recorded.policySha)) fail('로컬 봇 보고서 대상 형식 오류');
+    validatePluginResult(result, recorded, 'claude');
+    return sameReviewTarget(recorded, target);
+  });
+}
 const id = value => Number.isSafeInteger(value) && value > 0;
 const sha = value => /^[a-f0-9]{40}$/.test(value ?? '');
 const digest = value => /^[a-f0-9]{64}$/.test(value ?? '');
@@ -28,6 +44,8 @@ export function validatePluginResult(input, target, implementedBy) {
   if (!exact(input.findings, ['critical', 'high', 'medium', 'low', 'unknown'])
       || Object.values(input.findings).some(n => !Number.isSafeInteger(n) || n < 0)) fail('로컬 지적 집계 오류');
   if (typeof input.report !== 'string' || !input.report.trim()) fail('로컬 리뷰 원문 오류');
+  const parsed = findingsFromText(input.report);
+  if (Object.keys(parsed).some(level => input.findings[level] < parsed[level])) fail('원문보다 축소한 지적 집계');
   if (Buffer.byteLength(input.report) > 16_000) throw Object.assign(new Error('로컬 리뷰 원문 16000바이트 초과. 원문은 수집 ledger에 보존하며 자동 게시하지 않음'), { code: 'review-report-too-large' });
   if (!exact(input.source, ['kind', 'sessionId', 'jobId', 'threadId', 'turnId', 'startedAt', 'completedAt', 'outputHash'])
       || input.source.kind !== 'codex-plugin' || !['sessionId', 'jobId', 'threadId', 'turnId'].every(k => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.source[k] ?? ''))
@@ -104,4 +122,28 @@ export async function verifyLocalReport({ github, repo, pr, comment, fingerprint
       || artifact.workflow_run.repository_id !== run.repository.id || artifact.workflow_run.head_repository_id !== run.repository.id
       || artifact.workflow_run.head_branch !== info.default_branch) fail('게시 영수증 출처 오류');
   return { result, key, runId, artifactId: artifact.id, artifactDigest: artifact.digest, workflowSha: run.head_sha };
+}
+
+// CI success must belong to the expected pull_request workflow, not just a matching name.
+export async function verifyEvidenceCi({ github, repo, pr, config, checkRuns }) {
+  const required = config.shadow?.requiredChecks;
+  if (!Array.isArray(required) || !required.length) fail('필수 CI 설정 누락');
+  const runs = await github.paginate(github.rest.actions.listWorkflowRuns, { ...repo, head_sha: pr.head.sha, per_page: 100 });
+  const result = [];
+  for (const item of required) {
+    const check = latestCheckRun({ head: pr.head.sha, checkRuns, name: item.name, appId: item.appId });
+    if (!check || check.status !== 'completed' || check.conclusion !== 'success' || !id(check.check_suite?.id)) fail('필수 CI 미통과');
+    const matches = runs.filter(run => run.check_suite_id === check.check_suite.id);
+    if (matches.length !== 1) fail('필수 CI 실행 누락·중복');
+    const run = matches[0];
+    const repository = `${repo.owner}/${repo.repo}`;
+    if (!id(run.id) || run.path !== item.workflow || run.event !== 'pull_request' || run.head_sha !== pr.head.sha
+        || run.repository?.full_name !== repository || run.head_repository?.full_name !== repository
+        || run.status !== 'completed' || run.conclusion !== 'success') fail('필수 CI 출처 불일치');
+    const approved = (await github.rest.repos.getContent({ ...repo, path: item.workflow, ref: pr.base.sha })).data;
+    const executed = (await github.rest.repos.getContent({ ...repo, path: item.workflow, ref: pr.head.sha })).data;
+    if (!sha(approved.sha) || approved.sha !== executed.sha) fail('필수 CI workflow 변경: 수동 검증 필요');
+    result.push({ name: item.name, checkId: check.id, runId: run.id, workflowSha: approved.sha });
+  }
+  return result;
 }

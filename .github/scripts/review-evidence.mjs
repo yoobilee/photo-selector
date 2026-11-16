@@ -1,7 +1,7 @@
 import { describe, normalizeNewlines, parseConfirmation, reportHash, sha256, validateConfig, assertPullRequestUnchanged } from './review-gate-core.mjs';
 import { evaluatePR } from './review-gate.mjs';
 import { evaluateCodexReview, evaluateRequiredChecks } from './review-shadow-core.mjs';
-import { validatePluginResult, localReviewKey, renderLocalReport, parseLocalReport, verifyLocalReport, receiptName } from './review-evidence-source.mjs';
+import { validatePluginResult, localReportsForTarget, verifyEvidenceCi, renderLocalReport, verifyLocalReport, receiptName } from './review-evidence-source.mjs';
 
 export const evidenceWorkflow = '.github/workflows/review-evidence.yml';
 export const maxRequestBytes = 60_000;
@@ -210,8 +210,7 @@ export async function publishEvidence({ github, context, request }) {
   if (request.result?.v === 2) {
     if (!same(packet.target, request.target)) fail('등록 전 대상 변경');
     const result = validatePluginResult(request.result, packet.target, state.evaluation.description.meta['implemented-by']);
-    const key = localReviewKey(result);
-    const matches = state.comments.filter(comment => isEvidencePublisher(comment) && comment.body.includes(`photo-selector-review-evidence:v2 ${key}`));
+    const matches = localReportsForTarget(state.comments, packet.target);
     if (matches.length > 1) fail('로컬 등록 자료 중복');
     if (matches.length === 1) {
       const verified = await verifyLocalReport({ github, repo: state.repo, pr: state.current, comment: matches[0], fingerprint: packet.target.fingerprint });
@@ -220,6 +219,7 @@ export async function publishEvidence({ github, context, request }) {
         commentUrl: matches[0].html_url, reused: true, approved: false };
     }
     if (packet.collectionHash !== request.collectionHash) fail('등록 전 근거 변경');
+    await verifyEvidenceCi({ github, repo: state.repo, pr: state.current, config: state.config, checkRuns: state.checkRuns });
     const report = renderLocalReport(result, context.runId);
     // 쓰기 직전에 PR 전체 상태를 다시 읽는다. 실패·불명확한 쓰기는 자동 재시도하지 않는다.
     assertPullRequestUnchanged(state.current, (await github.rest.pulls.get({ ...state.repo, pull_number: packet.target.number })).data);
@@ -244,18 +244,17 @@ export async function publishEvidence({ github, context, request }) {
 // 게시 후 실제 댓글과 영수증을 재검증한 값만 관리자가 직접 붙여 넣을 확인 내용으로 반환한다.
 export async function prepareLocalConfirmation({ github, repository, number }) {
   const { packet, state } = await collectReviewPacket({ github, repository, number });
-  const candidates = state.comments.filter(c => isEvidencePublisher(c) && normalizeNewlines(c.body).startsWith('# 미인증 로컬 독립 리뷰 자료\n'));
-  const matching = candidates.filter(c => {
-    try { return same(parseLocalReport(c.body).result.target, packet.target); } catch { return false; }
-  });
+  // 게시 경로와 동일하게 손상·구형·대상 불명 보고서를 무시하지 않는다.
+  const matching = localReportsForTarget(state.comments, packet.target);
   if (matching.length !== 1) fail('최신 로컬 보고서 누락·중복');
   const comment = matching[0];
   const verified = await verifyLocalReport({ github, repo: state.repo, pr: state.current, comment, fingerprint: packet.target.fingerprint });
   if (state.evaluation.blocked || ['critical', 'high', 'medium', 'unknown'].some(k => verified.result.findings[k] !== 0)) fail('미해결 차단 지적');
+  const ci = await verifyEvidenceCi({ github, repo: state.repo, pr: state.current, config: state.config, checkRuns: state.checkRuns });
   const confirmation = { fingerprint: packet.target.fingerprint, decision: 'pass', reviewer: verified.result.reviewer, reviewComplete: true,
     evidence: `https://github.com/${repository}/pull/${number}#issuecomment-${comment.id}`, evidenceHash: reportHash(comment.body),
     findings: verified.result.findings };
   return { target: packet.target, commentId: comment.id, commentUrl: confirmation.evidence, evidenceHash: confirmation.evidenceHash,
-    provenance: 'unverified-local-session', publisher: verified, confirmation,
+    ci, provenance: 'unverified-local-session', publisher: verified, confirmation,
     text: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation, null, 2)}\n\`\`\``, approved: false };
 }
