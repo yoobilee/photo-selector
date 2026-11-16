@@ -108,7 +108,7 @@ test('게시 직전 마지막 PR 재조회에서 head가 바뀌면 댓글을 쓰
 
 test('CLI 중단 안내는 요청 전·불명확·충돌을 구분하고 원시 오류를 출력하지 않음', () => {
   for (const [code, pattern] of [
-    ['review-publication-preflight', /같은 명령을 직접 재실행/],
+    ['review-publication-preflight', /동일한 검토 대상.*같은 명령을 직접 재실행.*대상이 바뀌면 기존 결과를 재사용하지 않습니다/],
     ['review-publication-uncertain', /불명확.*자동 재요청하지 않습니다/],
     ['review-publication-conflict', /게시 결과 충돌/],
     ['review-report-too-large', /16000바이트/],

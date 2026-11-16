@@ -12,7 +12,7 @@ import { reportHash, sha256 } from './review-gate-core.mjs';
 // CLI에는 원시 오류/API 응답 대신 이 고정 안내만 출력한다.
 export function pluginPublicationFailureMessage(error) {
   const messages = {
-    'review-publication-preflight': '게시 요청 전 중단했습니다. 필수 CI의 완료·성공과 workflow 출처 및 요청 준비 상태를 확인하세요. 문제가 해소되면 같은 명령을 직접 재실행할 수 있으며 완료 결과를 재사용하고 모델을 다시 호출하지 않습니다.',
+    'review-publication-preflight': '게시 요청 전 중단했습니다. 필수 CI의 완료·성공과 workflow 출처 및 요청 준비 상태를 확인하세요. 동일한 검토 대상에서 문제가 해소되면 같은 명령을 직접 재실행할 수 있으며 완료 결과를 재사용하고 모델을 다시 호출하지 않습니다. 대상이 바뀌면 기존 결과를 재사용하지 않습니다.',
     'review-publication-uncertain': '게시 요청의 성공 여부가 불명확합니다. 자동 재요청하지 않습니다. 기존 ledger를 보존하고 Actions 실행·실제 댓글·영수증을 확인하세요.',
     'review-publication-conflict': '게시 결과 충돌: 같은 대상에 다른 job/결과 또는 중복 보고서가 이미 게시됐습니다. 기존 ledger·댓글·영수증을 보존하고 확인하세요.',
     'review-report-too-large': '리뷰 원문이 16000바이트를 초과했습니다. .git의 captured ledger에 원문·job을 보존했으며 자동 게시하지 않습니다.',
