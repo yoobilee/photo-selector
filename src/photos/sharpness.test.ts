@@ -360,6 +360,23 @@ describe('half-scale retry for undecidable photos', { timeout: 60_000 }, () => {
     }
   })
 
+  // 판정 규칙 5. 길게 끌린 흔들림에 잡음이 크면 수직 방향 윤곽도 잡음 기준을 넘지 못해 흔들림 근거가 성립하지 않았다(분석 불가).
+  // 1/2 크기에서는 잡음 몫을 빼고도 선명한 수직 방향 구역을 근거로 인정해 흔들림 의심이 된다. 분석 크기의 근거는 그대로다.
+  it('flags long shake with strong noise from half-scale shake evidence while the analysis-size evidence stays unchanged', () => {
+    for (const seed of CAUSE_SEEDS) {
+      for (const [name, image] of [
+        ['horizontal', addNoise(motionBlur(lensScene(seed), 25), 1.5, seed)],
+        ['vertical', addNoise(transpose(motionBlur(transpose(lensScene(seed)), 25)), 1.5, seed)],
+      ] as const) {
+        const measurement = measureSharpness(image)
+        expect(fullScaleOnly(measurement), `${name} seed ${seed}`).toBe('low-detail')
+        expect(hasConsistentShake(measurement), `${name} seed ${seed}`).toBe(false)
+        expect(hasConsistentShake(measurement.halfScale!), `${name} seed ${seed}`).toBe(true)
+        expect([classifySharpness(measurement), estimateBlurCause(measurement)], `${name} seed ${seed}`).toEqual(['blurry', 'shake'])
+      }
+    }
+  })
+
   it('measures the half scale only when the analysis size could not decide and the half image is large enough', () => {
     expect(measureSharpness(gaussianBlur(scene(1), 0.8)).halfScale).toBeNull()
     expect(measureSharpness(gaussianBlur(scene(1), 3)).halfScale).toBeNull()

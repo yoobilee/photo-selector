@@ -16,7 +16,9 @@
 // 7. 1~5로 판정 근거가 부족하면(판정 근거 부족) 같은 사진을 1/2 크기로 줄여 같은 방법으로 한 번 더 본다. 줄이면 잡음이 줄고
 //    큰 윤곽이 상대적으로 뚜렷해진다. 1/2 크기에서도 흐리고 원인 근거(흔들림 또는 초점 불량)가 일치하면 흐림 의심이다.
 //    1/2 크기에서 선명해도 원래 크기의 흐림을 숨겼을 수 있으므로 선명으로 바꾸지 않는다(판정 근거 부족 유지).
-//    실제 사진 평가 근거는 docs/sharpness-real-photo-evaluation.md.
+//    1/2 크기의 흔들림 근거에서는 수직 방향 윤곽이 잡음 기준에 못 미쳐도, 잡음 몫을 빼고도 선명하면 수직 방향 선명 근거로 본다
+//    (shakeAcrossNoise). 분석 크기의 판정에는 쓰지 않는다.
+//    실제 사진 평가 근거는 docs/sharpness-real-photo-evaluation.md, docs/sharpness-half-scale-shake.md.
 // 8. 점수가 임계값을 조금 넘었을 뿐(SHARP_CONFIRM_FACTOR배 미만)인데 초점 불량 근거(방향별 점수가 고르고 모든 방향이 흐린 구역이
 //    있음)가 함께 있으면 선명으로 확정하지 않고 판정 근거 부족으로 둔다(7의 1/2 크기 재판정 대상).
 // 임계값의 근거와 한계는 sharpness.test.ts의 합성 이미지 측정과 README에 기록한다.
@@ -45,7 +47,8 @@ export const SHARP_CONFIRM_FACTOR = 2
 // 2: 긴 흔들림 근거(hasConsistentShake)로 흐림 의심 추가, 흐림 원인 추정(estimateBlurCause)
 // 3: 판정 근거 부족이면 1/2 크기에서 다시 보고, 그 크기에서 흐리면 흐림 의심(halfScale)
 // 4: 점수가 임계값의 SHARP_CONFIRM_FACTOR배보다 낮고 초점 불량 근거가 있으면 선명 대신 판정 근거 부족
-export const SHARPNESS_CLASSIFIER_REVISION = 4
+// 5: 1/2 크기의 흔들림 근거에서 윤곽이 약한 수직 방향 구역도 잡음 몫을 빼고 선명하면 근거로 인정(shakeAcrossNoise)
+export const SHARPNESS_CLASSIFIER_REVISION = 5
 
 // 판정 근거가 부족할 때 다시 볼 축소 배수(정수 배수 평균). 한 번만 본다. 실제 사진 개선용 묶음에서 1/4까지 더 보는 방식은
 // 추가 검출이 2장뿐이라 넣지 않았다.
@@ -233,11 +236,16 @@ const isBlurryRegion = ({ ratio, structure }: RegionDirection) =>
 //   아주 거친 크기(1/16)에서는 끌린 방향의 윤곽이 수직 방향과 견줄 만큼 있는데 1/4 크기에서는 그보다 훨씬 약하다.
 //   줄무늬·수평선처럼 원래 한 방향 윤곽만 있는 장면은 아주 거친 크기에서도 그 방향 윤곽이 없어 근거가 되지 않는다.
 // - 반대 구역: 끌린 방향의 윤곽이 잡음 기준을 넘게 뚜렷하고 선명한 구역. 사진 전체가 흔들렸다면 없어야 한다.
+// shakeAcrossNoise가 있으면(1/2 크기 재판정에서만) 수직 방향 윤곽이 잡음 기준보다 약한 구역도, 미세 경계에서 잡음 몫
+// (6σ²)을 빼고도 비율이 임계값 이상이면 수직 방향이 선명하다고 본다. 잡음은 미세 경계를 키우기만 하므로 빼고도 선명하면
+// 잡음 때문에 선명해 보인 것이 아니다. 실제 사진에서는 수직 방향도 잡음 기준을 넘지 못해 흔들림 근거가 거의 성립하지 않았다
+// (docs/sharpness-half-scale-shake.md). 반대 구역과 나머지 근거 조건은 바꾸지 않는다.
 function collectShakeEvidence(
   direction: number,
   regions: readonly (readonly RegionDirection[])[],
   veryCoarse: readonly Float64Array[],
   minimumStructure: number,
+  shakeAcrossNoise: number | null,
 ): ShakeEvidence {
   const perpendicular = PERPENDICULAR[direction]!
   const rows = new Set<number>()
@@ -252,7 +260,7 @@ function collectShakeEvidence(
       contradicting += 1
       return
     }
-    if (!(across.structure >= minimumStructure && across.ratio >= SHARP_RATIO_THRESHOLD)) return
+    if (!isAcrossSharp(across, minimumStructure, shakeAcrossNoise)) return
     if (shaken.structure >= STRUCTURE_MIN_STRENGTH && !(shaken.ratio < SHARP_RATIO_THRESHOLD)) return
     const row = Math.floor(region / SHARPNESS_GRID)
     const column = region % SHARPNESS_GRID
@@ -270,6 +278,15 @@ function collectShakeEvidence(
   return { direction, regions: evidence, rows: rows.size, columns: columns.size, contradictingRegions: contradicting }
 }
 
+// 흔들림 근거 구역에서 끌린 방향의 수직 방향이 선명한지(collectShakeEvidence)
+function isAcrossSharp(across: RegionDirection, minimumStructure: number, shakeAcrossNoise: number | null): boolean {
+  if (across.structure >= minimumStructure) return across.ratio >= SHARP_RATIO_THRESHOLD
+  if (shakeAcrossNoise === null || !(across.structure >= STRUCTURE_MIN_STRENGTH)) return false
+  const detail = across.ratio * across.structure
+  const noiseDetail = SECOND_DIFFERENCE_NOISE_GAIN * shakeAcrossNoise * shakeAcrossNoise
+  return detail - noiseDetail >= SHARP_RATIO_THRESHOLD * across.structure
+}
+
 // 분석 크기에서 재고, 판정 근거가 부족하면 1/2 크기에서도 잰다(classifySharpness 7).
 export function measureSharpness(image: GrayImage): SharpnessMeasurement {
   const measurement = measureAtScale(image)
@@ -278,12 +295,17 @@ export function measureSharpness(image: GrayImage): SharpnessMeasurement {
   const halfHeight = Math.floor(image.height / SHARPNESS_HALF_SCALE_FACTOR)
   const halfScale =
     Math.min(halfWidth, halfHeight) >= SHARPNESS_MIN_EDGE
-      ? measureAtScale(downsampleByAverage(image, SHARPNESS_HALF_SCALE_FACTOR))
+      ? measureAtScale(downsampleByAverage(image, SHARPNESS_HALF_SCALE_FACTOR), { weakAcrossShakeEvidence: true })
       : null
   return { ...measurement, halfScale }
 }
 
-function measureAtScale(image: GrayImage): ScaleMeasurement {
+interface ScaleOptions {
+  // 흔들림 근거에서 윤곽이 약한 수직 방향 구역도 잡음 몫을 빼고 선명하면 인정한다(1/2 크기 재판정에서만, 판정 규칙 5).
+  readonly weakAcrossShakeEvidence: boolean
+}
+
+function measureAtScale(image: GrayImage, { weakAcrossShakeEvidence }: ScaleOptions = { weakAcrossShakeEvidence: false }): ScaleMeasurement {
   const coarseImage = downsampleByAverage(image, SHARPNESS_COARSE_FACTOR)
   const veryCoarseImage = downsampleByAverage(coarseImage, SHARPNESS_COARSE_FACTOR)
   const noise = estimateNoise(image)
@@ -319,7 +341,9 @@ function measureAtScale(image: GrayImage): ScaleMeasurement {
 
   const veryCoarse = DIRECTIONS.map(([dx, dy]) => regionSecondDifferenceVariance(veryCoarseImage, SHAKE_COARSE_GRID, dx, dy))
   const shake =
-    DIRECTIONS.map((_, direction) => collectShakeEvidence(direction, regions, veryCoarse, minimumStructure))
+    DIRECTIONS.map((_, direction) =>
+      collectShakeEvidence(direction, regions, veryCoarse, minimumStructure, weakAcrossShakeEvidence ? noise : null),
+    )
       .filter((evidence) => evidence.regions > 0)
       .sort((a, b) => b.regions - a.regions)[0] ?? null
   const isotropicBlurRegions = regions.filter((byDirection) =>
