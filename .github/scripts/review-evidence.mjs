@@ -1,7 +1,7 @@
 import { describe, normalizeNewlines, parseConfirmation, reportHash, sha256, validateConfig, assertPullRequestUnchanged } from './review-gate-core.mjs';
 import { evaluatePR } from './review-gate.mjs';
 import { evaluateCodexReview, evaluateRequiredChecks } from './review-shadow-core.mjs';
-import { validatePluginResult, localReportsForTarget, verifyEvidenceCi, renderLocalReport, verifyLocalReport, receiptName } from './review-evidence-source.mjs';
+import { validatePluginResult, localReportsForTarget, verifyEvidenceCi, renderLocalReport, verifyLocalReport, receiptName, pluginResultVersion } from './review-evidence-source.mjs';
 
 export const evidenceWorkflow = '.github/workflows/review-evidence.yml';
 export const maxRequestBytes = 60_000;
@@ -82,7 +82,7 @@ async function readState({ github, repository, number }) {
 
 // 로컬 세션 파일은 실행 증명이 아니라 제출자의 주장이다. 기존 관리자 확인을 대체하지 않는다.
 export function validateLocalResult(input, target, description) {
-  if (input?.v === 2) return { ...validatePluginResult(input, target, description.meta['implemented-by']), authentication: 'unverified-local-session' };
+  if (input?.v === pluginResultVersion) return { ...validatePluginResult(input, target, description.meta['implemented-by']), authentication: 'unverified-local-session' };
   if (!exactKeys(input, ['v', 'target', 'role', 'reviewer', 'status', 'reviewComplete', 'findings', 'report', 'source'])
       || input.v !== 1 || !same(input.target, target)) fail('리뷰 결과 형식 오류 또는 오래된 대상');
   if (!['self', 'independent'].includes(input.role) || !['claude', 'codex'].includes(input.reviewer)
@@ -201,13 +201,13 @@ export async function publishEvidence({ github, context, request }) {
   if (!exactKeys(request, ['v', 'target', 'collectionHash', 'result']) || request.v !== 1
       || (request.result !== null && (typeof request.result !== 'object' || Array.isArray(request.result)))
       || Buffer.byteLength(JSON.stringify(request), 'utf8') > maxRequestBytes) fail('등록 요청 형식 또는 크기 오류');
-  if (request.result !== null && request.result?.v !== 2) fail('미인증 로컬 결과는 게시할 수 없음');
+  if (request.result !== null && request.result?.v !== pluginResultVersion) fail('미인증 로컬 결과는 게시할 수 없음');
   if (typeof context.requestedNumber !== 'string' || !/^[1-9][0-9]*$/.test(context.requestedNumber)
       || context.requestedNumber !== String(request.target?.number)) fail('workflow PR 번호와 자료 대상 불일치');
   const repository = await assertPublisherWorkflow({ github, context });
   if (request.target?.repository !== repository) fail('다른 저장소 등록 요청');
   const { packet, state } = await collectReviewPacket({ github, repository, number: request.target.number, result: request.result });
-  if (request.result?.v === 2) {
+  if (request.result?.v === pluginResultVersion) {
     if (!same(packet.target, request.target)) fail('등록 전 대상 변경');
     const result = validatePluginResult(request.result, packet.target, state.evaluation.description.meta['implemented-by']);
     const matches = localReportsForTarget(state.comments, packet.target);

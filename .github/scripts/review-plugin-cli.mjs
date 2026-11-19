@@ -4,10 +4,12 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { collectReviewPacket, prepareLocalConfirmation } from './review-evidence.mjs';
 import { createEvidenceGitHub, runEvidenceCli } from './review-evidence-cli.mjs';
-import { canonical, same, validatePluginResult, localReportsForTarget, parseLocalReport, verifyEvidenceCi } from './review-evidence-source.mjs';
-import { findingsFromText, parserVersion } from './review-result-parser.mjs';
-export { findingsFromText } from './review-result-parser.mjs';
+import { canonical, same, validatePluginResult, localReportsForTarget, parseLocalReport, verifyEvidenceCi, pluginResultVersion,
+  publicationModules, localPublicationBlockers, reviewerCheckFailures } from './review-evidence-source.mjs';
+import { analyzeReviewText, parserVersion } from './review-result-parser.mjs';
+export { findingsFromText, analyzeReviewText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
+import { gitBlobSha } from './merge-pr-core.mjs';
 
 // CLI에는 원시 오류/API 응답 대신 이 고정 안내만 출력한다.
 export function pluginPublicationFailureMessage(error) {
@@ -15,6 +17,7 @@ export function pluginPublicationFailureMessage(error) {
     'review-publication-preflight': '게시 요청 전 중단했습니다. 필수 CI의 완료·성공과 workflow 출처 및 요청 준비 상태를 확인하세요. 동일한 검토 대상에서 문제가 해소되면 같은 명령을 직접 재실행할 수 있으며 완료 결과를 재사용하고 모델을 다시 호출하지 않습니다. 대상이 바뀌면 기존 결과를 재사용하지 않습니다.',
     'review-publication-uncertain': '게시 요청의 성공 여부가 불명확합니다. 자동 재요청하지 않습니다. 기존 ledger를 보존하고 Actions 실행·실제 댓글·영수증을 확인하세요.',
     'review-publication-conflict': '게시 결과 충돌: 같은 대상에 다른 job/결과 또는 중복 보고서가 이미 게시됐습니다. 기존 ledger·댓글·영수증을 보존하고 확인하세요.',
+    'review-publication-code-mismatch': '로컬 게시·판정 코드가 기본 브랜치와 달라 게시 요청하지 않았습니다. 서버는 기본 브랜치 코드로 원문을 다시 해석하므로 같은 결과를 보장할 수 없습니다. 완료 결과와 원문은 .git의 ledger에 보존했습니다. 이 대상은 수동 리뷰 보고 절차로 진행하고 모델 재호출·게시 재시도를 하지 않습니다.',
     'review-report-too-large': '리뷰 원문이 16000바이트를 초과했습니다. .git의 captured ledger에 원문·job을 보존했으며 자동 게시하지 않습니다.',
   };
   return Object.hasOwn(messages, error?.code) ? messages[error.code] : '리뷰 수집/게시 중단. 완료·대상·형식·기존 ledger와 Actions를 확인하세요. 자동 재시도·추가 AI 호출·관리자 확인·승인은 하지 않습니다. 원시 오류는 출력하지 않습니다.';
@@ -43,13 +46,42 @@ export function collectPluginResult({ output, stored, target, session, startedAt
       || !Number.isFinite(Date.parse(job.createdAt)) || Date.parse(job.createdAt) < Date.parse(startedAt)
       || !Number.isFinite(Date.parse(job.completedAt)) || Date.parse(job.completedAt) < Date.parse(job.createdAt)) throw new Error('플러그인 완료·대상·세션 기록 불일치');
   const report = output.codex.stdout.replace(/\r\n?/g, '\n');
+  const analysis = analyzeReviewText(report);
   return {
-    v: 2, target, role: 'independent', reviewer: 'codex', status: 'completed', reviewComplete: true,
-    findings: findingsFromText(report), report,
+    v: pluginResultVersion, target, role: 'independent', reviewer: 'codex', status: 'completed', reviewComplete: true,
+    findings: analysis.findings, report, reviewerChecks: analysis.reviewerChecks,
     source: { kind: 'codex-plugin', sessionId: session, jobId: job.id, threadId: job.threadId, turnId: job.turnId,
       startedAt: job.createdAt, completedAt: job.completedAt, outputHash: reportHash(report) },
     checks: checks.map(c => ({ name: `GitHub check: ${c.name}`, status: c.state === 'success' ? 'passed' : 'unknown', evidence: 'API가 반환한 현재 HEAD의 check 상태. workflow 출처 검증과 리뷰어의 로컬 검사 실행 증명은 별도이다.' })),
-    notRun: ['플러그인은 명령별 검사 결과·미실행 항목을 구조화해 제공하지 않는다. 리뷰 원문에 기록된 검사와 한계를 관리자가 직접 확인해야 하며, 이 수집기는 검사를 추가 실행하지 않았다.'],
+    notRun: ['플러그인은 명령별 검사 결과·미실행 항목을 구조화해 제공하지 않는다. reviewerChecks는 리뷰 원문 문장을 해석한 리뷰어의 주장이며 실행 증명이 아니고, 원문이 실행한 모든 명령을 나열한다는 보장도 없다. 관리자는 원문과 plugin job 기록을 직접 확인해야 하며, 이 수집기는 검사를 추가 실행하지 않았다.'],
+  };
+}
+
+// 원래 ledger는 이전 parser·결과 형식(v2)일 수 있다. 재해석에 쓰는 대상·출처·원문만 확인하고 원본은 바꾸지 않는다.
+function assertRecoverableOriginal(result, target) {
+  if (![2, pluginResultVersion].includes(result?.v) || !same(result.target, target) || result.status !== 'completed' || result.reviewComplete !== true
+      || typeof result.report !== 'string' || !result.report.trim() || result.source?.kind !== 'codex-plugin'
+      || result.source.outputHash !== reportHash(result.report)) throw new Error('Recovery original result invalid');
+}
+
+// 서버는 기본 브랜치의 게시·판정 코드로 원문을 다시 해석한다. 로컬 코드가 다르면 같은 결과를 보장할 수 없어 요청하지 않는다.
+async function changedPublicationModules(github, defaultBranch) {
+  const changed = [];
+  for (const name of publicationModules) {
+    const local = gitBlobSha(readFileSync(new URL(`./${name}`, import.meta.url), 'utf8'));
+    const approved = (await github.rest.repos.getContent({ path: `.github/scripts/${name}`, ref: defaultBranch })).data?.sha;
+    if (local !== approved) changed.push(name);
+  }
+  return changed;
+}
+
+// 게시하지 않는 이유를 코드 지적·리뷰어 로컬 검사·원격 CI로 나눠 원문과 함께 보여준다.
+export function attentionOutput(result, blockers) {
+  return {
+    state: blockers.includes('findings') ? 'review-needs-attention' : 'review-checks-need-attention', published: false, blockers,
+    codeFindings: result.findings, reviewerCheckFailures: reviewerCheckFailures(result), reviewerChecks: result.reviewerChecks, remoteChecks: result.checks,
+    note: '코드 지적 집계와 리뷰어 로컬 검사는 별개입니다. 실패를 통과로 바꾸지 않았고 환경 원인은 리뷰어 주장일 뿐 확인되지 않았습니다. 원문이 실행한 모든 명령을 나열한다는 보장이 없으니 plugin job 기록도 확인하세요. 자동 게시하지 않았으며 수동 리뷰 보고 절차로 진행하세요.',
+    result,
   };
 }
 
@@ -83,7 +115,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       const original = JSON.parse(originalText);
       if (original.state !== 'completed' || original.session !== options.session || !same(original.target, target)
           || original.publicationRequested || original.publication) throw new Error('Recovery requires an unpublished completed target');
-      validatePluginResult(original.result, target, 'claude');
+      assertRecoverableOriginal(original.result, target);
       const stored = plugin(['result', '--json']); // Read the existing native job, never invoke review.
       const job = stored.storedJob;
       if (job?.id !== original.result.source.jobId || job?.threadId !== original.result.source.threadId
@@ -135,8 +167,9 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result }), { mode: 0o600 });
     }
     validatePluginResult(result, target, 'claude');
-    if (['critical', 'high', 'medium', 'unknown'].some(k => result.findings[k])) {
-      out(JSON.stringify({ state: 'review-needs-attention', result, published: false }));
+    const blockers = localPublicationBlockers(result);
+    if (blockers.length) {
+      out(JSON.stringify(attentionOutput(result, blockers), null, 2));
       return 2;
     }
     const existingPublication = state => {
@@ -159,6 +192,8 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
             checkLocal();
             if (!same(packet.target, target)) throw new Error('게시 요청 전 대상 변경');
             if (existingPublication(state)) throw new Error('게시 요청 전 보고서 도착. 재실행하여 영수증 확인 필요');
+            const changed = await changedPublicationModules(github, state.defaultBranch);
+            if (changed.length) throw Object.assign(new Error(`게시·판정 코드가 기본 브랜치와 다름: ${changed.join(', ')}`), { code: 'review-publication-code-mismatch' });
             await verifyEvidenceCi({ github, repo: state.repo, pr: state.current, config: state.config, checkRuns: state.checkRuns });
             // 서버도 CI·대상을 다시 검사한다. 이 확인과 원격 요청은 원자적이지 않다.
             // 요청 응답을 잃어도 재요청하지 않도록 실제 dispatch 직전에만 기록한다.
@@ -168,7 +203,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
         } });
       if (status !== 0) {
         if (preflightError) {
-          if (preflightError.code !== 'review-publication-conflict') preflightError.code = 'review-publication-preflight';
+          if (!['review-publication-conflict', 'review-publication-code-mismatch'].includes(preflightError.code)) preflightError.code = 'review-publication-preflight';
           throw preflightError;
         }
         if (!JSON.parse(readFileSync(path, 'utf8')).publicationRequested) throw Object.assign(new Error('게시 요청 전 준비 실패. 완료 결과를 보존했으며 모델 재호출 없이 재실행 가능'), { code: 'review-publication-preflight' });

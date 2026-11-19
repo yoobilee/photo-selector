@@ -5,6 +5,12 @@ import { collectReviewPacket, publishEvidence, prepareLocalConfirmation } from '
 import { evidenceWorkflow, receiptName } from './review-evidence-source.mjs';
 import { reportHash } from './review-gate-core.mjs';
 import { gitBlobSha } from './merge-pr-core.mjs';
+import { analyzeReviewText } from './review-result-parser.mjs';
+
+// 실제 PR #28 Codex native 리뷰 원문(ledger·관리자 보고서와 같은 문장). 회귀 기준이므로 수정하지 않는다.
+export const pr28Report = '기준 커밋 대비 변경에서 수정이 필요한 결함을 발견하지 못했습니다. Lint·TypeScript 검사와 선명도 테스트 28개는 통과했습니다. 전체 단위 테스트는 226개 통과했으나 privacyGuard는 환경의 임시 폴더 생성 권한 제한으로 실패했으며, Build·E2E는 실행하지 않았습니다.';
+// 실제 PR #23 Codex native 리뷰 원문.
+export const pr23Report = 'No actionable defects were found in the changes against the specified base. Lint, 46 targeted unit tests, and 31 merge-tool tests passed; four platform-specific tests were skipped. Build and E2E checks were not run.';
 
 export function localFixture() {
   const fake = createFake({ risk: 'high', implementedBy: 'claude', gate: false, approval: 'none', codex: 'none', requests: 0 });
@@ -71,8 +77,8 @@ export function localFixture() {
   const result = async () => {
     const { packet } = await collect();
     const report = 'No actionable defects were found. Lint passed. Build and E2E were not run.';
-    return { v: 2, target: packet.target, role: 'independent', reviewer: 'codex', status: 'completed', reviewComplete: true,
-      findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }, report,
+    return { v: 3, target: packet.target, role: 'independent', reviewer: 'codex', status: 'completed', reviewComplete: true,
+      findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }, report, reviewerChecks: analyzeReviewText(report).reviewerChecks,
       source: { kind: 'codex-plugin', sessionId: 'session-1', jobId: 'job-1', threadId: 'thread-1', turnId: 'turn-1',
         startedAt: '2026-11-09T00:00:00Z', completedAt: '2026-11-09T00:01:00Z', outputHash: reportHash(report) },
       checks: [{ name: 'Lint', status: 'passed', evidence: '리뷰어 원문의 주장, 실행 인증 아님' }], notRun: ['Build and E2E were not run.'] };
