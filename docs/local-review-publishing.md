@@ -79,7 +79,7 @@ PR #23에서 실제 완료 문장이 기존 허용 문법 밖이라 `unknown: 1`
 npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설치된 Codex 플러그인 루트> --session <원래 Claude 세션 ID> --recover
 ```
 
-`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
+`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.v3.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. parser v2가 만든 `<원래 ledger>.recovered.json`은 읽기만 하고 수정·삭제하지 않는다. 그 파일이 정확히 v2 복구 형식이고, 게시 요청·게시 기록이 없으며, 같은 원본 ledger hash·세션·대상·원문·출처에서 파생됐을 때만 모델 재호출 없이 v3로 다시 해석하고 그 파일의 hash를 `legacyRecoveredHash`로 남긴다. 게시 요청 기록이 있거나 알 수 없는 필드·부분 기록처럼 요청 여부가 불명확하면 `review-recovery-manual`로 중단하고 사람이 실제 댓글·Actions·영수증을 확인한다. v2 복구 파일만 있는 대상에서 `--recover` 없이 실행해도 원래 ledger로 되돌아가지 않고 같은 이유로 중단한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
 
 PR #23처럼 이미 병합됐거나 base가 바뀐 결과는 복구 게시 대상으로 삼지 않는다. parser 수정은 옛 결과를 새 base에 재연결하는 허가가 아니다.
 

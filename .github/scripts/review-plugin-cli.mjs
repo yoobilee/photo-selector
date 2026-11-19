@@ -18,6 +18,7 @@ export function pluginPublicationFailureMessage(error) {
     'review-publication-uncertain': '게시 요청의 성공 여부가 불명확합니다. 자동 재요청하지 않습니다. 기존 ledger를 보존하고 Actions 실행·실제 댓글·영수증을 확인하세요.',
     'review-publication-conflict': '게시 결과 충돌: 같은 대상에 다른 job/결과 또는 중복 보고서가 이미 게시됐습니다. 기존 ledger·댓글·영수증을 보존하고 확인하세요.',
     'review-publication-code-mismatch': '로컬 게시·판정 코드가 기본 브랜치와 달라 게시 요청하지 않았습니다. 서버는 기본 브랜치 코드로 원문을 다시 해석하므로 같은 결과를 보장할 수 없습니다. 완료 결과와 원문은 .git의 ledger에 보존했습니다. 이 대상은 수동 리뷰 보고 절차로 진행하고 모델 재호출·게시 재시도를 하지 않습니다.',
+    'review-recovery-manual': '이전 형식(v2) 복구 기록의 게시 요청 여부가 불명확하거나 이미 요청됐거나 원본과의 연결을 검증할 수 없어 중단했습니다. 기존 ledger·복구 파일을 수정하지 않았으며 자동 재해석·재요청·모델 호출을 하지 않습니다. 실제 댓글·Actions·영수증을 사람이 확인하세요. 게시 요청 전 기록이면 --recover로 v3 재해석을 시도할 수 있습니다.',
     'review-report-too-large': '리뷰 원문이 16000바이트를 초과했습니다. .git의 captured ledger에 원문·job을 보존했으며 자동 게시하지 않습니다.',
   };
   return Object.hasOwn(messages, error?.code) ? messages[error.code] : '리뷰 수집/게시 중단. 완료·대상·형식·기존 ledger와 Actions를 확인하세요. 자동 재시도·추가 AI 호출·관리자 확인·승인은 하지 않습니다. 원시 오류는 출력하지 않습니다.';
@@ -64,6 +65,22 @@ function assertRecoverableOriginal(result, target) {
       || result.source.outputHash !== reportHash(result.report)) throw new Error('Recovery original result invalid');
 }
 
+// parser v2 복구 기록은 게시 요청 전이고 같은 원본·세션·대상·원문에서 파생됐음을 확인할 수 있을 때만 건너뛴다.
+// 알 수 없는 필드·게시 요청 기록·부분 기록은 요청 여부가 불명확하므로 자동 재해석하지 않는다.
+function assertUnrequestedLegacyRecovery(text, { original, originalText, target, session }) {
+  const manual = () => { throw Object.assign(new Error('v2 recovery ledger requires manual check'), { code: 'review-recovery-manual' }); };
+  let legacy;
+  try { legacy = JSON.parse(text); } catch { manual(); }
+  if (!legacy || typeof legacy !== 'object' || Array.isArray(legacy)
+      || !same(Object.keys(legacy).sort(), ['recovery', 'result', 'session', 'state', 'target'])
+      || legacy.state !== 'completed' || legacy.session !== session || !same(legacy.target, target)
+      || !same(Object.keys(legacy.recovery ?? {}).sort(), ['originalLedgerHash', 'parserVersion']) || legacy.recovery.parserVersion !== 2
+      || legacy.recovery.originalLedgerHash !== sha256(originalText) || legacy.result?.v !== 2
+      || legacy.result.report !== original.result.report || !same(legacy.result.source, original.result.source)) manual();
+  assertRecoverableOriginal(legacy.result, target);
+  return sha256(text);
+}
+
 // 서버는 기본 브랜치의 게시·판정 코드로 원문을 다시 해석한다. 로컬 코드가 다르면 같은 결과를 보장할 수 없어 요청하지 않는다.
 async function changedPublicationModules(github, defaultBranch) {
   const changed = [];
@@ -102,7 +119,9 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
   // 설명·정책만 바뀌어도 같은 base/head 리뷰를 다시 호출하지 않고 대상 불일치로 중단한다.
   const key = sha256(canonical({ repository: target.repository, number: target.number, head: target.head, base: target.base }));
   const originalPath = git(['rev-parse', '--git-path', `photo-selector-review-${key}.json`]).trim();
-  const recoveredPath = `${originalPath}.recovered.json`;
+  // parser v2 복구 결과(.recovered.json)는 읽기만 하고 수정·삭제하지 않는다. v3 결과는 별도 파일에 둔다.
+  const legacyRecoveredPath = `${originalPath}.recovered.json`;
+  const recoveredPath = `${originalPath}.recovered.v3.json`;
   const path = options.recover || existsSync(recoveredPath) ? recoveredPath : originalPath;
   // Normal execution and recovery share one lock and publication state.
   const lockPath = `${originalPath}.lock`;
@@ -116,6 +135,8 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       if (original.state !== 'completed' || original.session !== options.session || !same(original.target, target)
           || original.publicationRequested || original.publication) throw new Error('Recovery requires an unpublished completed target');
       assertRecoverableOriginal(original.result, target);
+      const legacyRecoveredHash = existsSync(legacyRecoveredPath)
+        ? assertUnrequestedLegacyRecovery(readFileSync(legacyRecoveredPath, 'utf8'), { original, originalText, target, session: options.session }) : null;
       const stored = plugin(['result', '--json']); // Read the existing native job, never invoke review.
       const job = stored.storedJob;
       if (job?.id !== original.result.source.jobId || job?.threadId !== original.result.source.threadId
@@ -125,7 +146,10 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
         startedAt: original.result.source.startedAt, checks: initial.packet.checks });
       validatePluginResult(recovered, target, 'claude');
       writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result: recovered,
-        recovery: { originalLedgerHash: sha256(originalText), parserVersion } }), { flag: 'wx', mode: 0o600 });
+        recovery: { originalLedgerHash: sha256(originalText), legacyRecoveredHash, parserVersion } }), { flag: 'wx', mode: 0o600 });
+    } else if (path === originalPath && existsSync(legacyRecoveredPath)) {
+      // v2 복구 기록이 있는 대상은 원래 ledger로 되돌아가 새 리뷰·게시를 시도하지 않는다.
+      throw Object.assign(new Error('v2 recovery ledger requires --recover or manual check'), { code: 'review-recovery-manual' });
     }
     if (existsSync(path)) {
       const ledger = JSON.parse(readFileSync(path, 'utf8'));
