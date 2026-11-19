@@ -1,10 +1,12 @@
 import { normalizeNewlines, parseMetadata, reportHash, sha256 } from './review-gate-core.mjs';
-import { findingsFromText } from './review-result-parser.mjs';
+import { analyzeReviewText } from './review-result-parser.mjs';
 import { latestCheckRun } from './review-shadow-core.mjs';
 
 export const evidenceWorkflow = '.github/workflows/review-evidence.yml';
 export const publicationModules = ['review-evidence.mjs', 'review-evidence-source.mjs', 'review-result-parser.mjs', 'review-gate.mjs', 'review-gate-core.mjs', 'review-shadow.mjs', 'review-shadow-core.mjs'];
 export const localHeading = '# 미인증 로컬 독립 리뷰 자료';
+// v3부터 코드 지적(findings), 원격 CI(checks), 리뷰어가 보고한 로컬 검사(reviewerChecks)를 따로 기록한다.
+export const pluginResultVersion = 3;
 export const canonical = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 export const same = (a, b) => canonical(a) === canonical(b);
@@ -37,15 +39,17 @@ export const receiptName = (commentId, hash) => {
 
 // 로컬 플러그인 결과는 제출자의 주장이다. 구조·대상·완료 상태만 검사하며 실행 인증으로 승격하지 않는다.
 export function validatePluginResult(input, target, implementedBy) {
-  if (!exact(input, ['v', 'target', 'role', 'reviewer', 'status', 'reviewComplete', 'findings', 'report', 'source', 'checks', 'notRun'])
-      || input.v !== 2 || !same(input.target, target) || implementedBy !== 'claude'
+  if (!exact(input, ['v', 'target', 'role', 'reviewer', 'status', 'reviewComplete', 'findings', 'report', 'source', 'checks', 'notRun', 'reviewerChecks'])
+      || input.v !== pluginResultVersion || !same(input.target, target) || implementedBy !== 'claude'
       || input.role !== 'independent' || input.reviewer !== 'codex'
       || input.status !== 'completed' || input.reviewComplete !== true) fail('로컬 독립 리뷰 대상·완료 상태 오류');
   if (!exact(input.findings, ['critical', 'high', 'medium', 'low', 'unknown'])
       || Object.values(input.findings).some(n => !Number.isSafeInteger(n) || n < 0)) fail('로컬 지적 집계 오류');
   if (typeof input.report !== 'string' || !input.report.trim()) fail('로컬 리뷰 원문 오류');
-  const parsed = findingsFromText(input.report);
-  if (Object.keys(parsed).some(level => input.findings[level] < parsed[level])) fail('원문보다 축소한 지적 집계');
+  const parsed = analyzeReviewText(input.report);
+  if (Object.keys(parsed.findings).some(level => input.findings[level] < parsed.findings[level])) fail('원문보다 축소한 지적 집계');
+  // 검사 실패·미실행·원인 주장을 빼거나 바꾸지 못하게 원문 해석 결과와 정확히 같아야 한다.
+  if (!same(input.reviewerChecks, parsed.reviewerChecks)) fail('원문과 다른 리뷰어 검사 기록');
   if (Buffer.byteLength(input.report) > 16_000) throw Object.assign(new Error('로컬 리뷰 원문 16000바이트 초과. 원문은 수집 ledger에 보존하며 자동 게시하지 않음'), { code: 'review-report-too-large' });
   if (!exact(input.source, ['kind', 'sessionId', 'jobId', 'threadId', 'turnId', 'startedAt', 'completedAt', 'outputHash'])
       || input.source.kind !== 'codex-plugin' || !['sessionId', 'jobId', 'threadId', 'turnId'].every(k => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.source[k] ?? ''))
@@ -58,6 +62,16 @@ export function validatePluginResult(input, target, implementedBy) {
       || !Array.isArray(input.notRun) || !input.notRun.length || input.notRun.length > 30
       || input.notRun.some(s => typeof s !== 'string' || !s.trim() || s.length > 2000)) fail('검사 결과·미실행 항목 누락');
   return { ...input, report: normalizeNewlines(input.report) };
+}
+
+// 리뷰어가 보고한 로컬 검사 실패. 코드 지적이 0건이어도 사라지지 않게 별도로 다룬다.
+// 환경 원인 주장이 있어도 통과로 바꾸지 않으며, 봇 게시·봇 보고서 확인 경로를 쓰지 않고 사람이 확인한다.
+export const reviewerCheckFailures = result => result.reviewerChecks.filter(item => item.status === 'failed');
+export function localPublicationBlockers(result) {
+  const blockers = [];
+  if (['critical', 'high', 'medium', 'unknown'].some(level => result.findings[level] !== 0)) blockers.push('findings');
+  if (reviewerCheckFailures(result).length) blockers.push('reviewer-check-failed');
+  return blockers;
 }
 
 export const localReviewKey = result => sha256(canonical(result));
@@ -98,6 +112,7 @@ export async function verifyLocalReport({ github, repo, pr, comment, fingerprint
   if (info.full_name !== repository || pr.base.ref !== info.default_branch || pr.base.repo?.full_name !== repository
       || pr.head.repo?.full_name !== repository || !sha(policy.sha) || !sha(pr.head.sha) || !sha(pr.base.sha) || !digest(fingerprint)) fail('보고서 대상 조회 오류');
   validatePluginResult(result, target, parseMetadata(pr.body)['implemented-by']);
+  if (reviewerCheckFailures(result).length) fail('리뷰어 로컬 검사 실패가 있는 봇 보고서는 확인 근거로 쓰지 않음');
   const run = (await github.rest.actions.getWorkflowRun({ ...repo, run_id: runId })).data;
   const workflow = (await github.rest.actions.getWorkflow({ ...repo, workflow_id: 'review-evidence.yml' })).data;
   if (run.id !== runId || !id(workflow.id) || workflow.path !== evidenceWorkflow || run.workflow_id !== workflow.id

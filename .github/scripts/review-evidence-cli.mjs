@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createGitHub } from './merge-pr-core.mjs';
 import { collectReviewPacket, reportRequest, renderEvidenceReport, prepareLocalConfirmation, maxRequestBytes } from './review-evidence.mjs';
+import { pluginResultVersion } from './review-evidence-source.mjs';
 
 export const usage = '사용법: npm run review:prepare -- owner/repo PR번호 [--result 결과.json] [--output 자료.json] [--dispatch|--confirmation]';
 export function parseEvidenceArgs(argv) {
@@ -49,7 +50,7 @@ export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = 
       return 0;
     }
     const { packet, state } = await collectReviewPacket({ github, repository: options.repository, number: options.number, result });
-    const report = packet.result && packet.result.v !== 2 ? renderEvidenceReport(packet) : null;
+    const report = packet.result && packet.result.v !== pluginResultVersion ? renderEvidenceReport(packet) : null;
     const text = JSON.stringify({ ...packet, report,
       localResultTemplate: { v: 1, target: packet.target, role: 'independent', reviewer: state.evaluation.description.reviewer,
         status: 'running', reviewComplete: false, findings: null, report: null, source: { kind: 'local-session', sessionId: null } },
@@ -59,8 +60,8 @@ export async function runEvidenceCli({ argv, gh, readFile = readFileSync, out = 
       out('리뷰 자료를 UTF-8 파일로 저장했습니다. 기존 파일은 덮어쓰지 않습니다.');
     } else out(text);
     if (options.dispatch) {
-      if (result !== null && result.v !== 2) throw new Error('미인증 로컬 결과는 로컬 출력만 허용');
-      if (!report && result?.v !== 2) throw new Error('유효한 리뷰 결과 없음');
+      if (result !== null && result.v !== pluginResultVersion) throw new Error('미인증 로컬 결과는 로컬 출력만 허용');
+      if (!report && result?.v !== pluginResultVersion) throw new Error('유효한 리뷰 결과 없음');
       // 기본 브랜치 도입 전에는 등록을 요청하지 않는다. 임의 ref·workflow·token을 지정하는 옵션이 없다.
       await github.rest.repos.getContent({ path: '.github/workflows/review-evidence.yml', ref: state.defaultBranch });
       const path = join(tmpdir(), `photo-selector-review-request-${randomUUID()}.json`);

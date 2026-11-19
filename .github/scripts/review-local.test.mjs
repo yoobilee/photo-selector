@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { localFixture } from './review-local-fixture.mjs';
+import { localFixture, pr23Report, pr28Report } from './review-local-fixture.mjs';
+import { analyzeReviewText } from './review-result-parser.mjs';
+import { reportHash, sha256 } from './review-gate-core.mjs';
 import { publishEvidence } from './review-evidence.mjs';
 import { parseLocalReport, renderLocalReport, validatePluginResult, verifyLocalReport, publicationModules, evidenceWorkflow } from './review-evidence-source.mjs';
 import { assessMerge, runMergeTool } from './merge-pr-core.mjs';
@@ -217,13 +219,13 @@ test('복구 파생 결과도 CI 대기 중 원본 ledger·원문을 보존하�
   Object.assign(f.ci.check, { status: 'in_progress', conclusion: null });
   const recover = () => w.run({ options: { ...w.options, recover: true }, maxPolls: 1 });
   await assert.rejects(recover(), /필수 CI/);
-  const recovered = readFileSync(path + '.recovered.json', 'utf8');
+  const recovered = readFileSync(path + '.recovered.v3.json', 'utf8');
   assert.equal(JSON.parse(recovered).publicationRequested, undefined);
   await assert.rejects(recover(), /필수 CI/);
-  assert.equal(readFileSync(path + '.recovered.json', 'utf8'), recovered);
+  assert.equal(readFileSync(path + '.recovered.v3.json', 'utf8'), recovered);
   Object.assign(f.ci.check, { status: 'completed', conclusion: 'success' });
   await assert.rejects(recover(), /완료를 확인하지 못함/);
-  const p = await f.publish(JSON.parse(readFileSync(path + '.recovered.json')).result); f.finish(p);
+  const p = await f.publish(JSON.parse(readFileSync(path + '.recovered.v3.json')).result); f.finish(p);
   assert.equal(await recover(), 0); assert.equal(await w.run(), 0);
   assert.equal(readFileSync(path, 'utf8'), original);
   assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1);
@@ -319,7 +321,7 @@ test('복구는 running/captured 및 다른 세션 ledger를 조회·쓰기·모
     writeFileSync(w.path, text);
     await assert.rejects(w.run({ options: { ...w.options, recover: true } }), /unpublished completed target/);
     if (kind !== 'captured') await assert.rejects(w.run(), /미완료·실패·다른 세션/);
-    assert.equal(readFileSync(w.path, 'utf8'), text); assert.equal(existsSync(w.path + '.recovered.json'), false);
+    assert.equal(readFileSync(w.path, 'utf8'), text); assert.equal(existsSync(w.path + '.recovered.v3.json'), false);
     assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 0);
     assert.equal(w.f.dispatches.length, 0); assert.equal(w.f.comments.length, 0);
   });
@@ -382,17 +384,17 @@ test('완료 결과 복구는 result만 조회하고 원래 ledger 보존·재�
     await assert.rejects(run(), /No completed ledger/); assert.equal(reads, 0);
     writeFileSync(path, originalText);
     await assert.rejects(run(), /완료를 확인하지 못함/);
-    const recovered = JSON.parse(readFileSync(path + '.recovered.json'));
+    const recovered = JSON.parse(readFileSync(path + '.recovered.v3.json'));
     assert.equal(recovered.result.findings.unknown, 0);
     assert.equal(recovered.result.report, original.report);
-    assert.equal(recovered.recovery.parserVersion, 2);
+    assert.equal(recovered.recovery.parserVersion, 3);
     await assert.rejects(run(), /완료를 확인하지 못함/);
     await assert.rejects(run(false), /완료를 확인하지 못함/);
     assert.equal(reads, 1); assert.equal(f.dispatches.length, 1);
     const p = await f.publish(recovered.result); f.finish(p);
     assert.equal(await run(), 0);
     assert.equal(readFileSync(path, 'utf8'), originalText);
-    assert.ok(JSON.parse(readFileSync(path + '.recovered.json')).recovery.originalLedgerHash);
+    assert.ok(JSON.parse(readFileSync(path + '.recovered.v3.json')).recovery.originalLedgerHash);
     assert.equal(reads, 1); assert.equal(f.comments.length, 1);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
@@ -669,4 +671,241 @@ test('로컬 ledger가 없는 다른 checkout도 이미 등록된 원격 결과�
       gh: f.gh, git, plugin: () => { reviews++; }, maxPolls: 1, out: () => {} }), 0);
     assert.equal(reviews, 0); assert.equal(f.dispatches.length, 0);
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+const zeroFindings = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+
+test('PR #28 원문: wrapper는 지적 0건과 리뷰어 검사 실패를 분리해 출력하고 게시·모델 재호출하지 않음', async t => {
+  const w = await wrapperFixture(t); w.data.output.codex.stdout = pr28Report;
+  const outputs = [];
+  const out = text => outputs.push(JSON.parse(text));
+  assert.equal(await w.run({ out }), 2);
+  assert.equal(await w.run({ out }), 2);
+  const [first, second] = outputs;
+  assert.deepEqual(second, first);
+  assert.equal(first.state, 'review-checks-need-attention'); assert.equal(first.published, false);
+  assert.deepEqual(first.blockers, ['reviewer-check-failed']);
+  assert.deepEqual(first.codeFindings, zeroFindings);
+  assert.deepEqual(first.reviewerCheckFailures, [{ name: 'privacyGuard', status: 'failed', count: null, cause: { kind: 'environment-claimed', text: '환경의 임시 폴더 생성 권한 제한' } }]);
+  assert.ok(first.reviewerChecks.some(c => c.name === 'Build' && c.status === 'not-run'));
+  assert.ok(first.remoteChecks.some(c => c.name === 'GitHub check: verify'));
+  assert.equal(first.result.report, pr28Report); assert.match(first.note, /통과로 바꾸지 않았/);
+  const ledger = JSON.parse(readFileSync(w.path, 'utf8'));
+  assert.equal(ledger.state, 'completed'); assert.equal(ledger.publicationRequested, undefined); assert.equal(ledger.result.v, 3);
+  assert.equal(w.calls.reviews, 1); assert.equal(w.calls.reads, 1);
+  assert.equal(w.f.dispatches.length, 0); assert.equal(w.f.comments.length, 0);
+});
+
+test('원인 없는 실패와 코드 지적은 review-needs-attention으로 남기고 검사 실패도 함께 노출', async t => {
+  const w = await wrapperFixture(t); w.data.output.codex.stdout = 'No findings. Lint passed, but privacyGuard failed. [P2] Export drops metadata.';
+  let output;
+  assert.equal(await w.run({ out: text => { output = JSON.parse(text); } }), 2);
+  assert.equal(output.state, 'review-needs-attention'); assert.deepEqual(output.blockers, ['findings', 'reviewer-check-failed']);
+  assert.equal(output.codeFindings.medium, 1); assert.ok(output.codeFindings.unknown > 0);
+  assert.deepEqual(output.reviewerCheckFailures.map(c => [c.name, c.cause]), [['privacyGuard', null]]);
+  assert.equal(w.f.dispatches.length, 0); assert.equal(w.f.comments.length, 0);
+});
+
+test('PR #28 형태 v2 ledger 복구: 원본 불변·parser v3로 실패를 분리·게시하지 않음, 손상 원본은 거부', async t => {
+  const legacy = async (t, mutate = () => {}) => {
+    const w = await wrapperFixture(t); w.data.output.codex.stdout = pr28Report;
+    const current = collectPluginResult({ ...w.data, target: w.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+    const rest = { ...current }; delete rest.reviewerChecks;
+    // parser v2가 PR #28에 기록한 결과 형태: 검사 기록 없음, unknown 1.
+    const result = { ...rest, v: 2, findings: { ...current.findings, unknown: 1 } }; mutate(result);
+    const original = JSON.stringify({ state: 'completed', target: w.target, session: 'session-1', result });
+    writeFileSync(w.path, original);
+    return { w, original };
+  };
+  await t.test('recover', async t => {
+    const { w, original } = await legacy(t);
+    const outputs = [];
+    const recover = () => w.run({ options: { ...w.options, recover: true }, out: text => outputs.push(JSON.parse(text)) });
+    assert.equal(await recover(), 2); assert.equal(await recover(), 2);
+    assert.equal(readFileSync(w.path, 'utf8'), original);
+    const recovered = JSON.parse(readFileSync(w.path + '.recovered.v3.json', 'utf8'));
+    assert.equal(recovered.recovery.parserVersion, 3); assert.equal(recovered.result.v, 3);
+    assert.deepEqual(recovered.result.findings, zeroFindings); assert.equal(recovered.result.report, pr28Report);
+    assert.equal(outputs[0].state, 'review-checks-need-attention'); assert.deepEqual(outputs[1], outputs[0]);
+    assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1);
+    assert.equal(w.f.dispatches.length, 0); assert.equal(w.f.comments.length, 0);
+  });
+  for (const [name, mutate] of [['hash', r => { r.report += ' '; }], ['version', r => { r.v = 1; }], ['status', r => { r.status = 'failed'; }],
+    ['source', r => { r.source.kind = 'local-session'; }]]) await t.test(name, async t => {
+    const { w, original } = await legacy(t, mutate);
+    await assert.rejects(w.run({ options: { ...w.options, recover: true } }), /Recovery original result invalid/);
+    assert.equal(readFileSync(w.path, 'utf8'), original); assert.equal(existsSync(w.path + '.recovered.v3.json'), false);
+    assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 0); assert.equal(w.f.dispatches.length, 0);
+  });
+});
+
+test('로컬 게시·판정 코드가 기본 브랜치와 다르면 dispatch하지 않고 완료 결과 보존·모델 재호출 없음', async t => {
+  const w = await wrapperFixture(t); const { f, path } = w;
+  f.codeVersions.set('.github/scripts/review-result-parser.mjs', new Map([['main', 'a'.repeat(40)]]));
+  const mismatch = error => {
+    assert.equal(error.code, 'review-publication-code-mismatch'); assert.match(error.message, /review-result-parser\.mjs/);
+    assert.match(pluginPublicationFailureMessage(error), /기본 브랜치와 달라.*수동 리뷰 보고 절차/);
+    return true;
+  };
+  await assert.rejects(w.run(), mismatch);
+  const completed = readFileSync(path, 'utf8');
+  assert.equal(JSON.parse(completed).state, 'completed'); assert.equal(JSON.parse(completed).publicationRequested, undefined);
+  await assert.rejects(w.run(), mismatch);
+  assert.equal(readFileSync(path, 'utf8'), completed);
+  assert.equal(w.calls.reviews, 1); assert.equal(f.dispatches.length, 0); assert.equal(f.comments.length, 0);
+});
+
+test('서버는 원문과 다른 리뷰어 검사 기록(실패 삭제·통과 변조·원인 변경·추가)과 이전 형식을 거부', async () => {
+  for (const mutate of [
+    c => c.splice(c.findIndex(x => x.status === 'failed'), 1),
+    c => { c.find(x => x.status === 'failed').status = 'passed'; },
+    c => { c.find(x => x.status === 'failed').cause = null; },
+    c => { c.find(x => x.status === 'failed').cause.kind = 'confirmed-environment'; },
+    c => { c.find(x => x.status === 'not-run').status = 'passed'; },
+    c => { c.push({ name: 'E2E', status: 'passed', count: null, cause: null }); },
+  ]) {
+    const f = localFixture(); const r = await f.result();
+    r.report = pr28Report; r.source.outputHash = reportHash(pr28Report);
+    r.reviewerChecks = analyzeReviewText(pr28Report).reviewerChecks; mutate(r.reviewerChecks);
+    await assert.rejects(f.publish(r), /원문과 다른 리뷰어 검사 기록/); assert.equal(f.comments.length, 0);
+  }
+  for (const mutate of [r => { r.v = 2; }, r => { delete r.reviewerChecks; }, r => { r.reviewerChecks = null; }]) {
+    const f = localFixture(); const r = await f.result(); mutate(r);
+    await assert.rejects(f.publish(r)); assert.equal(f.comments.length, 0);
+  }
+});
+
+test('리뷰어 검사 실패 결과는 봇 보고서로 기록돼도 관리자 확인 내용·게이트 근거가 되지 않음', async () => {
+  const f = localFixture(); const r = await f.result();
+  r.report = pr28Report; r.source.outputHash = reportHash(pr28Report); r.reviewerChecks = analyzeReviewText(pr28Report).reviewerChecks;
+  const p = await f.publish(r); f.finish(p);
+  await assert.rejects(f.confirm(), /리뷰어 로컬 검사 실패/);
+  f.addConfirmation({ fingerprint: r.target.fingerprint, decision: 'pass', reviewer: 'codex', reviewComplete: true,
+    evidence: p.commentUrl, evidenceHash: p.evidenceHash, findings: r.findings });
+  await assert.rejects(f.collect(), /리뷰어 로컬 검사 실패/);
+});
+
+// parser v2 --recover가 남긴 복구 기록 형태. 원래 ledger와 함께 만들고, 두 파일은 테스트 내내 바뀌면 안 된다.
+async function legacyRecoveryFixture(t, { report = pr23Report, legacy = () => {}, original = () => {}, legacyText = null } = {}) {
+  const w = await wrapperFixture(t); w.data.output.codex.stdout = report;
+  const current = collectPluginResult({ ...w.data, target: w.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+  const v2 = { ...current, v: 2, findings: { ...current.findings, unknown: 1 } }; delete v2.reviewerChecks;
+  const originalLedger = { state: 'completed', target: structuredClone(w.target), session: 'session-1', result: v2 }; original(originalLedger);
+  const originalText = JSON.stringify(originalLedger);
+  writeFileSync(w.path, originalText);
+  const legacyLedger = { state: 'completed', target: structuredClone(w.target), session: 'session-1',
+    result: { ...structuredClone(v2), findings: { ...zeroFindings } }, recovery: { originalLedgerHash: sha256(originalText), parserVersion: 2 } };
+  legacy(legacyLedger);
+  const text = legacyText ?? JSON.stringify(legacyLedger);
+  writeFileSync(w.path + '.recovered.json', text);
+  const unchanged = () => {
+    assert.equal(readFileSync(w.path, 'utf8'), originalText);
+    assert.equal(readFileSync(w.path + '.recovered.json', 'utf8'), text);
+  };
+  const recover = (overrides = {}) => w.run({ options: { ...w.options, recover: true }, maxPolls: 1, ...overrides });
+  return { w, text, unchanged, recover };
+}
+
+const manualRecovery = error => {
+  assert.equal(error.code, 'review-recovery-manual');
+  assert.match(pluginPublicationFailureMessage(error), /수정하지 않았으며 자동 재해석·재요청·모델 호출을 하지 않습니다/);
+  return true;
+};
+
+test('v2 복구 파일 부재: v3 파일을 새로 만들고 legacyRecoveredHash는 null', async t => {
+  const w = await wrapperFixture(t); w.data.output.codex.stdout = pr23Report;
+  const current = collectPluginResult({ ...w.data, target: w.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+  const v2 = { ...current, v: 2 }; delete v2.reviewerChecks;
+  const originalText = JSON.stringify({ state: 'completed', target: w.target, session: 'session-1', result: v2 });
+  writeFileSync(w.path, originalText);
+  await assert.rejects(w.run({ options: { ...w.options, recover: true }, maxPolls: 1 }), /완료를 확인하지 못함/);
+  const recovered = JSON.parse(readFileSync(w.path + '.recovered.v3.json', 'utf8'));
+  assert.equal(recovered.recovery.legacyRecoveredHash, null); assert.equal(recovered.result.v, 3);
+  assert.equal(existsSync(w.path + '.recovered.json'), false); assert.equal(readFileSync(w.path, 'utf8'), originalText);
+  assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1); assert.equal(w.f.dispatches.length, 1);
+});
+
+test('게시 요청 전 v2 복구 파일: 보존한 채 v3로 재해석, 한 번만 요청, v3 복구 중복 실행은 재사용', async t => {
+  const { w, text, unchanged, recover } = await legacyRecoveryFixture(t);
+  await assert.rejects(recover(), /완료를 확인하지 못함/);
+  unchanged();
+  const recovered = JSON.parse(readFileSync(w.path + '.recovered.v3.json', 'utf8'));
+  assert.equal(recovered.recovery.legacyRecoveredHash, sha256(text)); assert.equal(recovered.recovery.parserVersion, 3);
+  assert.equal(recovered.result.v, 3); assert.deepEqual(recovered.result.findings, zeroFindings);
+  assert.ok(recovered.result.reviewerChecks.some(c => c.status === 'skipped'));
+  assert.equal(recovered.publicationRequested, true); assert.equal(w.f.dispatches.length, 1);
+  // 응답 대기 중 재실행(복구·일반 모두)은 v3 파일을 재사용하고 다시 조회·요청하지 않는다.
+  await assert.rejects(recover(), /완료를 확인하지 못함/);
+  await assert.rejects(w.run({ maxPolls: 1 }), /완료를 확인하지 못함/);
+  const p = await w.f.publish(w.f.dispatches[0].result); w.f.finish(p);
+  assert.equal(await recover(), 0); assert.equal(await w.run(), 0);
+  unchanged();
+  assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1);
+  assert.equal(w.f.dispatches.length, 1); assert.equal(w.f.comments.length, 1);
+});
+
+test('게시 요청 전 v2 복구 파일 + PR #28 원문: v3 재해석 후 검사 실패로 게시하지 않음', async t => {
+  const { w, unchanged, recover } = await legacyRecoveryFixture(t, { report: pr28Report });
+  let output;
+  assert.equal(await recover({ out: text => { output = JSON.parse(text); } }), 2);
+  unchanged();
+  assert.equal(output.state, 'review-checks-need-attention'); assert.deepEqual(output.codeFindings, zeroFindings);
+  assert.deepEqual(output.reviewerCheckFailures.map(c => c.name), ['privacyGuard']);
+  assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1); assert.equal(w.f.dispatches.length, 0);
+});
+
+test('v2 복구 파일의 게시 요청 기록·불명확·부분 기록·변조·다른 대상/세션은 수동 확인으로 중단', async t => {
+  const cases = [
+    ['requested', { legacy: l => { l.publicationRequested = true; } }],
+    ['requested false', { legacy: l => { l.publicationRequested = false; } }],
+    ['published', { legacy: l => { l.publicationRequested = true; l.publication = { commentUrl: 'x', evidenceHash: '0'.repeat(64) }; } }],
+    ['unknown field', { legacy: l => { l.extra = 1; } }],
+    ['partial json', { legacyText: '{"state":"completed","target":' }],
+    ['not object', { legacyText: '[]' }],
+    ['missing recovery', { legacy: l => { delete l.recovery; } }],
+    ['recovery extra', { legacy: l => { l.recovery.publicationRequested = true; } }],
+    ['parser version', { legacy: l => { l.recovery.parserVersion = 3; } }],
+    ['original hash', { legacy: l => { l.recovery.originalLedgerHash = '0'.repeat(64); } }],
+    ['captured', { legacy: l => { l.state = 'captured'; } }],
+    ['session', { legacy: l => { l.session = 'other-session'; } }],
+    ['head', { legacy: l => { l.target.head = 'e'.repeat(40); } }],
+    ['base', { legacy: l => { l.target.base = 'a'.repeat(40); } }],
+    ['result version', { legacy: l => { l.result.v = 3; } }],
+    ['report tampered', { legacy: l => { l.result.report += ' Hidden.'; } }],
+    ['report hash', { legacy: l => { l.result.report += ' Hidden.'; l.result.source.outputHash = reportHash(l.result.report); } }],
+    ['job', { legacy: l => { l.result.source.jobId = 'other-job'; } }],
+  ];
+  for (const [name, options] of cases) await t.test(name, async t => {
+    const { w, unchanged, recover } = await legacyRecoveryFixture(t, options);
+    await assert.rejects(recover(), manualRecovery);
+    await assert.rejects(recover(), manualRecovery);
+    // --recover 없이 실행해도 원래 ledger로 되돌아가 새 리뷰·게시를 시도하지 않는다.
+    await assert.rejects(w.run(), manualRecovery);
+    unchanged(); assert.equal(existsSync(w.path + '.recovered.v3.json'), false);
+    assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 0);
+    assert.equal(w.f.dispatches.length, 0); assert.equal(w.f.comments.length, 0);
+  });
+});
+
+test('v2 복구 파일이 있어도 원래 ledger의 다른 대상·세션·게시 요청·원문 변조는 먼저 거부', async t => {
+  for (const [name, original, pattern] of [
+    ['head', o => { o.target.head = 'e'.repeat(40); }, /unpublished completed target/],
+    ['base', o => { o.target.base = 'a'.repeat(40); }, /unpublished completed target/],
+    ['session', o => { o.session = 'other-session'; }, /unpublished completed target/],
+    ['requested', o => { o.publicationRequested = true; }, /unpublished completed target/],
+    ['report', o => { o.result.report += ' Hidden.'; }, /Recovery original result invalid/],
+  ]) await t.test(name, async t => {
+    const { w, unchanged, recover } = await legacyRecoveryFixture(t, { original });
+    await assert.rejects(recover(), pattern);
+    unchanged(); assert.equal(existsSync(w.path + '.recovered.v3.json'), false);
+    assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 0); assert.equal(w.f.dispatches.length, 0);
+  });
+});
+
+test('부분 기록된 v3 복구 파일은 덮어쓰거나 재해석하지 않고 중단', async t => {
+  const { w, unchanged, recover } = await legacyRecoveryFixture(t);
+  writeFileSync(w.path + '.recovered.v3.json', '{"state":"completed"');
+  await assert.rejects(recover()); await assert.rejects(w.run());
+  unchanged(); assert.equal(readFileSync(w.path + '.recovered.v3.json', 'utf8'), '{"state":"completed"');
+  assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 0); assert.equal(w.f.dispatches.length, 0);
 });

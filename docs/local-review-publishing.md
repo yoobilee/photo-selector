@@ -14,7 +14,13 @@ npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설�
 
 1. 원격 PR·정책·파일·댓글·검사를 전체 조회해 대상과 fingerprint를 고정하고 로컬 HEAD를 확인한다.
 2. 기존 `codex-companion.mjs review --wait --base <고정 base SHA> --scope branch --json`을 1회 실행한다. 모델·추론 강도는 기존 설정을 따른다. 이어 `result --json`으로 같은 세션·thread·완료 job을 수집한다. 별도 독립 리뷰를 중복 실행하지 않는다.
-3. 원문·지적·현재 HEAD의 CI check·미실행/확인 불가 항목을 모은다. native plugin은 명령별 검사 결과의 구조화된 증명을 제공하지 않는다. 원문에 있는 검사 주장은 관리자와 CI가 따로 확인한다. 관찰한 지적 없음 선언과 검사 문장의 전체 문법만 허용하며, 뒤에 알 수 없는 산문이 있으면 unknown으로 둔다. unknown이나 미해결 critical/high/medium이면 원문과 `review-needs-attention`을 출력하고 게시하지 않는다. 지적 배지는 집계하되 나머지 문맥의 완전성을 증명할 수 없어 unknown도 함께 남긴다.
+3. 원문·지적·현재 HEAD의 CI check·미실행/확인 불가 항목을 모은다. native plugin은 명령별 검사 결과의 구조화된 증명을 제공하지 않는다. 원문에 있는 검사 주장은 관리자와 CI가 따로 확인한다. 관찰한 지적 없음 선언과 검사 문장의 전체 문법만 허용하며, 뒤에 알 수 없는 산문이 있으면 unknown으로 둔다. 결과(v3)는 아래 정보를 서로 다른 필드로 기록한다(자세한 규칙은 "코드 지적과 리뷰어 로컬 검사 구분").
+   - `findings`: 코드 지적(critical/high/medium/low)과 판단 불가(unknown)
+   - `status`·`reviewComplete`: 리뷰 완료 여부
+   - `reviewerChecks`: 리뷰어가 원문에 보고한 로컬 검사의 통과(`passed`)·실패(`failed`)·미실행(`not-run`)·건너뜀(`skipped`)과 리뷰어가 밝힌 환경 원인 주장
+   - `checks`: GitHub API가 반환한 현재 HEAD의 원격 CI 상태
+
+   unknown이나 미해결 critical/high/medium이면 원문과 `review-needs-attention`을, 코드 지적은 없지만 리뷰어가 로컬 검사 실패를 보고했으면 `review-checks-need-attention`을 출력하고 게시하지 않는다. 지적 배지는 집계하되 나머지 문맥의 완전성을 증명할 수 없어 unknown도 함께 남긴다.
 4. 기존 `review-evidence.yml`의 고정된 기본 브랜치에 등록 요청만 전달한다. 개인 GitHub 인증으로 PR 댓글을 쓰지 않는다. workflow는 PR 코드·모델·설치·테스트를 실행하지 않고 기본 브랜치 코드와 최소 `GITHUB_TOKEN` 권한으로 미인증 자료를 게시한다.
 5. workflow가 댓글 ID·본문을 확인한 뒤 `review-evidence-v2-<댓글 ID>-<본문 SHA-256>` 이름의 artifact를 만든다. 내용은 댓글 링크·ID·해시뿐이다. API가 artifact를 원본 run에 연결한 metadata가 게시 경로의 영수증이다. ZIP을 게이트에서 실행/추출하지 않는다.
 6. 성공한 실행과 댓글을 다시 검증해 stdout JSON에 댓글 링크·해시·관리자가 직접 작성할 `/review-gate`를 출력한다. 보고서를 수동 게시할 필요가 없다. 확인 내용만 다시 조회하려면:
@@ -32,11 +38,40 @@ npm run review:prepare -- yoobilee/photo-selector <PR번호> --confirmation
 - `actions: read`는 게이트의 run/artifact 조회에 추가했다. 게시기는 기존 read 권한과 `issues: write`만 사용한다. 추가 쓰기·병합 권한·AI 인증은 없다. Actions token 댓글은 후속 workflow를 자동 실행시키지 않을 수 있으며 관리자 `/review-gate`가 기존 게이트를 실행한다.
 - 관리자 인증 공유는 미해결이다. 현재 gh 로그인으로 dispatch를 요청하지만 같은 인증으로 AI가 임의 승인 댓글을 쓰는 것을 기술적으로 막지 못한다. 봇 게시와 사람 승인의 구분은 완전한 사람 증명이 아니다. 강한 보장이 필요하면 관리자 자격증명을 AI 환경에서 제거하고 비관리자 실행 계정/전용 게시 App과 사람 전용 승인 환경을 별도 구성·검증해야 한다. 이번 PR은 App 설치·권한을 변경하지 않는다.
 
+## 코드 지적과 리뷰어 로컬 검사 구분
+
+### 문제
+
+PR #28의 Codex native 리뷰는 코드 지적이 0건이었지만 리뷰어 읽기 전용 환경에서 `privacyGuard`가 임시 폴더 권한 제한으로 실패했다고 보고했다. parser v2는 지적 없음 선언(한국어 포함)과 검사 실패 문장을 한 덩어리로 다뤄 `unknown: 1`로 차단했다. 차단 자체는 의도한 안전 동작이었지만, 관리자는 "코드 지적이 있는지"와 "리뷰어 환경에서 검사가 실패했는지"를 구분해 볼 수 없었다.
+
+같은 리뷰의 plugin job 로그에는 원문에 없는 `git diff --check` exit 1도 남아 있었다. 리뷰 원문이 실행한 모든 명령과 실패를 나열한다는 보장은 없다.
+
+### 해결 (parser v3, 결과 v3)
+
+- 원문을 처음부터 끝까지 문장 단위로 해석한다. 첫 문장은 관찰한 지적 없음 선언(영어 3종, PR #28 한국어 1종)이어야 한다. 이어지는 문장은 "검사 목록 + 통과/실패/미실행/건너뜀" 문형만 받는다. 검사 이름은 정해진 어휘(Lint, TypeScript, Build, E2E, 단위·선명도 테스트 등), 숫자, 코드 식별자(`privacyGuard`, `` `npm run test:gate` `` 등)로 제한한다. 해석하지 못한 문장이 하나라도 있으면 unknown이다.
+- 실패 원인은 리뷰어가 샌드박스·환경 권한 제한을 명시한 좁은 문형만 `cause: { kind: 'environment-claimed', text }`로 기록한다. 이 값은 리뷰어의 주장이며 확인된 사실이 아니다. 원인을 밝히지 않은 실패는 코드 결함일 수 있으므로 unknown을 하나 더한다. 다른 원인(assertion error 등)이나 추정 표현은 문법 밖이라 unknown이다.
+- 실패는 어떤 경우에도 통과로 바꾸지 않는다. 원격 CI 성공은 `checks`에 따로 남기며, 리뷰어 로컬 검사가 성공했다는 근거로 쓰지 않는다.
+- 리뷰어가 로컬 검사 실패를 보고하면 코드 지적이 0건이어도 자동 게시하지 않는다(`review-checks-need-attention`, 종료 코드 2). 출력에는 `codeFindings`, `reviewerCheckFailures`, 전체 `reviewerChecks`, 원격 `remoteChecks`, 원문 전체가 함께 나온다. 관리자는 원문과 plugin job 기록을 확인한 뒤 기존 수동 리뷰 보고 절차로 판단한다.
+- 통과·건너뜀·미실행만 보고한 원문은 지금처럼 게시할 수 있다. 미실행 항목은 게시된 JSON의 `reviewerChecks`에 그대로 남는다.
+- 서버는 같은 parser로 원문을 다시 해석한다. 제출한 `reviewerChecks`가 해석 결과와 하나라도 다르면(실패 삭제·통과 변조·원인 변경·항목 추가) 거부하고, 지적 수를 원문보다 줄인 제출도 계속 거부한다.
+- 봇 보고서에 리뷰어 로컬 검사 실패가 있으면 `review:prepare --confirmation`과 게이트가 그 보고서를 관리자 확인 근거로 쓰지 않는다. 수동 dispatch로 기록된 경우도 같다.
+- parser v2가 지적 없음으로만 보던 영어 문장 "The full unit run encountered a sandbox EPERM in privacyGuard; ..."는 v3에서 `privacyGuard` 실패로 기록되고 자동 게시하지 않는다. 의도한 강화다.
+
+### 게시 코드 버전 확인
+
+서버 workflow는 기본 브랜치의 parser와 검증 코드를 실행한다. wrapper는 dispatch 직전에 로컬 게시·판정 모듈(`publicationModules`)의 Git blob SHA를 기본 브랜치와 비교한다. 다르면 `review-publication-code-mismatch`로 중단하고 `publicationRequested`를 기록하지 않는다. 서버가 다른 parser로 거부할 요청을 보내 영수증 없는 "요청됨" 상태에 빠지는 것을 막는다. parser·검증 코드를 바꾸는 PR(이 변경 포함)은 자기 리뷰를 자동 게시할 수 없으며 수동 리뷰 보고 절차를 사용한다.
+
+### 한계
+
+- 문법은 관찰한 문형만 받는다. 새 표현은 unknown이 되어 수동 절차로 넘어간다. 문법 확장은 실제 원문과 회귀 테스트를 근거로 별도 high-risk PR에서 한다.
+- 원문에 없는 실패(PR #28의 `git diff --check`)는 parser가 알 수 없다. native plugin이 명령별 결과를 구조화해 제공하지 않으므로 관리자가 job 기록을 확인해야 한다.
+- 결과 v3 도입으로 v2 형식 결과는 새로 게시할 수 없다. 실제 게시된 v2 봇 보고서는 없다(PR #23·#28 모두 미게시).
+
 ## 실패·중복·복구
 
 ### 문장 수집 실패 뒤 기존 완료 결과 복구
 
-PR #23에서 실제 완료 문장이 기존 허용 문법 밖이라 `unknown: 1`로 분류됐다. 수집기와 서버는 이제 같은 parser로 관찰한 전체 문장을 검사한다. 검사 생략·Build/E2E 미실행은 원문 그대로 보존하며, 임의 후속 산문·실패·한도·미완료·지적 혼재는 `unknown` 또는 차단 지적으로 남긴다. 서버는 원문보다 지적 수를 줄인 제출도 거부한다.
+PR #23에서 실제 완료 문장이 기존 허용 문법 밖이라 `unknown: 1`로 분류됐다. 수집기와 서버는 이제 같은 parser로 관찰한 전체 문장을 검사한다. 검사 생략·Build/E2E 미실행은 원문 그대로 보존하며, 임의 후속 산문·원인 불명 실패·한도·미완료·지적 혼재는 `unknown` 또는 차단 지적으로, 원인을 밝힌 실패는 `reviewerChecks`의 실패로 남긴다. 서버는 원문보다 지적 수를 줄인 제출과 원문과 다른 검사 기록도 거부한다.
 
 동일 대상의 **아직 게시 요청하지 않은 completed ledger**가 있을 때만 다음 복구 명령을 사용한다.
 
@@ -44,7 +79,7 @@ PR #23에서 실제 완료 문장이 기존 허용 문법 밖이라 `unknown: 1`
 npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설치된 Codex 플러그인 루트> --session <원래 Claude 세션 ID> --recover
 ```
 
-`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
+`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.v3.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. parser v2가 만든 `<원래 ledger>.recovered.json`은 읽기만 하고 수정·삭제하지 않는다. 그 파일이 정확히 v2 복구 형식이고, 게시 요청·게시 기록이 없으며, 같은 원본 ledger hash·세션·대상·원문·출처에서 파생됐을 때만 모델 재호출 없이 v3로 다시 해석하고 그 파일의 hash를 `legacyRecoveredHash`로 남긴다. 게시 요청 기록이 있거나 알 수 없는 필드·부분 기록처럼 요청 여부가 불명확하면 `review-recovery-manual`로 중단하고 사람이 실제 댓글·Actions·영수증을 확인한다. v2 복구 파일만 있는 대상에서 `--recover` 없이 실행해도 원래 ledger로 되돌아가지 않고 같은 이유로 중단한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
 
 PR #23처럼 이미 병합됐거나 base가 바뀐 결과는 복구 게시 대상으로 삼지 않는다. parser 수정은 옛 결과를 새 base에 재연결하는 허가가 아니다.
 
