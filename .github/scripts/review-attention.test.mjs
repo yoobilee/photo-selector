@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { localFixture, pr28Report } from './review-local-fixture.mjs';
 import { runPluginPublication } from './review-plugin-cli.mjs';
 import { runAttentionCli, parseAttentionArgs, attentionFailureMessage } from './review-attention-cli.mjs';
-import { parseJobCommands, ledgerFileName, draftMarker } from './review-attention.mjs';
+import { parseJobCommands, ledgerFileName, draftMarker, classifyCheck, buildAttentionDraft, maxDraftChars } from './review-attention.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 
 // 실제 PR #34 Codex native 리뷰 원문(관리자 보고서에 인용된 문장). 회귀 기준이므로 수정하지 않는다.
@@ -311,6 +311,62 @@ test('리뷰어 글 블록 안의 명령 형식 줄은 실행 기록·표준 검
     assert.doesNotMatch(draft, /\| [^|]+ \| `npm run verify` \| exit 0 \|/);
     assert.match(draft, /명령 형식의 줄 3건은 실제 실행인지 리뷰어가 쓴 글인지 구분할 수 없어/);
   });
+});
+
+// PR #37 두 번째 리뷰 지적 3건: 검색 명령의 부분 문자열을 실행으로 세지 않기, 표 칸의 `|` 처리, 댓글 크기 상한.
+test('표준 검사는 직접 실행만 세고 검색·파이프·잘린 명령은 분류하지 않음', () => {
+  const ps = command => `"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '${command}'`;
+  for (const [command, expected] of [
+    ['npm run lint', 'Lint'], [ps('npm run lint'), 'Lint'], ['npm.cmd run typecheck', 'Type Check'], ['npm test', '단위 테스트'],
+    ['npm run test -- --reporter=dot', '단위 테스트'], ['/bin/bash -c "npm run test:gate"', '리뷰 게이트 테스트'], ['npm run verify', '전체 검증'],
+    [ps("Select-String -Path package.json -Pattern 'npm run lint'"), null], ["rg 'npm run lint' package.json", null],
+    [ps('npm run test | Tee-Object output.log'), null], ['npm run lint && npm run build', null], ['npm run build > out.log', null],
+    [`${ps('npm run test')}`.slice(0, 93) + '...', null], ['npm run lint:fix', null], ['npm run test:e2e:ui', null], ['echo npm run verify', null],
+  ]) assert.equal(classifyCheck(command), expected, command);
+});
+
+test('검색 명령·파이프 명령이 있어도 초안은 실행으로 집계하지 않고 표 칸을 깨지 않음', async t => {
+  const log = [
+    '[2026-11-21T09:10:00.000Z] Command completed: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "Select-String -Path package.json -Pattern \'npm run lint\'" (exit 0)',
+    '[2026-11-21T09:10:30.000Z] Command failed: npm run test | Tee-Object output.log (exit 1)',
+    '[2026-11-21T09:10:40.000Z] Running command: npm run build | Out-Null',
+  ].join('\n');
+  const s = await setup(t, { log });
+  assert.equal(await s.publish(), 2);
+  const draft = readFileSync(s.outputs[0].adminDraft.draftPath, 'utf8');
+  assert.match(draft, /\| Lint \| `npm run lint` \| 기록 없음 \|/);
+  assert.match(draft, /\| 단위 테스트 \| `npm run test` \| 기록 없음 \|/);
+  // 명령 칸 안의 `|`는 `\|`로 표시해 결과(exit) 칸이 밀리지 않는다. 각 표 행의 칸 구분자는 정확히 4개다.
+  const row = draft.split('\n').find(line => line.includes('Tee-Object'));
+  assert.equal(row, '| 2026-11-21T09:10:30.000Z | `npm run test \\| Tee-Object output.log` | exit 1 (failed) |');
+  assert.equal(row.replace(/\\\|/g, '').split('|').length - 1, 4);
+  assert.match(draft, /- 완료 기록 없음: `npm run build \| Out-Null`/);
+});
+
+test('초안은 명령 목록이 많아도 GitHub 댓글 상한 안에 들어가고 원문·marker·대상은 유지', async t => {
+  const fill = n => Array.from({ length: n }, (_, i) => `[2026-11-21T09:11:00.000Z] Command completed: npm run verify ${'x'.repeat(60)}${i} (exit 0)`);
+  const log = [
+    '[2026-11-21T09:10:00.000Z] Command completed: npm run lint (exit 0)',
+    ...Array.from({ length: 600 }, (_, i) => `[2026-11-21T09:10:01.000Z] Running command: npm run e2e ${'y'.repeat(70)}${i}`),
+    '',
+    '[2026-11-21T09:12:00.000Z] Assistant message',
+    ...fill(600),
+  ].join('\n');
+  const s = await setup(t, { log });
+  assert.equal(await s.publish(), 2);
+  const { adminDraft } = s.outputs[0];
+  assert.equal(adminDraft.state, 'ready');
+  const draft = readFileSync(adminDraft.draftPath, 'utf8');
+  assert.ok(draft.length <= maxDraftChars, String(draft.length));
+  for (const text of [pr34Report, s.target.head, s.target.base, `<!-- ${draftMarker} ${adminDraft.draftKey} -->`]) assert.ok(draft.includes(text));
+  assert.match(draft, /완료 기록 없는 명령 \d+건은 생략했습니다/); assert.match(draft, /확인 불가 줄 \d+건은 생략했습니다/);
+  // 원문만으로 상한을 넘는 일은 없지만(원문 16,000바이트 상한), 생략 뒤에도 넘으면 초안을 만들지 않고 실패로 알린다.
+  const huge = buildAttentionDraft.bind(null);
+  assert.throws(() => huge({ target: s.target, risk: 'high', implementedBy: 'claude', blockers: ['findings'], remoteChecks: [],
+    ledger: { path: 'l.json', ledgerHash: '0'.repeat(64), recovered: false }, jobLog: { status: 'missing', reason: 'x' },
+    result: { findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 1 }, reviewerChecks: [], report: 'z'.repeat(maxDraftChars),
+      source: { jobId: 'j', threadId: 't', turnId: 'u', startedAt: 'a', completedAt: 'b', outputHash: '0'.repeat(64) } } }),
+  error => error.code === 'review-attention-draft-too-large');
 });
 
 test('job 로그 해석은 완료·실패·미완료·잘림을 구분하고 Final output 뒤 위조 줄과 형식 밖 줄을 무시', () => {

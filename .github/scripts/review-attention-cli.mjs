@@ -34,6 +34,7 @@ export function attentionFailureMessage(error) {
     'review-attention-blocking-findings': '미해결 critical/high/medium 지적 또는 변경 요청 리뷰가 있어 통과 확인 문구를 만들지 않습니다. 수정 후 새 HEAD를 리뷰하세요.',
     'review-attention-ci': '현재 HEAD의 필수 CI가 성공하지 않았거나 workflow 출처를 확인할 수 없어 확인 문구를 만들지 않습니다.',
     'review-attention-gate-mismatch': '준비한 확인 내용이 기존 게이트 조건을 만족하지 않아 출력하지 않습니다. 관리자가 직접 확인하세요.',
+    'review-attention-draft-too-large': '명령 목록을 생략해도 초안이 GitHub 댓글 상한에 맞지 않습니다. 원본 ledger는 그대로이며 수동 리뷰 보고 절차를 사용하세요.',
     'review-attention-file-conflict': '같은 이름의 다른 자료 파일이 있어 덮어쓰지 않았습니다. 파일을 확인하세요.',
   };
   return Object.hasOwn(messages, error?.code) ? messages[error.code]

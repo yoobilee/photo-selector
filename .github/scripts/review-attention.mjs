@@ -141,15 +141,30 @@ export function captureJobLog({ plugin, result, paths, files, now }) {
 // 초안 marker. 같은 대상·ledger·원문·job에서 만든 초안만 `/review-gate` 준비에 쓴다.
 export const draftKey = ({ target, ledgerHash, result }) => sha256(canonical({ v: 1, target, ledgerHash, outputHash: result.source.outputHash, jobId: result.source.jobId }));
 
+// 표준 검사는 명령 전체가 그 검사의 직접 실행일 때만 인식한다(PR #37 리뷰 지적: 부분 문자열 일치는 검색 명령도 실행으로 셌다).
+// 셸 감싸기(powershell/pwsh/bash/sh/cmd -Command|-c|/c '...')는 한 겹만 벗긴다. 잘린 명령, 파이프·연결(|, ;, &&, ||, >, <),
+// 그 밖의 형태는 분류하지 않는다. 분류하지 않은 명령도 4절 전체 명령 표에는 남는다.
 const standardChecks = [
-  ['Lint', 'npm run lint', /\bnpm(?:\.cmd)? run lint(?![\w:-])|\beslint\b/],
-  ['Type Check', 'npm run typecheck', /\bnpm(?:\.cmd)? run typecheck(?![\w:-])|\btsc\b/],
-  ['단위 테스트', 'npm run test', /\bnpm(?:\.cmd)? (?:run )?test(?![\w:-])|\bvitest\b/],
-  ['Build', 'npm run build', /\bnpm(?:\.cmd)? run build(?![\w:-])|\bvite build\b/],
-  ['E2E', 'npm run test:e2e', /\bnpm(?:\.cmd)? run test:e2e(?![\w:-])|\bplaywright test\b/],
-  ['리뷰 게이트 테스트', 'npm run test:gate', /\bnpm(?:\.cmd)? run test:gate(?![\w:-])|\bnode --test\b/],
-  ['전체 검증', 'npm run verify', /\bnpm(?:\.cmd)? run verify(?![\w:-])/],
+  ['Lint', 'npm run lint', /^npm(?:\.cmd)? run lint(?: --(?: \S+)*)?$/],
+  ['Type Check', 'npm run typecheck', /^npm(?:\.cmd)? run typecheck(?: --(?: \S+)*)?$/],
+  ['단위 테스트', 'npm run test', /^npm(?:\.cmd)? (?:run )?test(?: --(?: \S+)*)?$/],
+  ['Build', 'npm run build', /^npm(?:\.cmd)? run build(?: --(?: \S+)*)?$/],
+  ['E2E', 'npm run test:e2e', /^npm(?:\.cmd)? run test:e2e(?: --(?: \S+)*)?$/],
+  ['리뷰 게이트 테스트', 'npm run test:gate', /^npm(?:\.cmd)? run test:gate(?: --(?: \S+)*)?$/],
+  ['전체 검증', 'npm run verify', /^npm(?:\.cmd)? run verify(?: --(?: \S+)*)?$/],
 ];
+const shellWrapper = /^(?:"[^"]*[\\/](?:powershell|pwsh|bash|sh|cmd)(?:\.exe)?"|(?:\S*[\\/])?(?:powershell|pwsh|bash|sh|cmd)(?:\.exe)?)(?: -NoProfile)? (?:-Command|-c|\/c) (?:'([^']*)'|"([^"]*)")$/i;
+export function directInvocation(command) {
+  if (typeof command !== 'string' || command.endsWith('...')) return null;
+  const wrapped = shellWrapper.exec(command);
+  const inner = (wrapped ? wrapped[1] ?? wrapped[2] : command).trim();
+  if (!inner || /[|;&<>`$()]/.test(inner)) return null;
+  return inner;
+}
+export const classifyCheck = command => {
+  const inner = directInvocation(command);
+  return inner === null ? null : standardChecks.find(([, , pattern]) => pattern.test(inner))?.[0] ?? null;
+};
 const checkStatus = { passed: '통과', failed: '실패', 'not-run': '미실행', skipped: '건너뜀' };
 const blockerText = {
   findings: '`findings`: 코드 지적(critical/high/medium) 또는 판단 불가(unknown)가 0건이 아님',
@@ -158,10 +173,14 @@ const blockerText = {
 
 const cell = text => String(text).replace(/\|/g, '\\|').replace(/\n/g, ' ');
 const code = text => {
-  const value = String(text);
+  const value = String(text).replace(/\r?\n/g, ' ');
   const ticks = '`'.repeat(Math.max(0, ...[...value.matchAll(/`+/g)].map(m => m[0].length)) + 1);
   return ticks.length > 1 ? `${ticks} ${value} ${ticks}` : `\`${value}\``;
 };
+// GFM 표에서는 코드 표기 안의 `|`도 칸을 나눈다. `\|`로 바꾸면 코드 안에서 `|`로 표시된다(PR #37 리뷰 지적).
+const cellCode = text => code(String(text).replace(/\|/g, '\\|'));
+// 리뷰어 글에서 나온 줄은 길이 제한 없이 들어올 수 있어 표시 길이를 줄인다.
+const clip = (text, limit = 160) => text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
 const fence = text => '~'.repeat(Math.max(3, ...[...text.matchAll(/~+/g)].map(m => m[0].length + 1)));
 const exitText = item => `${item.exitCode === null ? 'exit ?' : `exit ${item.exitCode}`}${item.status === 'completed' ? '' : ` (${item.status})`}`;
 
@@ -197,7 +216,10 @@ function uncertainties({ result, jobLog, remoteChecks }) {
 }
 
 // 관리자 검토 초안. 게이트가 읽는 관리자 보고서 형식(제목·대상 SHA)을 따른다. 관리자 판단 절은 비워 둔다.
-export function buildAttentionDraft({ target, risk, implementedBy, result, blockers, ledger, jobLog, remoteChecks, homeDir = null }) {
+// GitHub 댓글 본문 상한(65,536자)보다 여유 있게 제한한다. 넘으면 명령 목록을 생략하고 원문은 유지한다(PR #37 리뷰 지적).
+export const maxDraftChars = 60_000;
+export function buildAttentionDraft(input, listLimit = maxListedCommands) {
+  const { target, risk, implementedBy, result, blockers, ledger, jobLog, remoteChecks, homeDir = null } = input;
   const key = draftKey({ target, ledgerHash: ledger.ledgerHash, result });
   const redact = redactor(homeDir);
   const f = result.findings;
@@ -227,7 +249,7 @@ export function buildAttentionDraft({ target, risk, implementedBy, result, block
   ];
   if (result.reviewerChecks.length) {
     lines.push('| 검사 | 결과 | 개수 | 원인 주장 |', '|---|---|---|---|');
-    for (const item of result.reviewerChecks) lines.push(`| ${code(item.name)} | ${checkStatus[item.status] ?? cell(item.status)} | ${item.count ?? '-'} | ${item.cause ? `${cell(item.cause.text)} (확인 안 됨)` : '-'} |`);
+    for (const item of result.reviewerChecks) lines.push(`| ${cellCode(item.name)} | ${checkStatus[item.status] ?? cell(item.status)} | ${item.count ?? '-'} | ${item.cause ? `${cell(item.cause.text)} (확인 안 됨)` : '-'} |`);
   } else lines.push('- 자동 해석된 검사 문장이 없습니다. 부록의 원문을 직접 확인하세요.');
   if (f.unknown) lines.push('', '- 원문 일부가 자동 해석 문법 밖이므로 이 표에 없는 검사 주장이 원문에 있을 수 있습니다.');
   lines.push('', '## 4. 리뷰어 job 실행 기록 (plugin 로컬 로그)', '');
@@ -235,23 +257,25 @@ export function buildAttentionDraft({ target, risk, implementedBy, result, block
     lines.push(`- 로그 사본 SHA-256: \`${jobLog.logSha256}\` (저장 ${jobLog.capturedAt})`, '');
     if (jobLog.commands.length) {
       lines.push('| 시각 | 명령 | 결과 |', '|---|---|---|');
-      for (const item of jobLog.commands.slice(0, maxListedCommands)) lines.push(`| ${item.at} | ${code(redact(item.command))} | ${exitText(item)} |`);
-      if (jobLog.commands.length > maxListedCommands) lines.push('', `- 명령 ${jobLog.commands.length - maxListedCommands}건은 생략했습니다. 로그 사본에서 확인하세요.`);
+      for (const item of jobLog.commands.slice(0, listLimit)) lines.push(`| ${item.at} | ${cellCode(redact(item.command))} | ${exitText(item)} |`);
+      if (jobLog.commands.length > listLimit) lines.push('', `- 완료 기록 명령 ${jobLog.commands.length - listLimit}건은 생략했습니다. 로그 사본에서 확인하세요.`);
     } else lines.push('- 완료 기록이 있는 명령이 없습니다.');
-    for (const item of jobLog.unfinished) lines.push(`- 완료 기록 없음: ${code(redact(item))}`);
-    for (const item of jobLog.ambiguous) lines.push(`- 확인 불가(리뷰어 글 블록 이후, 실행 기록으로 세지 않음): ${code(redact(item))}`);
+    for (const item of jobLog.unfinished.slice(0, listLimit)) lines.push(`- 완료 기록 없음: ${code(clip(redact(item)))}`);
+    if (jobLog.unfinished.length > listLimit) lines.push(`- 완료 기록 없는 명령 ${jobLog.unfinished.length - listLimit}건은 생략했습니다.`);
+    for (const item of jobLog.ambiguous.slice(0, listLimit)) lines.push(`- 확인 불가(리뷰어 글 블록 이후, 실행 기록으로 세지 않음): ${code(clip(redact(item)))}`);
+    if (jobLog.ambiguous.length > listLimit) lines.push(`- 확인 불가 줄 ${jobLog.ambiguous.length - listLimit}건은 생략했습니다.`);
   } else lines.push(`- 확인 불가: ${jobLog.reason}`);
   lines.push('', '## 5. 표준 검사별 실행 기록 (미실행·확인 불가 포함)', '', '| 검사 | 명령 | job 실행 기록 |', '|---|---|---|');
-  for (const [name, command, pattern] of standardChecks) {
-    const runs = jobLog.status === 'captured' ? jobLog.commands.filter(item => pattern.test(item.command)) : [];
-    const unclear = jobLog.status === 'captured' ? jobLog.ambiguous.filter(item => pattern.test(item)).length : 0;
+  for (const [name, command] of standardChecks) {
+    const runs = jobLog.status === 'captured' ? jobLog.commands.filter(item => classifyCheck(item.command) === name) : [];
+    const unclear = jobLog.status === 'captured' ? jobLog.ambiguous.filter(item => classifyCheck(item) === name).length : 0;
     const recorded = jobLog.status !== 'captured' ? '확인 불가'
       : [runs.length ? `${runs.length}회: ${runs.map(exitText).join(', ')}` : unclear ? '' : '기록 없음',
         unclear ? `확인 불가 ${unclear}건(리뷰어 글 블록 이후)` : ''].filter(Boolean).join('; ');
     lines.push(`| ${name} | \`${command}\` | ${recorded} |`);
   }
   const reportedNotRun = result.reviewerChecks.filter(item => ['not-run', 'skipped'].includes(item.status));
-  lines.push('', '- "기록 없음"은 리뷰어가 실행하지 않았거나 기록이 남지 않아 확인할 수 없다는 뜻입니다. 통과로 보지 않습니다.');
+  lines.push('', '- 명령 전체가 해당 검사의 직접 실행일 때만 셉니다. 잘린 명령·파이프·연결 명령·검색 명령은 세지 않으므로 4절 전체 명령 표를 함께 확인하세요.', '- "기록 없음"은 리뷰어가 실행하지 않았거나 직접 실행 기록을 확인할 수 없다는 뜻입니다. 통과로 보지 않습니다.');
   if (reportedNotRun.length) lines.push(`- 리뷰어가 원문에서 미실행·건너뜀으로 보고: ${reportedNotRun.map(item => `${code(item.name)}(${checkStatus[item.status]})`).join(', ')}`);
   lines.push('', '## 6. 원격 CI (GitHub API, 초안 생성 시점의 현재 HEAD)', '', '| 검사 | 상태 |', '|---|---|');
   for (const item of remoteChecks) lines.push(`| ${cell(item.name)} | ${cell(item.state)} |`);
@@ -267,6 +291,10 @@ export function buildAttentionDraft({ target, risk, implementedBy, result, block
   const marker = fence(result.report);
   lines.push(`${marker}text`, result.report, marker, '');
   const body = lines.join('\n');
+  if (body.length > maxDraftChars) {
+    if (listLimit > 0) return buildAttentionDraft(input, 0);
+    stop('review-attention-draft-too-large', '초안 크기 상한 초과');
+  }
   return { key, body, sha256: sha256(body), state };
 }
 
