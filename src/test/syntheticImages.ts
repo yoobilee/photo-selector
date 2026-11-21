@@ -101,29 +101,45 @@ export function renderUniform(width: number, height: number, tone = 128): GrayIm
 }
 
 // 분리 가능한 가우시안 흐림. 가장자리는 가장 가까운 화소를 반복한다. sigma가 0 이하면 복사본을 돌려준다.
+// 한 줄 단위로 계산해 큰 합성 이미지(예: 3072×2304)도 빠르게 만든다. 화소마다 같은 순서(-radius → +radius)로
+// 배정밀도 합을 더하고 Float32로 저장하므로 화소마다 하나씩 더하던 이전 구현과 결과가 비트 단위로 같다.
 export function gaussianBlur(image: GrayImage, sigma: number): GrayImage {
   const { width, height } = image
   if (sigma <= 0) return { width, height, pixels: image.pixels.slice() }
   const radius = Math.ceil(sigma * 3)
   const kernel = Array.from({ length: radius * 2 + 1 }, (_, index) => Math.exp(-((index - radius) ** 2) / (2 * sigma * sigma)))
   const total = kernel.reduce((sum, value) => sum + value, 0)
-  const weights = kernel.map((value) => value / total)
-  const pass = (source: Float32Array, horizontal: boolean) => {
-    const target = new Float32Array(source.length)
-    for (let y = 0; y < height; y += 1) {
-      for (let x = 0; x < width; x += 1) {
-        let sum = 0
-        for (let offset = -radius; offset <= radius; offset += 1) {
-          const sx = horizontal ? Math.min(width - 1, Math.max(0, x + offset)) : x
-          const sy = horizontal ? y : Math.min(height - 1, Math.max(0, y + offset))
-          sum += source[sy * width + sx]! * weights[offset + radius]!
-        }
-        target[y * width + x] = sum
-      }
+  const weights = Float64Array.from(kernel, (value) => value / total)
+  const sums = new Float64Array(width)
+
+  // 가로: 줄 양끝을 radius만큼 가장자리 화소로 늘린 뒤 가중치 하나씩 줄 전체에 더한다.
+  const horizontal = new Float32Array(width * height)
+  const paddedRow = new Float32Array(width + radius * 2)
+  for (let y = 0; y < height; y += 1) {
+    const rowStart = y * width
+    for (let index = 0; index < paddedRow.length; index += 1) {
+      paddedRow[index] = image.pixels[rowStart + Math.min(width - 1, Math.max(0, index - radius))]!
     }
-    return target
+    sums.fill(0)
+    for (let tap = 0; tap < weights.length; tap += 1) {
+      const weight = weights[tap]!
+      for (let x = 0; x < width; x += 1) sums[x] = sums[x]! + paddedRow[x + tap]! * weight
+    }
+    horizontal.set(sums, rowStart)
   }
-  return { width, height, pixels: pass(pass(image.pixels, true), false) }
+
+  // 세로: 위아래 radius 줄(가장자리는 반복)을 가중치 순서대로 줄 전체에 더한다.
+  const pixels = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    sums.fill(0)
+    for (let tap = 0; tap < weights.length; tap += 1) {
+      const sourceStart = Math.min(height - 1, Math.max(0, y + tap - radius)) * width
+      const weight = weights[tap]!
+      for (let x = 0; x < width; x += 1) sums[x] = sums[x]! + horizontal[sourceStart + x]! * weight
+    }
+    pixels.set(sums, y * width)
+  }
+  return { width, height, pixels }
 }
 
 // 가로 방향으로 length 화소만큼 끌린 흔들림(손떨림·피사체 이동). 가장자리는 가장 가까운 화소를 반복한다.

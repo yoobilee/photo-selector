@@ -64,7 +64,9 @@ function quantizeBlocks(image: GrayImage, step: number): GrayImage {
   return { width, height, pixels }
 }
 
-describe('known limits of blur detection (synthetic reproduction, not real photos)', () => {
+// 테스트마다 1024×768 이상 합성 이미지를 여러 장 만들고 판정해 단독 실행에서도 1초 안팎이 걸린다. 다른 테스트 파일과
+// 병렬로 돌고 PC가 바쁘면 기본 5초를 넘은 적이 있어(Issue #33, 최대 10.1초) 이 파일에만 넉넉한 제한을 둔다.
+describe('known limits of blur detection (synthetic reproduction, not real photos)', { timeout: 30_000 }, () => {
   // 18장 중 4284×5712 사진(photo-3)이 흐림 정답인데 0.093으로 선명 판정된 것과 같은 방향의 결과
   it('misses blur that is small in original pixels once a large photo is shrunk to the 1024px analysis size', () => {
     // 렌즈 기본 흐림은 분석 크기에서 0.8화소로 같게 두고, 원본 화소 기준 2화소의 초점 흐림을 더한다.
