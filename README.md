@@ -54,7 +54,7 @@
 
 ### 브라우저별 범위
 
-- HEIC를 직접 디코딩한다고 알려진 브라우저는 Safari 17 이상(iOS·macOS)입니다(caniuse·WebKit 발표 기준). 이번에 실기기로 확인하지는 않았습니다.
+- HEIC를 직접 디코딩한다고 알려진 브라우저는 Safari 17 이상(iOS·macOS)입니다(caniuse·WebKit 발표 기준). HEIC 지원을 추가할 때는 실기기로 확인하지 않았습니다. 이후 2026-11-19에 iPhone 17 Safari의 파일 앱에서 저장소의 작은 HEIC 시험 파일(160×120) 가져오기·미리보기를 확인했습니다. 실제 촬영한 고해상도 HEIC 원본의 분석·처리 시간·메모리는 확인하지 않았습니다.
 - Chrome·Edge·Firefox(데스크톱·Android)는 HEIC를 디코딩하지 않으므로 안내만 보여 줍니다.
 - 자동 테스트 대상(Playwright Chromium·Pixel 7·WebKit)도 HEIC를 디코딩하지 못합니다. E2E는 실제 HEIC 파일로 미지원 경로를 확인합니다.
   - 이 파일은 Windows HEIF 이미지 확장으로 `e2e/fixtures/sunrise.jpg`를 인코딩한 `e2e/fixtures/sunrise.heic`입니다.
@@ -164,7 +164,8 @@
 | 선명 정답 1,052장(Kwentar·RealBlur) 중 흐림 판정 | 0 | 0 |
 
 - 바뀐 사진 41장은 모두 흐림 정답의 `분석 불가 → 흔들림 의심`입니다. 선명·초점 흐림 정답과 합성 선명 장면의 판정은 바뀌지 않았습니다.
-- 효과는 크게 휘두른 흔들림(Kwentar)에 몰려 있고, 짧은 실제 손떨림(RealBlur)은 거의 개선되지 않았습니다. 실제 iPhone Safari에서는 실행하지 않았습니다.
+- 효과는 크게 휘두른 흔들림(Kwentar)에 몰려 있고, 짧은 실제 손떨림(RealBlur)은 거의 개선되지 않았습니다. 이 수치는 실제 iPhone Safari에서 잰 값이 아닙니다. 2026-11-19에 iPhone 17 Safari에서 가공 JPEG(3장·30장)와 HEIC 시험 파일로 가져오기·판정 표시·크게 비교 동작만 확인했습니다([확인 범위](docs/sharpness-half-scale-shake.md#iphone-safari-실기기-확인-목록)).
+- 짧은 실제 손떨림의 원인(2026-11-21): RealBlur 흔들림은 같은 장면의 선명 사진 대비 약 3화소 길이로, 현재 판정이 찾는 길이(중앙값 24화소)보다 훨씬 짧습니다. 오탐 없이 더 찾는 판정 후보가 없어 판정 코드는 바꾸지 않았습니다([분석 기록](docs/sharpness-short-shake-limits.md)).
 
 **확인한 오탐·미검출**
 
