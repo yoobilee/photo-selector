@@ -135,10 +135,12 @@ async function wrapperFixture(t, f = localFixture()) {
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, 'ledger.json');
   const data = pluginFixture(target);
-  const calls = { reviews: 0, reads: 0, sleeps: 0 };
+  const calls = { reviews: 0, reads: 0, jobReads: 0, sleeps: 0 };
   const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? target.head : target.base;
   const plugin = args => {
     if (args[0] === 'review') { calls.reviews++; return data.output; }
+    // 차단된 결과의 관리자 초안은 같은 job의 저장 기록만 조회한다(리뷰 실행 아님).
+    if (args.length === 3) { assert.deepEqual(args, ['result', 'job-1', '--json']); calls.jobReads++; return data.stored; }
     assert.deepEqual(args, ['result', '--json']); calls.reads++; return data.stored;
   };
   const options = { repository: 'owner/repo', number: 1, session: 'session-1' };

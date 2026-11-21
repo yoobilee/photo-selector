@@ -51,7 +51,7 @@ PR #28의 Codex native 리뷰는 코드 지적이 0건이었지만 리뷰어 읽
 - 원문을 처음부터 끝까지 문장 단위로 해석한다. 첫 문장은 관찰한 지적 없음 선언(영어 3종, PR #28 한국어 1종)이어야 한다. 이어지는 문장은 "검사 목록 + 통과/실패/미실행/건너뜀" 문형만 받는다. 검사 이름은 정해진 어휘(Lint, TypeScript, Build, E2E, 단위·선명도 테스트 등), 숫자, 코드 식별자(`privacyGuard`, `` `npm run test:gate` `` 등)로 제한한다. 해석하지 못한 문장이 하나라도 있으면 unknown이다.
 - 실패 원인은 리뷰어가 샌드박스·환경 권한 제한을 명시한 좁은 문형만 `cause: { kind: 'environment-claimed', text }`로 기록한다. 이 값은 리뷰어의 주장이며 확인된 사실이 아니다. 원인을 밝히지 않은 실패는 코드 결함일 수 있으므로 unknown을 하나 더한다. 다른 원인(assertion error 등)이나 추정 표현은 문법 밖이라 unknown이다.
 - 실패는 어떤 경우에도 통과로 바꾸지 않는다. 원격 CI 성공은 `checks`에 따로 남기며, 리뷰어 로컬 검사가 성공했다는 근거로 쓰지 않는다.
-- 리뷰어가 로컬 검사 실패를 보고하면 코드 지적이 0건이어도 자동 게시하지 않는다(`review-checks-need-attention`, 종료 코드 2). 출력에는 `codeFindings`, `reviewerCheckFailures`, 전체 `reviewerChecks`, 원격 `remoteChecks`, 원문 전체가 함께 나온다. 관리자는 원문과 plugin job 기록을 확인한 뒤 기존 수동 리뷰 보고 절차로 판단한다.
+- 리뷰어가 로컬 검사 실패를 보고하면 코드 지적이 0건이어도 자동 게시하지 않는다(`review-checks-need-attention`, 종료 코드 2). 출력에는 `codeFindings`, `reviewerCheckFailures`, 전체 `reviewerChecks`, 원격 `remoteChecks`, 원문 전체가 함께 나온다. 관리자는 함께 생성되는 관리자 검토 초안(아래 "자동 게시 차단 시 관리자 검토 자료")으로 원문과 plugin job 기록을 확인한 뒤 판단한다.
 - 통과·건너뜀·미실행만 보고한 원문은 지금처럼 게시할 수 있다. 미실행 항목은 게시된 JSON의 `reviewerChecks`에 그대로 남는다.
 - 서버는 같은 parser로 원문을 다시 해석한다. 제출한 `reviewerChecks`가 해석 결과와 하나라도 다르면(실패 삭제·통과 변조·원인 변경·항목 추가) 거부하고, 지적 수를 원문보다 줄인 제출도 계속 거부한다.
 - 봇 보고서에 리뷰어 로컬 검사 실패가 있으면 `review:prepare --confirmation`과 게이트가 그 보고서를 관리자 확인 근거로 쓰지 않는다. 수동 dispatch로 기록된 경우도 같다.
@@ -66,6 +66,63 @@ PR #28의 Codex native 리뷰는 코드 지적이 0건이었지만 리뷰어 읽
 - 문법은 관찰한 문형만 받는다. 새 표현은 unknown이 되어 수동 절차로 넘어간다. 문법 확장은 실제 원문과 회귀 테스트를 근거로 별도 high-risk PR에서 한다.
 - 원문에 없는 실패(PR #28의 `git diff --check`)는 parser가 알 수 없다. native plugin이 명령별 결과를 구조화해 제공하지 않으므로 관리자가 job 기록을 확인해야 한다.
 - 결과 v3 도입으로 v2 형식 결과는 새로 게시할 수 없다. 실제 게시된 v2 봇 보고서는 없다(PR #23·#28 모두 미게시).
+
+## 자동 게시 차단 시 관리자 검토 자료
+
+### 문제
+
+PR #34에서 native Codex 리뷰는 완료됐고 ledger도 `completed`였지만, 원문의 테스트 실패 문장이 문법 밖이라 `review-needs-attention`으로 자동 게시가 차단됐다(의도한 fail-closed 동작). 관리자는 ledger·plugin job 로그·원격 CI를 직접 대조해 보고서를 쓰고, 댓글 해시를 계산해 `/review-gate`를 손으로 만들어야 했다. 자동 게시 도입(Issue #22) 이전의 수동 복사 부담이 차단 사례마다 되살아난 셈이다. 게다가 plugin job과 로그는 Claude 세션 종료 시 플러그인이 지우므로(`session-lifecycle-hook`의 SessionEnd 정리) 나중에는 job 실행 기록을 확인할 수 없었다.
+
+### 해결
+
+차단 정책은 바꾸지 않는다. 자동 게시가 막힌 결과만 관리자가 판단하기 쉬운 자료로 바꾼다.
+
+1. wrapper가 unknown·차단 지적(`findings`)이나 리뷰어 로컬 검사 실패(`reviewer-check-failed`)로 게시를 멈추면, 같은 실행에서 출력 JSON의 `adminDraft`에 관리자 검토 초안 경로를 알려 준다. 종료 코드는 기존과 같이 2다.
+   - 완료 ledger(복구 v3가 있으면 그 파일)는 **읽기만** 한다. 현재 PR 대상(base/head/fingerprint/정책 SHA)과 완전히 같고 게시 요청 기록이 없을 때만 초안을 만든다.
+   - plugin의 `result <job ID> --json`으로 같은 job의 저장 기록만 조회한다. 리뷰를 실행하지 않는다. job ID·thread·turn·세션·완료 시각·원문이 ledger와 모두 같을 때만 로그를 `<ledger>.job-log.json`에 한 번 복사한다(덮어쓰지 않음). 다음 실행은 사본을 재사용하므로 job을 다시 조회하지 않는다. 일치하지 않거나 이미 정리됐으면 "확인 불가"로 표시한다.
+   - 초안은 `<ledger>.attention-<내용 hash 12자리>.md`에 쓴다. 같은 내용이면 같은 파일을 재사용하고 기존 파일을 덮어쓰지 않는다. 초안 생성이 실패해도 차단 결과는 그대로이며 `adminDraft.state: failed`로 알린다.
+2. 초안은 게이트가 읽는 관리자 보고서 형식(`# 독립 리뷰 보고서`, base/head SHA 포함)을 따르고 출처별로 절을 나눈다.
+   - 검토 대상: 저장소·PR·구현자·위험도·base/head·fingerprint·정책 SHA·job/thread/turn·원문 SHA-256·ledger SHA-256
+   - 1 자동 게시 차단 사유, 2 코드 지적 집계(unknown 포함), 3 리뷰어가 원문에 보고한 로컬 검사(주장, 환경 원인은 "확인 안 됨"), 4 job 로그의 명령·exit 코드, 5 표준 검사(Lint·Type Check·단위·Build·E2E·게이트·verify)별 job 실행 기록과 "기록 없음/확인 불가", 6 원격 필수 CI, 7 불확실성, 8 관리자 판단(빈칸), 부록 원문 전체
+   - plugin은 이벤트 줄을 빈 줄 없이 쓰고, 리뷰어가 쓴 글(`Assistant message`·`Review output`·`Reasoning summary`·`Final output` 등)은 빈 줄과 제목 줄로 시작하는 블록으로 쓴다. 블록에는 끝 표시가 없어 이후 줄이 실제 이벤트인지 리뷰어 글인지 구분할 수 없다. 그래서 첫 블록 이후의 명령 형식 줄은 실행 기록으로 세지 않고 "확인 불가"로만 표시한다(PR #37 리뷰 지적). 명령 문자열의 사용자 홈 경로는 `~`로 바꾼다. 리뷰 원문은 대조를 위해 그대로 둔다.
+   - 표준 검사 표(5절)는 명령 전체가 그 검사의 직접 실행일 때만 센다(`npm run lint`, `npm run test -- …`, 셸 감싸기 한 겹 허용). 검색 명령(`Select-String … 'npm run lint'`), 파이프·연결·리디렉션, 잘린 명령은 세지 않고 4절 전체 명령 표에만 남긴다(PR #37 리뷰 지적).
+   - 표 칸의 `|`는 `\|`로 바꿔 결과 칸이 밀리지 않게 한다. 명령 목록은 종류별로 80건까지 보여 주고, 초안이 60,000자(GitHub 댓글 상한 65,536자보다 작게)를 넘으면 명령 목록을 생략한다. 원문·대상·marker는 항상 유지하며, 그래도 넘으면 초안을 만들지 않고 실패로 알린다.
+   - 초안에는 `/review-gate`·`/merge-approve` 명령 줄이 없고, 통과 판단을 미리 채우지 않는다.
+3. 세션이 끝난 뒤에도 같은 checkout에서 초안을 다시 만들 수 있다. 세션 ID·plugin 호출이 필요 없고, job 로그 사본이 없으면 "확인 불가"로 남긴다.
+
+```text
+npm run review:attention -- yoobilee/photo-selector <PR번호>
+```
+
+### 관리자 판단 이후
+
+1. 관리자가 초안을 열어 원문·기록을 확인하고 "8. 관리자 판단"을 작성한 뒤 **본인 계정으로 직접 게시**한다(예: `gh pr comment <PR번호> --repo yoobilee/photo-selector --body-file "<초안 경로>"`). Agent는 이 명령을 대신 실행하지 않는다.
+2. 게시한 댓글로 확인 문구를 준비한다. 이 명령은 GitHub에 쓰지 않는다.
+
+```text
+npm run review:attention -- yoobilee/photo-selector <PR번호> --confirm <게시한 보고서 댓글 URL 또는 ID>
+```
+
+3. 출력된 `confirmationPath` 파일(`/review-gate` 형식)을 확인하고 관리자가 직접 게시한다. High는 `/merge-approve`도 관리자가 직접 작성한다.
+
+`--confirm`은 다음을 모두 만족할 때만 문구를 만든다. 하나라도 어긋나면 고정 안내만 출력하고 파일을 쓰지 않는다.
+
+- 이 PR의 댓글이고, 작성자가 admin/maintain 권한의 사용자(`User`)다. 봇·쓰기 권한 사용자의 댓글은 거부한다.
+- 본문이 보고서 제목으로 시작하고 현재 head/base SHA, 현재 ledger·원문·job에서 계산한 초안 marker, 리뷰 원문 전체를 포함한다. 다른 대상·이전 head·다른 결과의 초안은 거부한다.
+- 같은 대상의 봇 보고서가 없고, 변경 요청 리뷰와 critical/high/medium 지적이 없다. unknown은 줄이지 않고 그대로 넣는다.
+- 현재 HEAD의 필수 CI가 성공했고 workflow 출처가 맞다(`verifyEvidenceCi`).
+- 만든 확인 내용이 기존 게이트 판정 함수(`decide`)에서 통과 조건을 만족한다.
+
+확인 내용의 `evidenceHash`는 실제로 게시된 댓글 본문(줄바꿈 LF 정규화)에서 계산하므로 관리자가 판단 절을 작성해도 맞는다. 게이트가 실제로 읽는 확인(가장 최근 관리자 `/review-gate`)이 준비한 내용과 같을 때만 `already-confirmed`와 댓글 ID를 알려 주고 다시 게시하지 말라고 안내한다. 과거에 같은 내용이 있었어도 더 최근 관리자 확인이 덮었으면 다시 게시가 필요하다고 안내한다(PR #37 리뷰 지적).
+
+### 유지한 경계와 한계
+
+- 게이트·fingerprint·evidence hash·proof v2·브랜치 보호·봇 게시 경로는 바꾸지 않았다. 게이트는 지금처럼 관리자가 쓴 보고서와 `/review-gate`만 읽는다. 이 도구의 출력은 관리자 확인이 아니다.
+- 관리자와 Agent가 같은 GitHub 인증을 공유하는 문제는 그대로다. 도구는 쓰기 API를 호출하지 않지만, 같은 인증으로 Agent가 직접 댓글을 쓰는 것을 기술적으로 막지는 못한다.
+- job 로그는 차단 직후 같은 Claude 세션에서만 복사할 수 있다. 이미 정리된 기록(예: PR #34)은 "확인 불가"로 남는다. 로그의 명령 문자열은 96자에서 잘리고, 실패한 테스트 파일·원인은 로그만으로 특정되지 않는다. Windows에서는 명령이 `powershell.exe -Command '…'`로 감싸져 실제 명령이 잘리므로 표준 검사 표가 "기록 없음"으로 보일 수 있다(PR #37 실제 로그에서 확인). 관리자는 전체 명령 표를 함께 본다.
+- ledger·job 로그·초안은 로컬 미인증 자료다. 관리자가 원문과 실행 기록을 직접 확인해야 한다.
+- CI workflow 자체를 바꾸는 PR은 `verifyEvidenceCi`가 출처를 확정하지 못해 `--confirm`이 거부한다. 이때는 초안을 참고해 기존 수동 절차로 `/review-gate`를 작성한다.
+- 초안 marker는 현재 ledger에서 계산한다. 초안을 만든 뒤 `--recover`로 복구 v3 기록이 생기면 marker가 달라지므로 초안을 다시 만들어 게시한다.
 
 ## 실패·중복·복구
 

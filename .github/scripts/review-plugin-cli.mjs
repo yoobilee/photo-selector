@@ -4,12 +4,14 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { collectReviewPacket, prepareLocalConfirmation } from './review-evidence.mjs';
 import { createEvidenceGitHub, runEvidenceCli } from './review-evidence-cli.mjs';
-import { canonical, same, validatePluginResult, localReportsForTarget, parseLocalReport, verifyEvidenceCi, pluginResultVersion,
+import { same, validatePluginResult, localReportsForTarget, parseLocalReport, verifyEvidenceCi, pluginResultVersion,
   publicationModules, localPublicationBlockers, reviewerCheckFailures } from './review-evidence-source.mjs';
 import { analyzeReviewText, parserVersion } from './review-result-parser.mjs';
 export { findingsFromText, analyzeReviewText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 import { gitBlobSha } from './merge-pr-core.mjs';
+import { homedir } from 'node:os';
+import { ledgerKey, attentionPaths, readAttentionLedger, captureJobLog, buildAttentionDraft, writeNewOrSame, adminNextSteps, nodeFiles } from './review-attention.mjs';
 
 // CLI에는 원시 오류/API 응답 대신 이 고정 안내만 출력한다.
 export function pluginPublicationFailureMessage(error) {
@@ -97,15 +99,33 @@ export function attentionOutput(result, blockers) {
   return {
     state: blockers.includes('findings') ? 'review-needs-attention' : 'review-checks-need-attention', published: false, blockers,
     codeFindings: result.findings, reviewerCheckFailures: reviewerCheckFailures(result), reviewerChecks: result.reviewerChecks, remoteChecks: result.checks,
-    note: '코드 지적 집계와 리뷰어 로컬 검사는 별개입니다. 실패를 통과로 바꾸지 않았고 환경 원인은 리뷰어 주장일 뿐 확인되지 않았습니다. 원문이 실행한 모든 명령을 나열한다는 보장이 없으니 plugin job 기록도 확인하세요. 자동 게시하지 않았으며 수동 리뷰 보고 절차로 진행하세요.',
+    note: '코드 지적 집계와 리뷰어 로컬 검사는 별개입니다. 실패를 통과로 바꾸지 않았고 환경 원인은 리뷰어 주장일 뿐 확인되지 않았습니다. 원문이 실행한 모든 명령을 나열한다는 보장이 없으니 plugin job 기록도 확인하세요. 자동 게시하지 않았습니다. adminDraft의 관리자 검토 초안을 확인해 관리자가 직접 판단·게시하세요.',
     result,
   };
+}
+
+// 차단된 결과의 관리자 검토 초안. 완료 ledger는 읽기만 하고 job 로그 사본·초안은 별도 파일에 쓴다.
+// 초안을 만들지 못해도 차단 상태(종료 코드 2)는 그대로이며 실패를 숨기지 않는다.
+function prepareAdminDraft({ originalPath, target, description, checks, plugin, files, now, homeDir }) {
+  try {
+    const paths = attentionPaths(resolve(originalPath));
+    const ledger = readAttentionLedger({ paths, target, implementedBy: description.meta['implemented-by'], files, ignoreLock: true });
+    const jobLog = captureJobLog({ plugin, result: ledger.result, paths, files, now });
+    const draft = buildAttentionDraft({ target, risk: description.risk, implementedBy: description.meta['implemented-by'], result: ledger.result,
+      blockers: ledger.blockers, ledger, jobLog, remoteChecks: checks, homeDir });
+    const draftPath = paths.draft(draft.sha256);
+    writeNewOrSame(files, draftPath, draft.body);
+    return { state: 'ready', draftPath, draftSha256: draft.sha256, draftKey: draft.key, jobLog: { status: jobLog.status, reason: jobLog.reason ?? null },
+      nextSteps: adminNextSteps({ target, draftPath }), published: false, approved: false };
+  } catch {
+    return { state: 'failed', reason: '관리자 검토 초안을 만들지 못했습니다. 원본 ledger는 그대로이며 npm run review:attention으로 다시 시도하거나 수동 리뷰 보고 절차를 사용하세요.', published: false, approved: false };
+  }
 }
 
 // 기존 native reviewer 1회를 감싼다. 같은 대상의 ledger가 있으면 리뷰를 다시 호출하지 않는다.
 // 로컬 ledger·플러그인 파일은 위조 가능하다. workflow에서는 항상 미인증 자료로만 취급한다.
 export async function runPluginPublication({ options, gh, git, plugin, out = console.log,
-  sleep = ms => new Promise(r => setTimeout(r, ms)), maxPolls = 12, now = () => new Date().toISOString() }) {
+  sleep = ms => new Promise(r => setTimeout(r, ms)), maxPolls = 12, now = () => new Date().toISOString(), files = nodeFiles, homeDir = homedir() }) {
   const github = createEvidenceGitHub(gh, options.repository);
   const collect = () => collectReviewPacket({ github, repository: options.repository, number: options.number });
   const initial = await collect();
@@ -117,7 +137,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
   };
   checkLocal();
   // 설명·정책만 바뀌어도 같은 base/head 리뷰를 다시 호출하지 않고 대상 불일치로 중단한다.
-  const key = sha256(canonical({ repository: target.repository, number: target.number, head: target.head, base: target.base }));
+  const key = ledgerKey(target);
   const originalPath = git(['rev-parse', '--git-path', `photo-selector-review-${key}.json`]).trim();
   // parser v2 복구 결과(.recovered.json)는 읽기만 하고 수정·삭제하지 않는다. v3 결과는 별도 파일에 둔다.
   const legacyRecoveredPath = `${originalPath}.recovered.json`;
@@ -127,7 +147,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
   const lockPath = `${originalPath}.lock`;
   const lock = openSync(lockPath, 'wx', 0o600); closeSync(lock);
   try {
-    let result; let captured;
+    let result; let captured; let latestChecks = initial.packet.checks;
     if (options.recover && !existsSync(path)) {
       if (!existsSync(originalPath)) throw new Error('No completed ledger to recover');
       const originalText = readFileSync(originalPath, 'utf8');
@@ -186,6 +206,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       checkLocal();
       const current = await collect();
       if (!same(current.packet.target, target)) throw new Error('리뷰 실행 중 원격 대상 변경');
+      latestChecks = current.packet.checks;
       result = collectPluginResult({ output, stored: captured.stored, target, session: options.session, startedAt, checks: current.packet.checks });
       validatePluginResult(result, target, 'claude');
       writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result }), { mode: 0o600 });
@@ -193,7 +214,9 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
     validatePluginResult(result, target, 'claude');
     const blockers = localPublicationBlockers(result);
     if (blockers.length) {
-      out(JSON.stringify(attentionOutput(result, blockers), null, 2));
+      const adminDraft = prepareAdminDraft({ originalPath, target, description: initial.state.evaluation.description, checks: latestChecks,
+        plugin, files, now, homeDir });
+      out(JSON.stringify({ ...attentionOutput(result, blockers), adminDraft }, null, 2));
       return 2;
     }
     const existingPublication = state => {
