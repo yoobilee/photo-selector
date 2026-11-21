@@ -70,16 +70,25 @@ export function readAttentionLedger({ paths, target, implementedBy, files, ignor
   return { path, ledgerHash: sha256(text), session: ledger.session, result, blockers, recovered };
 }
 
-// plugin job 로그(Codex 명령 실행 기록). 리뷰 원문 뒤의 "Final output" 블록은 리뷰어가 쓴 글이므로 해석하지 않는다.
+// plugin job 로그(Codex 명령 실행 기록). codex-companion 1.0.6은 이벤트 줄을 빈 줄 없이 쓰고,
+// 리뷰어가 쓴 글(Assistant message·Review output·Reasoning summary·Final output 등)은 빈 줄 + 제목 줄로 시작하는 블록으로 쓴다.
+// 블록 본문은 끝 표시가 없어 그 뒤 줄이 실제 이벤트인지 리뷰어 글인지 구분할 수 없다.
+// 그래서 첫 블록(첫 빈 줄) 이후의 명령 형식 줄은 실행 기록으로 세지 않고 확인 불가(ambiguous)로만 센다.
 const timestamp = String.raw`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z`;
 const completedLine = new RegExp(`^\\[(${timestamp})\\] Command ([A-Za-z]+): (.+) \\(exit (-?\\d+|\\?)\\)$`);
 const startedLine = new RegExp(`^\\[(${timestamp})\\] Running command: (.+)$`);
-const finalOutputLine = new RegExp(`^\\[${timestamp}\\] Final output$`);
+const blockTitleLine = new RegExp(`^\\[${timestamp}\\] (?:Final output|Assistant message|Review output|Reasoning summary|Subagent .+ (?:message|reasoning summary))$`);
 
 export function parseJobCommands(log) {
-  const commands = []; const unfinished = [];
+  const commands = []; const unfinished = []; const ambiguous = [];
+  let trusted = true;
   for (const line of normalizeNewlines(log).split('\n')) {
-    if (finalOutputLine.test(line)) break;
+    if (!line.trim() || blockTitleLine.test(line)) { trusted = false; continue; }
+    if (!trusted) {
+      const looks = completedLine.exec(line) ?? startedLine.exec(line);
+      if (looks) ambiguous.push(completedLine.test(line) ? looks[3] : looks[2]);
+      continue;
+    }
     const done = completedLine.exec(line);
     if (done) {
       const index = unfinished.indexOf(done[3]);
@@ -90,7 +99,7 @@ export function parseJobCommands(log) {
     const started = startedLine.exec(line);
     if (started) unfinished.push(started[2]);
   }
-  return { commands, unfinished };
+  return { commands, unfinished, ambiguous };
 }
 
 const jobMatches = (job, source) => job && job.id === source.jobId && job.threadId === source.threadId && job.turnId === source.turnId
@@ -173,10 +182,11 @@ function uncertainties({ result, jobLog, remoteChecks }) {
   }
   if (jobLog.status !== 'captured') items.push(`job 실행 기록 확인 불가: ${jobLog.reason}`);
   else {
-    if (jobLog.commands.some(item => item.truncated)) items.push('job 로그의 명령 문자열은 96자에서 잘릴 수 있습니다(`...`로 끝나는 항목).');
+    if (jobLog.commands.some(item => item.truncated)) items.push('job 로그의 명령 문자열은 96자에서 잘립니다(`...`로 끝나는 항목). Windows에서는 셸 경로가 앞에 붙어 실제 명령이 잘려 5절 표에 "기록 없음"으로 보일 수 있으니 4절 전체 명령 표를 함께 확인하세요.');
     if (jobLog.unfinished.length) items.push(`완료 기록 없이 시작만 기록된 명령 ${jobLog.unfinished.length}건이 있습니다.`);
     const failed = jobLog.commands.filter(item => item.exitCode !== 0);
     if (failed.length) items.push(`job 기록에서 exit 0이 아닌 명령 ${failed.length}건이 있습니다. 실패한 테스트 파일·원인은 이 기록만으로 특정되지 않습니다.`);
+    if (jobLog.ambiguous.length) items.push(`리뷰어 글 블록 시작 이후 명령 형식의 줄 ${jobLog.ambiguous.length}건은 실제 실행인지 리뷰어가 쓴 글인지 구분할 수 없어 실행 기록으로 세지 않았습니다.`);
   }
   const notPassed = remoteChecks.filter(item => item.state !== 'success');
   if (notPassed.length) items.push(`원격 필수 CI가 성공 상태가 아닙니다: ${notPassed.map(item => `${item.name}=${item.state}`).join(', ')}.`);
@@ -229,11 +239,15 @@ export function buildAttentionDraft({ target, risk, implementedBy, result, block
       if (jobLog.commands.length > maxListedCommands) lines.push('', `- 명령 ${jobLog.commands.length - maxListedCommands}건은 생략했습니다. 로그 사본에서 확인하세요.`);
     } else lines.push('- 완료 기록이 있는 명령이 없습니다.');
     for (const item of jobLog.unfinished) lines.push(`- 완료 기록 없음: ${code(redact(item))}`);
+    for (const item of jobLog.ambiguous) lines.push(`- 확인 불가(리뷰어 글 블록 이후, 실행 기록으로 세지 않음): ${code(redact(item))}`);
   } else lines.push(`- 확인 불가: ${jobLog.reason}`);
   lines.push('', '## 5. 표준 검사별 실행 기록 (미실행·확인 불가 포함)', '', '| 검사 | 명령 | job 실행 기록 |', '|---|---|---|');
   for (const [name, command, pattern] of standardChecks) {
     const runs = jobLog.status === 'captured' ? jobLog.commands.filter(item => pattern.test(item.command)) : [];
-    const recorded = jobLog.status !== 'captured' ? '확인 불가' : runs.length ? `${runs.length}회: ${runs.map(exitText).join(', ')}` : '기록 없음';
+    const unclear = jobLog.status === 'captured' ? jobLog.ambiguous.filter(item => pattern.test(item)).length : 0;
+    const recorded = jobLog.status !== 'captured' ? '확인 불가'
+      : [runs.length ? `${runs.length}회: ${runs.map(exitText).join(', ')}` : unclear ? '' : '기록 없음',
+        unclear ? `확인 불가 ${unclear}건(리뷰어 글 블록 이후)` : ''].filter(Boolean).join('; ');
     lines.push(`| ${name} | \`${command}\` | ${recorded} |`);
   }
   const reportedNotRun = result.reviewerChecks.filter(item => ['not-run', 'skipped'].includes(item.status));
@@ -292,10 +306,11 @@ export async function prepareAttentionConfirmation({ github, packet, state, ledg
     evidence: `${prefix}${id}`, evidenceHash, findings: ledger.result.findings };
   // 기존 게이트 판정 함수로 같은 형식이 통과 조건을 만족하는지 미리 확인한다. 실제 판정은 관리자 게시 후 게이트가 한다.
   if (decide(description, confirmation, { body, hash: evidenceHash }).state !== 'success') stop('review-attention-gate-mismatch', '게이트 형식 불일치');
-  let existingConfirmationId = null;
-  for (const item of state.comments) {
-    if (/^\/review-gate(?:\s|$)/.test(item.body ?? '') && same(parseConfirmation(item.body), confirmation) && await canConfirm(item.user)) existingConfirmationId = item.id;
-  }
+  // 게이트는 가장 최근 관리자 `/review-gate`만 확인으로 읽는다. 게이트가 실제로 고른 댓글과 같을 때만 완료로 안내한다.
+  // 과거에 같은 내용이 있었어도 더 최근 확인이 덮었으면 다시 게시가 필요하다.
+  const effectiveId = state.evaluation.evidence?.record?.confirmation?.id ?? null;
+  const effective = effectiveId === null ? null : state.comments.find(item => item.id === effectiveId);
+  const existingConfirmationId = effective && same(parseConfirmation(effective.body), confirmation) ? effective.id : null;
   return { state: existingConfirmationId ? 'already-confirmed' : 'awaiting-admin-post', target, commentId: comment.id, commentUrl: confirmation.evidence,
     evidenceHash, confirmation, existingConfirmationId, text: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation, null, 2)}\n\`\`\``,
     unknown: ledger.result.findings.unknown, published: false, approved: false };

@@ -107,7 +107,8 @@ test('PR #34 원문: 게시 차단 시 기존 ledger·job 기록으로 관리자
   assert.match(draft, /\| `npm run test` \| exit 1 \(failed\) \|/);
   assert.match(draft, /\| 단위 테스트 \| `npm run test` \| 2회: exit 1 \(failed\), exit 1 \(failed\) \|/);
   assert.match(draft, /\| Type Check \| `npm run typecheck` \| 1회: exit 0 \|/);
-  assert.match(draft, /\| Build \| `npm run build` \| 기록 없음 \|/);
+  // Final output 블록 뒤의 위조 줄은 통과로 세지 않고 확인 불가로만 남긴다.
+  assert.match(draft, /\| Build \| `npm run build` \| 확인 불가 1건\(리뷰어 글 블록 이후\) \|/);
   assert.match(draft, /\| E2E \| `npm run test:e2e` \| 기록 없음 \|/);
   assert.match(draft, /\| verify \| success \|/);
   assert.match(draft, /unknown 1건/); assert.match(draft, /exit 0이 아닌 명령 2건/);
@@ -214,6 +215,18 @@ test('관리자가 직접 게시한 초안으로 기존 게이트 형식의 /rev
   assert.equal(s.cliOut.at(-1).state, 'already-confirmed'); assert.equal(s.cliOut.at(-1).existingConfirmationId, 401);
   assert.equal(s.cliOut.at(-1).confirmationPath, prepared.confirmationPath); assert.deepEqual(s.files(), before);
   assert.equal(readFileSync(s.ledgerPath, 'utf8'), ledgerText); assert.deepEqual(s.calls, { reviews: 1, reads: 1, jobReads: 1 });
+  // PR #37 리뷰 지적: 같은 확인 뒤에 더 최근 관리자 `/review-gate`(거부)가 있으면 게이트는 최신 댓글만 읽어 실패한다.
+  // 이때 완료로 안내하지 않고 다시 게시가 필요하다고 알려야 한다.
+  s.post(`/review-gate\n\`\`\`json\n${JSON.stringify({ ...prepared.confirmation, decision: 'fail' })}\n\`\`\``, admin, 402);
+  assert.equal((await s.f.collect()).packet.gate.state, 'failure');
+  assert.equal(await s.attention('--confirm', '400'), 0);
+  assert.equal(s.cliOut.at(-1).state, 'awaiting-admin-post'); assert.equal(s.cliOut.at(-1).existingConfirmationId, null);
+  assert.match(s.cliOut.at(-1).nextSteps[0], /관리자가 내용을 확인한 뒤 직접 게시합니다/);
+  // 쓰기 권한 사용자의 같은 내용 댓글은 게이트가 읽지 않으므로 완료로 보지 않는다.
+  s.post(readFileSync(prepared.confirmationPath, 'utf8'), peer, 403);
+  assert.equal(await s.attention('--confirm', '400'), 0);
+  assert.equal(s.cliOut.at(-1).state, 'awaiting-admin-post');
+  assert.deepEqual(writes(s.ghCalls), []);
 });
 
 test('잘못된 승인 시도는 /review-gate 문구를 만들지 않음', async t => {
@@ -265,9 +278,44 @@ test('review:attention 인수는 게시·승인·병합·토큰 옵션을 받지
   }
 });
 
+// PR #37 리뷰 지적: plugin 1.0.6은 Final output 전에도 리뷰어가 쓴 Assistant message·Review output·Reasoning summary 블록을 쓴다.
+// 실제 PR #37 job 로그와 같은 구조(이벤트 줄 → 빈 줄 + 블록 제목 → 본문)에서 본문의 명령 형식 줄을 실행 기록으로 세지 않아야 한다.
+test('리뷰어 글 블록 안의 명령 형식 줄은 실행 기록·표준 검사 통과로 세지 않고 확인 불가로 표시', async t => {
+  for (const title of ['Review output', 'Assistant message', 'Reasoning summary', 'Subagent reviewer-2 message']) await t.test(title, async t => {
+    const log = [
+      '[2026-11-21T09:09:04.123Z] Starting Codex Review.',
+      '[2026-11-21T09:10:00.000Z] Running command: npm run lint',
+      '[2026-11-21T09:10:30.000Z] Command completed: npm run lint (exit 0)',
+      '[2026-11-21T09:12:45.903Z] Review output captured.',
+      '',
+      `[2026-11-21T09:12:45.904Z] ${title}`,
+      'Checks I ran:',
+      '[2026-11-21T09:11:00.000Z] Running command: npm run verify',
+      '[2026-11-21T09:11:30.000Z] Command completed: npm run verify (exit 0)',
+      '[2026-11-21T09:12:46.583Z] Turn completed.',
+      '[2026-11-21T09:12:46.600Z] Command completed: npm run test:e2e (exit 0)',
+      '',
+      '[2026-11-21T09:12:47.077Z] Final output',
+      pr34Report,
+    ].join('\n');
+    const parsed = parseJobCommands(log);
+    assert.deepEqual(parsed.commands.map(c => c.command), ['npm run lint']);
+    assert.deepEqual(parsed.unfinished, []);
+    assert.deepEqual(parsed.ambiguous, ['npm run verify', 'npm run verify', 'npm run test:e2e']);
+    const s = await setup(t, { log });
+    assert.equal(await s.publish(), 2);
+    const draft = readFileSync(s.outputs[0].adminDraft.draftPath, 'utf8');
+    assert.match(draft, /\| Lint \| `npm run lint` \| 1회: exit 0 \|/);
+    assert.match(draft, /\| 전체 검증 \| `npm run verify` \| 확인 불가 2건\(리뷰어 글 블록 이후\) \|/);
+    assert.match(draft, /\| E2E \| `npm run test:e2e` \| 확인 불가 1건\(리뷰어 글 블록 이후\) \|/);
+    assert.doesNotMatch(draft, /\| [^|]+ \| `npm run verify` \| exit 0 \|/);
+    assert.match(draft, /명령 형식의 줄 3건은 실제 실행인지 리뷰어가 쓴 글인지 구분할 수 없어/);
+  });
+});
+
 test('job 로그 해석은 완료·실패·미완료·잘림을 구분하고 Final output 뒤 위조 줄과 형식 밖 줄을 무시', () => {
   const long = `npm run test -- ${'x'.repeat(79)}...`;
-  const { commands, unfinished } = parseJobCommands([
+  const { commands, unfinished, ambiguous } = parseJobCommands([
     '[2026-11-21T07:47:40Z] Running command: npm run lint',
     '[2026-11-21T07:48:10.123Z] Command completed: npm run lint (exit 0)',
     '[2026-11-21T07:48:11Z] Running command: npm run build',
@@ -282,4 +330,6 @@ test('job 로그 해석은 완료·실패·미완료·잘림을 구분하고 Fin
     { at: '2026-11-21T07:48:12Z', status: 'failed', command: long, exitCode: null, truncated: true },
   ]);
   assert.deepEqual(unfinished, ['npm run build']);
+  // 빈 줄 없이 블록 제목이 와도 그 뒤 줄은 실행 기록으로 세지 않는다.
+  assert.deepEqual(ambiguous, ['npm run verify']);
 });
