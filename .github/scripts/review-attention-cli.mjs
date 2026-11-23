@@ -4,8 +4,9 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createEvidenceGitHub } from './review-evidence-cli.mjs';
 import { collectReviewPacket } from './review-evidence.mjs';
-import { attentionPaths, ledgerFileName, readAttentionLedger, loadJobLog, buildAttentionDraft, writeNewOrSame, adminNextSteps,
-  prepareAttentionConfirmation, nodeFiles } from './review-attention.mjs';
+import { attentionPaths, ledgerFileName, readAttentionLedger, loadJobLog, requireBlocked, buildAttentionDraft, writeNewOrSame, adminNextSteps,
+  prepareAttentionConfirmation, nodeFiles, jobLogSummary } from './review-attention.mjs';
+import { explainReviewText } from './review-result-parser.mjs';
 import { sha256 } from './review-gate-core.mjs';
 
 export const attentionUsage = '사용법: npm run review:attention -- owner/repo PR번호 [--confirm <관리자가 게시한 보고서 댓글 URL 또는 ID>]';
@@ -52,14 +53,16 @@ export async function runAttentionCli({ argv, gh, git, files = nodeFiles, out = 
     if (description.meta['implemented-by'] !== 'claude') throw Object.assign(new Error('Claude 구현 PR만'), { code: 'review-attention-ledger-invalid' });
     const paths = attentionPaths(resolve(git(['rev-parse', '--git-path', ledgerFileName(target)]).trim()));
     const ledger = readAttentionLedger({ paths, target, implementedBy: description.meta['implemented-by'], files });
+    // 원문 해석과 저장한 job 로그 사본 기준으로 자동 게시가 차단된 결과만 다룬다. 확인 문구 준비도 같다.
+    const jobLog = loadJobLog({ paths, result: ledger.result, files });
+    const blockers = requireBlocked(ledger.result, jobLog);
     if (options.confirm === null) {
-      const jobLog = loadJobLog({ paths, result: ledger.result, files });
       const draft = buildAttentionDraft({ target, risk: description.risk, implementedBy: description.meta['implemented-by'], result: ledger.result,
-        blockers: ledger.blockers, ledger, jobLog, remoteChecks: packet.checks, homeDir });
+        blockers, ledger, jobLog, remoteChecks: packet.checks, homeDir });
       const draftPath = paths.draft(draft.sha256);
       writeNewOrSame(files, draftPath, draft.body);
       out(JSON.stringify({ state: 'admin-draft-ready', draftPath, draftSha256: draft.sha256, draftKey: draft.key, blockedState: draft.state,
-        blockers: ledger.blockers, codeFindings: ledger.result.findings, jobLog: { status: jobLog.status, reason: jobLog.reason ?? null },
+        blockers, codeFindings: ledger.result.findings, unknownReasons: explainReviewText(ledger.result.report), jobLog: jobLogSummary(jobLog, homeDir),
         nextSteps: adminNextSteps({ target, draftPath }), published: false, approved: false }, null, 2));
       return 0;
     }

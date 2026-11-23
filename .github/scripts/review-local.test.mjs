@@ -1,9 +1,15 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { localFixture, pr23Report, pr28Report } from './review-local-fixture.mjs';
+import { localFixture, pr23Report, pr28Report, pr37FinalReport, cleanJobLog } from './review-local-fixture.mjs';
+
+// wrapper는 새 게시 요청 전에 같은 job의 로그를 대조한다. 기본 fixture는 모든 명령이 exit 0인 로그를 쓴다.
+const jobLogDirectory = mkdtempSync(join(tmpdir(), 'review-job-log-'));
+after(() => rmSync(jobLogDirectory, { recursive: true, force: true }));
+const cleanJobLogPath = join(jobLogDirectory, 'job-1.log');
+writeFileSync(cleanJobLogPath, cleanJobLog());
 import { analyzeReviewText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 import { publishEvidence } from './review-evidence.mjs';
@@ -125,7 +131,7 @@ test('CLI 중단 안내는 요청 전·불명확·충돌을 구분하고 원시 
 function pluginFixture(target) {
   const output = { review: 'Review', threadId: 'thread-1', target: { mode: 'branch', baseRef: target.base }, codex: { status: 0, stdout: 'No actionable defects were found. Build and E2E were not run.' } };
   const job = { id: 'job-1', kind: 'review', status: 'completed', sessionId: 'session-1', threadId: 'thread-1', turnId: 'turn-1',
-    createdAt: '2026-11-09T00:00:01Z', completedAt: '2026-11-09T00:01:00Z', result: output };
+    createdAt: '2026-11-09T00:00:01Z', completedAt: '2026-11-09T00:01:00Z', result: output, logFile: cleanJobLogPath };
   return { output, stored: { job: { status: 'completed' }, storedJob: job } };
 }
 
@@ -379,7 +385,11 @@ test('완료 결과 복구는 result만 조회하고 원래 ledger 보존·재�
   const originalText = JSON.stringify({ state: 'completed', session: 'session-1', target, result: original });
   const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? target.head : target.base;
   let reads = 0;
-  const plugin = args => { assert.deepEqual(args, ['result', '--json']); reads++; return data.stored; };
+  const plugin = args => {
+    // 게시 요청 전 job 로그 대조는 같은 job의 저장 기록 조회다(리뷰 실행 아님).
+    if (args.length === 3) { assert.deepEqual(args, ['result', 'job-1', '--json']); return data.stored; }
+    assert.deepEqual(args, ['result', '--json']); reads++; return data.stored;
+  };
   const run = (recover = true) => runPluginPublication({ options: { repository: 'owner/repo', number: 1, session: 'session-1', recover },
     gh: f.gh, git, plugin, maxPolls: 1, out: () => {} });
   try {

@@ -11,6 +11,30 @@ import { analyzeReviewText } from './review-result-parser.mjs';
 export const pr28Report = '기준 커밋 대비 변경에서 수정이 필요한 결함을 발견하지 못했습니다. Lint·TypeScript 검사와 선명도 테스트 28개는 통과했습니다. 전체 단위 테스트는 226개 통과했으나 privacyGuard는 환경의 임시 폴더 생성 권한 제한으로 실패했으며, Build·E2E는 실행하지 않았습니다.';
 // 실제 PR #23 Codex native 리뷰 원문.
 export const pr23Report = 'No actionable defects were found in the changes against the specified base. Lint, 46 targeted unit tests, and 31 merge-tool tests passed; four platform-specific tests were skipped. Build and E2E checks were not run.';
+// Issue #41에서 대조한 실제 Codex native 리뷰 원문(로컬 ledger의 원문 그대로). 회귀 기준이므로 수정하지 않는다.
+export const pr30RereviewReport = 'No actionable defects were identified in the changes. All nine parser tests passed; full gate validation was limited by read-only filesystem permissions affecting temporary-file creation.';
+export const pr34Report = 'No actionable regressions found; the optimized blur matches the previous implementation bit-for-bit. Lint and app type checking passed, and 229 tests passed; one suite failed because the read-only environment prevented temporary directory creation.';
+export const pr37FinalReport = 'No actionable regressions were identified in the changes against the specified base. All 127 targeted tests passed; the full verification suite was not run.';
+export const pr40FirstReport = 'No actionable regressions were identified. Documentation content remains available in the reorganized guides, and local file links resolve. Application tests were not run; git diff --check reported only extra blank lines at EOF.';
+export const pr40FinalReport = 'No actionable regressions were identified in the documentation reorganization or configuration changes. ESLint, git diff --check, and checks of 74 local documentation links passed; build and runtime tests were not run.';
+
+// codex-companion 1.0.6 job 로그 형식. Windows에서는 명령이 powershell 경로로 감싸지고 96자에서 잘린다.
+const shell = '"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe" -Command ';
+const commandLines = (at, command, ending) => [`[${at[0]}] Running command: ${shell}${command}`, `[${at[1]}] ${ending.replace('$', () => `${shell}${command}`)}`];
+const reviewBlocks = report => ['[2026-11-22T02:44:31.916Z] Review output captured.', '', '[2026-11-22T02:44:31.916Z] Review output', report,
+  '[2026-11-22T02:44:32.235Z] Reviewer finished.', '', '[2026-11-22T02:44:32.542Z] Final output', '# Codex Review', '', report, ''];
+const jobLogStart = ['[2026-11-22T02:42:51.655Z] Starting Codex Review.', '[2026-11-22T02:42:53.787Z] Thread ready (thread-1).'];
+// 모든 명령이 exit 0으로 끝난 로그(PR #37 최종 job과 같은 형태).
+export const cleanJobLog = (report = pr37FinalReport) => [...jobLogStart,
+  ...commandLines(['2026-11-22T02:43:00.390Z', '2026-11-22T02:43:00.806Z'], "'git status --short...", 'Command completed: $ (exit 0)'),
+  ...commandLines(['2026-11-22T02:43:05.373Z', '2026-11-22T02:43:05.731Z'], '"node --test --test...', 'Command completed: $ (exit 0)'),
+  ...reviewBlocks(report)].join('\n');
+// PR #40 최종 job에서 관찰한 exit 1 명령 2건(잘린 명령, 출력 없음).
+export const pr40FinalJobLog = (report = pr40FinalReport) => [...jobLogStart,
+  ...commandLines(['2026-11-22T02:43:00.390Z', '2026-11-22T02:43:00.806Z'], "'git status --short...", 'Command completed: $ (exit 0)'),
+  ...commandLines(['2026-11-22T02:43:40.974Z', '2026-11-22T02:43:43.191Z'], `"git grep -n -F 'RE...`, 'Command failed: $ (exit 1)'),
+  ...commandLines(['2026-11-22T02:43:51.357Z', '2026-11-22T02:43:51.496Z'], '"node --input-type=...', 'Command failed: $ (exit 1)'),
+  ...reviewBlocks(report)].join('\n');
 
 export function localFixture() {
   const fake = createFake({ risk: 'high', implementedBy: 'claude', gate: false, approval: 'none', codex: 'none', requests: 0 });

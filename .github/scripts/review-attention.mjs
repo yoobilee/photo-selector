@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 import { canonical, same, validatePluginResult, localPublicationBlockers, reviewerCheckFailures, localReportsForTarget, verifyEvidenceCi } from './review-evidence-source.mjs';
 import { decide, isReportBody, normalizeNewlines, parseConfirmation, reportHash, sha256 } from './review-gate-core.mjs';
 import { permissionReader } from './review-gate.mjs';
+import { explainReviewText, unknownReasonText } from './review-result-parser.mjs';
 
 // 자동 게시가 차단된 독립 리뷰(unknown·리뷰어 로컬 검사 실패)를 관리자가 판단할 수 있게 자료를 준비한다.
 // 기존 완료 ledger와 plugin job 기록은 읽기만 한다. 모델 호출·게시 요청·댓글 작성·승인을 하지 않는다.
@@ -49,6 +50,7 @@ export function writeNewOrSame(files, path, content) {
 
 // wrapper가 쓰는 ledger(복구 v3가 있으면 그 파일)를 읽기 전용으로 검증한다.
 // 현재 PR 대상(base/head/fingerprint/정책)과 다르거나 게시 요청 기록이 있으면 자료를 만들지 않는다.
+// 차단 여부는 job 로그와 함께 requireBlocked로 판단한다.
 export function readAttentionLedger({ paths, target, implementedBy, files, ignoreLock = false }) {
   if (!ignoreLock && files.exists(paths.lock)) stop('review-attention-busy', '리뷰 wrapper 실행 중 lock 존재');
   const recovered = files.exists(paths.recovered);
@@ -65,10 +67,27 @@ export function readAttentionLedger({ paths, target, implementedBy, files, ignor
   if (ledger.publicationRequested || ledger.publication) stop('review-attention-publication-requested', '이미 게시 요청한 결과');
   let result;
   try { result = validatePluginResult(ledger.result, target, implementedBy); } catch { stop('review-attention-ledger-invalid', '완료 결과 형식 오류'); }
-  const blockers = localPublicationBlockers(result);
-  if (!blockers.length) stop('review-attention-not-blocked', '자동 게시 대상 결과');
-  return { path, ledgerHash: sha256(text), session: ledger.session, result, blockers, recovered };
+  return { path, ledgerHash: sha256(text), session: ledger.session, result, recovered };
 }
+
+// job 실행 기록 기준 자동 게시 차단 사유(Issue #41). 원문이 지적 없음·검사 통과로 해석돼도
+// 로그를 확인할 수 없거나 exit 0이 아닌 명령, 완료 기록 없는 명령, 실행 여부를 구분할 수 없는 줄이 있으면 게시하지 않는다.
+// 로그의 명령은 96자에서 잘리고 출력이 없어 실패 원인을 판단할 수 없다. 원인 미상 실패를 통과로 처리하지 않는다.
+export function jobLogBlockers(jobLog) {
+  if (jobLog?.status !== 'captured') return ['job-log-unverified'];
+  const blockers = [];
+  if (jobLog.commands.some(item => item.status !== 'completed' || item.exitCode !== 0)) blockers.push('job-command-failed');
+  if (jobLog.unfinished.length || jobLog.ambiguous.length) blockers.push('job-log-incomplete');
+  return blockers;
+}
+export const attentionBlockers = (result, jobLog) => [...localPublicationBlockers(result), ...jobLogBlockers(jobLog)];
+export function requireBlocked(result, jobLog) {
+  const blockers = attentionBlockers(result, jobLog);
+  if (!blockers.length) stop('review-attention-not-blocked', '자동 게시 대상 결과');
+  return blockers;
+}
+export const blockedState = blockers => blockers.includes('findings') ? 'review-needs-attention'
+  : blockers.includes('reviewer-check-failed') ? 'review-checks-need-attention' : 'review-job-log-needs-attention';
 
 // plugin job 로그(Codex 명령 실행 기록). codex-companion 1.0.6은 이벤트 줄을 빈 줄 없이 쓰고,
 // 리뷰어가 쓴 글(Assistant message·Review output·Reasoning summary·Final output 등)은 빈 줄 + 제목 줄로 시작하는 블록으로 쓴다.
@@ -169,6 +188,9 @@ const checkStatus = { passed: '통과', failed: '실패', 'not-run': '미실행'
 const blockerText = {
   findings: '`findings`: 코드 지적(critical/high/medium) 또는 판단 불가(unknown)가 0건이 아님',
   'reviewer-check-failed': '`reviewer-check-failed`: 리뷰어가 원문에서 로컬 검사 실패를 보고함',
+  'job-log-unverified': '`job-log-unverified`: plugin job 실행 기록을 확보·대조하지 못함(4절)',
+  'job-command-failed': '`job-command-failed`: job 기록에 exit 0이 아니거나 종료 코드가 없는 명령이 있음. 명령이 잘리고 출력이 없어 원인을 판단할 수 없음(4절)',
+  'job-log-incomplete': '`job-log-incomplete`: job 기록에 완료 기록 없는 명령 또는 실행 여부를 구분할 수 없는 명령 형식 줄이 있음(4절)',
 };
 
 const cell = text => String(text).replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -189,6 +211,19 @@ const redactor = homeDir => {
   const variants = homeDir ? [...new Set([homeDir, homeDir.replace(/\\/g, '/'), homeDir.replace(/\\/g, '\\\\')])].sort((a, b) => b.length - a.length) : [];
   return text => variants.reduce((value, variant) => value.split(variant).join('~'), text);
 };
+
+// wrapper 출력용 job 기록 요약. 전체 명령 표는 관리자 초안 4절에 있다.
+export function jobLogSummary(jobLog, homeDir = null) {
+  if (jobLog?.status !== 'captured') return { status: jobLog?.status ?? 'unavailable', reason: jobLog?.reason ?? null };
+  const redact = redactor(homeDir);
+  const failed = jobLog.commands.filter(item => item.status !== 'completed' || item.exitCode !== 0);
+  return { status: 'captured', reason: null, commands: jobLog.commands.length,
+    failedCommands: failed.slice(0, 20).map(item => ({ command: redact(item.command), status: item.status, exitCode: item.exitCode, truncated: item.truncated })),
+    failedCommandCount: failed.length, unfinished: jobLog.unfinished.length, ambiguous: jobLog.ambiguous.length };
+}
+
+// unknown 사유 한 줄 표시. 발췌는 리뷰 원문의 일부다.
+export const unknownReasonLine = reason => `${unknownReasonText[reason.kind] ?? reason.kind}${reason.excerpt ? `: ${code(clip(reason.excerpt, 200))}` : ''}${reason.checks ? `: ${reason.checks.map(code).join(', ')}` : ''}`;
 
 function uncertainties({ result, jobLog, remoteChecks }) {
   const items = [];
@@ -223,7 +258,8 @@ export function buildAttentionDraft(input, listLimit = maxListedCommands) {
   const key = draftKey({ target, ledgerHash: ledger.ledgerHash, result });
   const redact = redactor(homeDir);
   const f = result.findings;
-  const state = blockers.includes('findings') ? 'review-needs-attention' : 'review-checks-need-attention';
+  const state = blockedState(blockers);
+  const reasons = explainReviewText(result.report);
   const blocking = blockingLevels.reduce((sum, level) => sum + f[level], 0);
   const lines = [
     '# 독립 리뷰 보고서', '', `<!-- ${draftMarker} ${key} -->`, '',
@@ -245,8 +281,9 @@ export function buildAttentionDraft(input, listLimit = maxListedCommands) {
     '| Critical | High | Medium | Low | Unknown |', '|---|---|---|---|---|', `| ${f.critical} | ${f.high} | ${f.medium} | ${f.low} | ${f.unknown} |`, '',
     blocking ? `- 차단 지적 ${blocking}건이 있습니다. 이 리뷰로 통과 확인을 만들 수 없으며 수정 후 새 HEAD를 다시 리뷰해야 합니다.`
       : '- critical/high/medium 지적은 없습니다. unknown은 결함 없음이나 검사 성공을 뜻하지 않습니다.',
-    '', '## 3. 리뷰어가 원문에 보고한 로컬 검사 (주장, 실행 증명 아님)', '',
   ];
+  if (reasons.length) lines.push('- unknown 사유(현재 parser 자동 진단, 발췌는 리뷰 원문 일부):', ...reasons.map(reason => `  - ${unknownReasonLine(reason)}`));
+  lines.push('', '## 3. 리뷰어가 원문에 보고한 로컬 검사 (주장, 실행 증명 아님)', '');
   if (result.reviewerChecks.length) {
     lines.push('| 검사 | 결과 | 개수 | 원인 주장 |', '|---|---|---|---|');
     for (const item of result.reviewerChecks) lines.push(`| ${cellCode(item.name)} | ${checkStatus[item.status] ?? cell(item.status)} | ${item.count ?? '-'} | ${item.cause ? `${cell(item.cause.text)} (확인 안 됨)` : '-'} |`);

@@ -20,7 +20,8 @@ npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설�
    - `reviewerChecks`: 리뷰어가 원문에 보고한 로컬 검사의 통과(`passed`)·실패(`failed`)·미실행(`not-run`)·건너뜀(`skipped`)과 리뷰어가 밝힌 환경 원인 주장
    - `checks`: GitHub API가 반환한 현재 HEAD의 원격 CI 상태
 
-   unknown이나 미해결 critical/high/medium이면 원문과 `review-needs-attention`을, 코드 지적은 없지만 리뷰어가 로컬 검사 실패를 보고했으면 `review-checks-need-attention`을 출력하고 게시하지 않는다. 지적 배지는 집계하되 나머지 문맥의 완전성을 증명할 수 없어 unknown도 함께 남긴다.
+   unknown이나 미해결 critical/high/medium이면 원문과 `review-needs-attention`을, 코드 지적은 없지만 리뷰어가 로컬 검사 실패를 보고했으면 `review-checks-need-attention`을 출력하고 게시하지 않는다. 지적 배지는 집계하되 나머지 문맥의 완전성을 증명할 수 없어 unknown도 함께 남긴다. 출력의 `unknownReasons`는 unknown마다 원문의 어느 문장에서 해석이 멈췄는지 알려 준다.
+   원문이 게시 가능해도 새 게시 요청 전에 같은 job의 plugin 로그를 대조한다. 로그를 확보·대조하지 못했거나, exit 0이 아닌 명령·완료 기록 없는 명령·실행 여부를 구분할 수 없는 줄이 있으면 `review-job-log-needs-attention`으로 게시하지 않는다(아래 "unknown 원인 진단과 job 실행 기록 대조").
 4. 기존 `review-evidence.yml`의 고정된 기본 브랜치에 등록 요청만 전달한다. 개인 GitHub 인증으로 PR 댓글을 쓰지 않는다. workflow는 PR 코드·모델·설치·테스트를 실행하지 않고 기본 브랜치 코드와 최소 `GITHUB_TOKEN` 권한으로 미인증 자료를 게시한다.
 5. workflow가 댓글 ID·본문을 확인한 뒤 `review-evidence-v2-<댓글 ID>-<본문 SHA-256>` 이름의 artifact를 만든다. 내용은 댓글 링크·ID·해시뿐이다. API가 artifact를 원본 run에 연결한 metadata가 게시 경로의 영수증이다. ZIP을 게이트에서 실행/추출하지 않는다.
 6. 성공한 실행과 댓글을 다시 검증해 stdout JSON에 댓글 링크·해시·관리자가 직접 작성할 `/review-gate`를 출력한다. 보고서를 수동 게시할 필요가 없다. 확인 내용만 다시 조회하려면:
@@ -48,7 +49,7 @@ PR #28의 Codex native 리뷰는 코드 지적이 0건이었지만 리뷰어 읽
 
 ### 해결 (parser v3, 결과 v3)
 
-- 원문을 처음부터 끝까지 문장 단위로 해석한다. 첫 문장은 관찰한 지적 없음 선언(영어 3종, PR #28 한국어 1종)이어야 한다. 이어지는 문장은 "검사 목록 + 통과/실패/미실행/건너뜀" 문형만 받는다. 검사 이름은 정해진 어휘(Lint, TypeScript, Build, E2E, 단위·선명도 테스트 등), 숫자, 코드 식별자(`privacyGuard`, `` `npm run test:gate` `` 등)로 제한한다. 해석하지 못한 문장이 하나라도 있으면 unknown이다.
+- 원문을 처음부터 끝까지 문장 단위로 해석한다. 첫 문장은 관찰한 지적 없음 선언(영어 3종과 Issue #41에서 추가한 "No actionable defects/regressions were identified …" 문형, PR #28 한국어 1종)이어야 한다. 이어지는 문장은 "검사 목록 + 통과/실패/미실행/건너뜀" 문형만 받는다. 검사 이름은 정해진 어휘(Lint, TypeScript, Build, E2E, 단위·선명도 테스트 등), 숫자, 코드 식별자(`privacyGuard`, `` `npm run test:gate` `` 등)로 제한한다. 해석하지 못한 문장이 하나라도 있으면 unknown이다.
 - 실패 원인은 리뷰어가 샌드박스·환경 권한 제한을 명시한 좁은 문형만 `cause: { kind: 'environment-claimed', text }`로 기록한다. 이 값은 리뷰어의 주장이며 확인된 사실이 아니다. 원인을 밝히지 않은 실패는 코드 결함일 수 있으므로 unknown을 하나 더한다. 다른 원인(assertion error 등)이나 추정 표현은 문법 밖이라 unknown이다.
 - 실패는 어떤 경우에도 통과로 바꾸지 않는다. 원격 CI 성공은 `checks`에 따로 남기며, 리뷰어 로컬 검사가 성공했다는 근거로 쓰지 않는다.
 - 리뷰어가 로컬 검사 실패를 보고하면 코드 지적이 0건이어도 자동 게시하지 않는다(`review-checks-need-attention`, 종료 코드 2). 출력에는 `codeFindings`, `reviewerCheckFailures`, 전체 `reviewerChecks`, 원격 `remoteChecks`, 원문 전체가 함께 나온다. 관리자는 함께 생성되는 관리자 검토 초안(아래 "자동 게시 차단 시 관리자 검토 자료")으로 원문과 plugin job 기록을 확인한 뒤 판단한다.
@@ -77,7 +78,7 @@ PR #34에서 native Codex 리뷰는 완료됐고 ledger도 `completed`였지만,
 
 차단 정책은 바꾸지 않는다. 자동 게시가 막힌 결과만 관리자가 판단하기 쉬운 자료로 바꾼다.
 
-1. wrapper가 unknown·차단 지적(`findings`)이나 리뷰어 로컬 검사 실패(`reviewer-check-failed`)로 게시를 멈추면, 같은 실행에서 출력 JSON의 `adminDraft`에 관리자 검토 초안 경로를 알려 준다. 종료 코드는 기존과 같이 2다.
+1. wrapper가 unknown·차단 지적(`findings`), 리뷰어 로컬 검사 실패(`reviewer-check-failed`)나 job 실행 기록 차단(`job-log-unverified`·`job-command-failed`·`job-log-incomplete`, Issue #41)으로 게시를 멈추면, 같은 실행에서 출력 JSON의 `adminDraft`에 관리자 검토 초안 경로를 알려 준다. 종료 코드는 기존과 같이 2다.
    - 완료 ledger(복구 v3가 있으면 그 파일)는 **읽기만** 한다. 현재 PR 대상(base/head/fingerprint/정책 SHA)과 완전히 같고 게시 요청 기록이 없을 때만 초안을 만든다.
    - plugin의 `result <job ID> --json`으로 같은 job의 저장 기록만 조회한다. 리뷰를 실행하지 않는다. job ID·thread·turn·세션·완료 시각·원문이 ledger와 모두 같을 때만 로그를 `<ledger>.job-log.json`에 한 번 복사한다(덮어쓰지 않음). 다음 실행은 사본을 재사용하므로 job을 다시 조회하지 않는다. 일치하지 않거나 이미 정리됐으면 "확인 불가"로 표시한다.
    - 초안은 `<ledger>.attention-<내용 hash 12자리>.md`에 쓴다. 같은 내용이면 같은 파일을 재사용하고 기존 파일을 덮어쓰지 않는다. 초안 생성이 실패해도 차단 결과는 그대로이며 `adminDraft.state: failed`로 알린다.
@@ -123,6 +124,57 @@ npm run review:attention -- yoobilee/photo-selector <PR번호> --confirm <게시
 - ledger·job 로그·초안은 로컬 미인증 자료다. 관리자가 원문과 실행 기록을 직접 확인해야 한다.
 - CI workflow 자체를 바꾸는 PR은 `verifyEvidenceCi`가 출처를 확정하지 못해 `--confirm`이 거부한다. 이때는 초안을 참고해 기존 수동 절차로 `/review-gate`를 작성한다.
 - 초안 marker는 현재 ledger에서 계산한다. 초안을 만든 뒤 `--recover`로 복구 v3 기록이 생기면 marker가 달라지므로 초안을 다시 만들어 게시한다.
+
+## unknown 원인 진단과 job 실행 기록 대조 (Issue #41)
+
+### 문제
+
+PR #28·#30·#34·#37·#40에서 Codex native 리뷰는 완료됐고 코드 지적(critical/high/medium)도 없었지만 `unknown: 1`로 자동 게시가 반복 차단됐다. 관리자는 매번 원문을 직접 읽어 왜 unknown인지 찾아야 했다. PR #40 최종 job에는 exit 1인 명령 2건이 있었는데, 원문은 "… passed"라고만 적었다. 원문 문법만 넓히면 이런 리뷰가 원인을 모르는 채 자동 게시될 수 있었다.
+
+### 원인 (로컬 ledger 원문을 현재 parser로 재현)
+
+| 리뷰 | 원문 첫머리 | 차단 지점 | job 기록 |
+|---|---|---|---|
+| PR #30 재리뷰 `7c15203` | No actionable defects were identified in the changes. | 선언이 문법 밖. 선언을 받아도 "parser" 검사 어휘와 "full gate validation was limited by …"(검증 제한)에서 멈춤 | 사본 없음 |
+| PR #34 `20a0887` | No actionable regressions found; … | 쌍반점으로 이어진 선언. 고쳐도 "one suite failed because the read-only environment …"(원인 문형 밖 실패)에서 멈춤 | 정리됨(확인 불가) |
+| PR #37 최종 `1118f8f` | No actionable regressions were identified in the changes against the specified base. | 선언과 "the full verification suite"(검사 어휘 밖)만 문법 밖 | 명령 12건 모두 exit 0 |
+| PR #40 첫 리뷰 `d011b44` | No actionable regressions were identified. | 선언 뒤 산문("Documentation content remains …"). "git diff --check reported only extra blank lines"(실패 보고)도 있음 | exit 1 명령 2건 |
+| PR #40 최종 `b352c1f` | No actionable regressions were identified in the documentation reorganization or configuration changes. | 검토 범위를 좁히는 수식어가 붙은 선언. 고쳐도 백틱 없는 `git diff --check`, "checks of 74 local documentation links", "runtime tests"에서 멈춤 | exit 1 명령 2건(`git grep -n -F 'RE...`, `node --input-type=...`) |
+
+다섯 건 모두 첫 문장(지적 없음 선언)에서 해석이 멈춰 뒤의 검사 문장은 하나도 기록되지 않았다. 차단 자체는 의도한 fail-closed 동작이었다. 다만 관리자에게는 "unknown 1"만 보여 어느 문장이 문법 밖인지 알 수 없었다.
+
+PR #40 최종 job의 exit 1 명령 2건은 원인을 확인할 수 없었다. plugin 1.0.6은 native 리뷰를 `ephemeral: true` thread에서 실행해 Codex 세션 rollout을 남기지 않는다. job 로그에는 `shorten(item.command, 96)`으로 잘린 명령과 exit 코드만 쓰고 stdout/stderr는 쓰지 않는다. `git grep`의 exit 1은 "일치 없음"일 수 있지만, 명령이 잘려 뒤에 다른 명령이 연결됐는지 알 수 없어 확정할 수 없다.
+
+### 비교한 개선안
+
+| 안 | 내용 | 안전성 | 판단 |
+|---|---|---|---|
+| A. 진단·기록 대조 강화 | unknown 사유를 문장 위치와 함께 출력. 새 게시 요청 전 job 로그의 실패·미완료·확인 불가 명령을 차단 사유로 추가 | 게시 범위를 넓히지 않고 오히려 좁힌다. 서버 판정 변경 없음 | 채택 |
+| B. 관찰한 안전 문형만 추가 | 실제 관찰한 "… were identified …" 선언과 검사 어휘 `verification`만 parser에 추가. 서버도 같은 parser를 쓴다 | 통과·미실행 주장만 새로 해석한다. 실패·검증 제한·범위 축소·산문은 계속 unknown. A와 함께 써야 원문과 job 기록이 상충할 때 막을 수 있다 | A와 함께 채택 |
+| C. 구조화된 결과 | plugin의 `outputSchema`(review-output.schema.json)는 adversarial-review 전용이다. native `review/start`에는 구조화 결과·명령 출력 보존 옵션이 없다 | 리뷰어 종류·프롬프트가 바뀌어 프로젝트 검토 계약(native `/codex:review`) 변경이 필요하다. plugin 수정·자체 app-server 클라이언트는 범위 밖이다 | 보류(공식 지원 시 재검토) |
+
+명령 전체·출력 보존은 공식 경로가 없다. plugin cache 수정, Codex 내부 DB·로그 조회, 별도 app-server 클라이언트 구현은 하지 않았다. 리뷰 원문만으로 "환경 문제"나 "검색 결과 없음"을 확정하지 않는다.
+
+### 해결
+
+1. parser에 `explainReviewText`를 추가했다. unknown마다 사유(`declaration-unrecognized`, `sentence-unrecognized`, `unexplained-check-failure`, `incomplete-review-phrase`, `malformed-badge`)와 해석이 멈춘 위치의 원문 발췌를 돌려준다. 사유 수는 항상 `findings.unknown`과 같다. wrapper 출력(`unknownReasons`), `review:attention` 출력과 관리자 초안 2절에 표시한다. 게시 결과 형식(v3)과 서버 검증은 바꾸지 않았다.
+2. 관찰한 선언 `No actionable (defects|regressions) were identified[ in the changes[ against the specified base]].`와 검사 어휘 `verification`을 추가했다. 그 결과 PR #37 최종 원문은 `All 127 targeted tests`(통과), `the full verification suite`(미실행)로 해석된다. 미실행은 미실행으로 남는다. 범위를 좁힌 선언("in the documentation … changes"), "regressions identified"(동사 없음), 쌍반점 선언은 받지 않는다.
+3. wrapper가 새 게시를 요청하기 전에 같은 job의 저장 기록(`result <job> --json`)만 조회해 로그 사본을 남기고 대조한다. 리뷰는 다시 실행하지 않는다. 아래 중 하나라도 있으면 `review-job-log-needs-attention`(종료 코드 2)으로 게시하지 않고 관리자 초안을 만든다.
+   - `job-log-unverified`: 로그를 조회·저장하지 못했거나 사본이 ledger의 job·원문과 맞지 않음
+   - `job-command-failed`: exit 0이 아니거나 종료 코드가 없거나(`exit ?`) 완료가 아닌 상태(declined 등)의 명령
+   - `job-log-incomplete`: 완료 기록 없이 시작만 기록된 명령, 또는 리뷰어 글 블록 이후의 명령 형식 줄
+4. 원문이 이미 차단된 경우에도 job 기록 차단 사유를 함께 표시한다(PR #40은 `findings`와 `job-command-failed`). 이미 게시됐거나 게시 요청한 결과는 기존 영수증 확인 경로를 그대로 쓰며 job 로그를 다시 조회하지 않는다.
+
+로컬 ledger 10건에 적용하면 PR #37 최종만 게시 대상이 된다. 나머지는 기존처럼 차단되고, 사유가 더 구체적으로 표시된다. job 사본이 없는 과거 기록은 `job-log-unverified`로도 차단된다.
+
+### 유지한 경계와 한계
+
+- 실패·미실행·검증 제한·원인 미상 명령 오류를 통과로 바꾸지 않는다. `git grep` exit 1처럼 무해할 수 있는 실패도 원인을 확인할 수 없으므로 자동으로 허용하지 않는다. 관리자가 초안 4절에서 판단한다.
+- job 로그 대조는 로컬 wrapper의 추가 차단 조건이다. 서버는 로컬 로그를 볼 수 없어 지금처럼 원문만 다시 해석한다. 로컬 기록은 계속 미인증 자료이며 관리자 확인, `/review-gate`, High의 `/merge-approve`, 영수증·fingerprint·proof v2 검증은 바뀌지 않았다.
+- job 로그가 없으면 자동 게시하지 않는다. plugin은 Claude 세션이 끝나면 job과 로그를 지우므로 wrapper는 리뷰를 실행한 같은 세션에서 실행해야 한다.
+- 리뷰어 글 블록(Reasoning summary 등)이 명령 실행 중간에 쓰이면 그 뒤 실제 명령도 확인 불가로 분류돼 차단된다. 관찰한 로그에서는 블록이 모든 명령 뒤에 있었다.
+- 이 PR은 parser(`publicationModules`)를 바꾸므로 자기 리뷰를 자동 게시할 수 없다(`review-publication-code-mismatch`). 실제 봇 게시 canary(Issue #22)는 병합 뒤 정상 Claude 구현 PR에서 확인한다.
+- 롤백: 이 변경을 revert하면 이전 parser·wrapper로 돌아간다. 새로 생기는 로컬 파일은 `<ledger>.job-log.json`뿐이며 기존 ledger·초안은 수정하지 않는다.
 
 ## 실패·중복·복구
 

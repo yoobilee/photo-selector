@@ -6,12 +6,13 @@ import { collectReviewPacket, prepareLocalConfirmation } from './review-evidence
 import { createEvidenceGitHub, runEvidenceCli } from './review-evidence-cli.mjs';
 import { same, validatePluginResult, localReportsForTarget, parseLocalReport, verifyEvidenceCi, pluginResultVersion,
   publicationModules, localPublicationBlockers, reviewerCheckFailures } from './review-evidence-source.mjs';
-import { analyzeReviewText, parserVersion } from './review-result-parser.mjs';
+import { analyzeReviewText, explainReviewText, parserVersion } from './review-result-parser.mjs';
 export { findingsFromText, analyzeReviewText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 import { gitBlobSha } from './merge-pr-core.mjs';
 import { homedir } from 'node:os';
-import { ledgerKey, attentionPaths, readAttentionLedger, captureJobLog, buildAttentionDraft, writeNewOrSame, adminNextSteps, nodeFiles } from './review-attention.mjs';
+import { ledgerKey, attentionPaths, readAttentionLedger, captureJobLog, buildAttentionDraft, writeNewOrSame, adminNextSteps, nodeFiles,
+  jobLogBlockers, requireBlocked, blockedState, jobLogSummary } from './review-attention.mjs';
 
 // CLI에는 원시 오류/API 응답 대신 이 고정 안내만 출력한다.
 export function pluginPublicationFailureMessage(error) {
@@ -94,25 +95,31 @@ async function changedPublicationModules(github, defaultBranch) {
   return changed;
 }
 
-// 게시하지 않는 이유를 코드 지적·리뷰어 로컬 검사·원격 CI로 나눠 원문과 함께 보여준다.
-export function attentionOutput(result, blockers) {
+// 게시하지 않는 이유를 코드 지적(unknown 사유 포함)·리뷰어 로컬 검사·job 실행 기록·원격 CI로 나눠 원문과 함께 보여준다.
+export function attentionOutput(result, blockers, jobLog = null, homeDir = null) {
   return {
-    state: blockers.includes('findings') ? 'review-needs-attention' : 'review-checks-need-attention', published: false, blockers,
-    codeFindings: result.findings, reviewerCheckFailures: reviewerCheckFailures(result), reviewerChecks: result.reviewerChecks, remoteChecks: result.checks,
-    note: '코드 지적 집계와 리뷰어 로컬 검사는 별개입니다. 실패를 통과로 바꾸지 않았고 환경 원인은 리뷰어 주장일 뿐 확인되지 않았습니다. 원문이 실행한 모든 명령을 나열한다는 보장이 없으니 plugin job 기록도 확인하세요. 자동 게시하지 않았습니다. adminDraft의 관리자 검토 초안을 확인해 관리자가 직접 판단·게시하세요.',
+    state: blockedState(blockers), published: false, blockers,
+    codeFindings: result.findings, unknownReasons: explainReviewText(result.report),
+    reviewerCheckFailures: reviewerCheckFailures(result), reviewerChecks: result.reviewerChecks,
+    jobLog: jobLogSummary(jobLog, homeDir), remoteChecks: result.checks,
+    note: '코드 지적 집계와 리뷰어 로컬 검사는 별개입니다. 실패를 통과로 바꾸지 않았고 환경 원인은 리뷰어 주장일 뿐 확인되지 않았습니다. 원문이 실행한 모든 명령을 나열한다는 보장이 없어 plugin job 기록도 대조했습니다. job 기록의 exit 0이 아닌 명령·미완료·확인 불가 기록은 원인을 알 수 없어 차단합니다. 자동 게시하지 않았습니다. adminDraft의 관리자 검토 초안을 확인해 관리자가 직접 판단·게시하세요.',
     result,
   };
 }
 
+// 같은 job의 저장 기록만 조회해 로그 사본을 남긴다(리뷰 실행 아님). 저장·조회 실패는 확인 불가로 둔다.
+function readJobLog({ plugin, result, paths, files, now }) {
+  try { return captureJobLog({ plugin, result, paths, files, now }); } catch { return { status: 'unavailable', reason: 'plugin job 로그 사본을 저장·확인하지 못했습니다.' }; }
+}
+
 // 차단된 결과의 관리자 검토 초안. 완료 ledger는 읽기만 하고 job 로그 사본·초안은 별도 파일에 쓴다.
 // 초안을 만들지 못해도 차단 상태(종료 코드 2)는 그대로이며 실패를 숨기지 않는다.
-function prepareAdminDraft({ originalPath, target, description, checks, plugin, files, now, homeDir }) {
+function prepareAdminDraft({ paths, target, description, checks, jobLog, files, homeDir }) {
   try {
-    const paths = attentionPaths(resolve(originalPath));
     const ledger = readAttentionLedger({ paths, target, implementedBy: description.meta['implemented-by'], files, ignoreLock: true });
-    const jobLog = captureJobLog({ plugin, result: ledger.result, paths, files, now });
+    const blockers = requireBlocked(ledger.result, jobLog);
     const draft = buildAttentionDraft({ target, risk: description.risk, implementedBy: description.meta['implemented-by'], result: ledger.result,
-      blockers: ledger.blockers, ledger, jobLog, remoteChecks: checks, homeDir });
+      blockers, ledger, jobLog, remoteChecks: checks, homeDir });
     const draftPath = paths.draft(draft.sha256);
     writeNewOrSame(files, draftPath, draft.body);
     return { state: 'ready', draftPath, draftSha256: draft.sha256, draftKey: draft.key, jobLog: { status: jobLog.status, reason: jobLog.reason ?? null },
@@ -212,12 +219,16 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result }), { mode: 0o600 });
     }
     validatePluginResult(result, target, 'claude');
-    const blockers = localPublicationBlockers(result);
-    if (blockers.length) {
-      const adminDraft = prepareAdminDraft({ originalPath, target, description: initial.state.evaluation.description, checks: latestChecks,
-        plugin, files, now, homeDir });
-      out(JSON.stringify({ ...attentionOutput(result, blockers), adminDraft }, null, 2));
+    const paths = attentionPaths(resolve(originalPath));
+    const blocked = (blockers, jobLog) => {
+      const adminDraft = prepareAdminDraft({ paths, target, description: initial.state.evaluation.description, checks: latestChecks, jobLog, files, homeDir });
+      out(JSON.stringify({ ...attentionOutput(result, blockers, jobLog, homeDir), adminDraft }, null, 2));
       return 2;
+    };
+    const reportBlockers = localPublicationBlockers(result);
+    if (reportBlockers.length) {
+      const jobLog = readJobLog({ plugin, result, paths, files, now });
+      return blocked([...reportBlockers, ...jobLogBlockers(jobLog)], jobLog);
     }
     const existingPublication = state => {
       const matches = localReportsForTarget(state.comments, target);
@@ -231,6 +242,10 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
     if (!same(latest.packet.target, target)) throw new Error('게시 직전 대상 변경');
     const already = existingPublication(latest.state);
     if (!already && !JSON.parse(readFileSync(path, 'utf8')).publicationRequested) {
+      // 새 게시 요청 전에만 job 실행 기록을 대조한다. 이미 게시·요청된 결과는 영수증 확인 경로를 그대로 쓴다.
+      const jobLog = readJobLog({ plugin, result, paths, files, now });
+      const jobBlockers = jobLogBlockers(jobLog);
+      if (jobBlockers.length) return blocked(jobBlockers, jobLog);
       let preflightError;
       const status = await runEvidenceCli({ argv: [options.repository, String(options.number), '--result', 'plugin-result.json', '--dispatch'], gh,
         readFile: () => JSON.stringify(result), out: () => {}, err: () => {},
