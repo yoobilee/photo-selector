@@ -27,7 +27,7 @@ export function attentionFailureMessage(error) {
     'review-attention-ledger-invalid': '완료 ledger가 현재 PR 대상(base/head/fingerprint/정책)과 다르거나 형식·복구 연결이 맞지 않습니다. ledger를 수정하지 않았으며 이전 결과를 현재 대상에 연결하지 않습니다.',
     'review-attention-publication-requested': '이 결과는 이미 봇 게시를 요청했습니다. 관리자 초안 대신 실제 Actions·봇 댓글·영수증을 확인하세요.',
     'review-attention-not-blocked': '자동 게시가 차단되지 않은 결과입니다. 기존 npm run review:publish 흐름을 사용하세요.',
-    'review-recovery-manual': '이전 형식(v2) 복구 기록이 있어 사람이 먼저 확인해야 합니다. 기존 파일은 수정하지 않았습니다.',    'review-attention-comment-invalid': '지정한 댓글이 이 PR의 관리자 검토 초안이 아니거나 marker·대상 SHA·리뷰 원문이 현재 ledger와 맞지 않습니다. 초안을 다시 만들고 원문·marker를 유지해 게시하세요.',
+    'review-recovery-manual': '복구 기록을 사람이 먼저 확인해야 합니다. v2 복구 파일만 있거나, v3 복구 기록과 원본 ledger의 연결(대상·세션·job·원문·hash·게시 요청 기록·v2 복구 파일)이 맞지 않습니다. 기존 파일은 수정하지 않았습니다.',    'review-attention-comment-invalid': '지정한 댓글이 이 PR의 관리자 검토 초안이 아니거나 marker·대상 SHA·리뷰 원문이 현재 ledger와 맞지 않습니다. 초안을 다시 만들고 원문·marker를 유지해 게시하세요.',
     'review-attention-not-admin': '지정한 댓글은 관리자(admin/maintain) 사용자가 직접 게시한 것이 아닙니다. 봇·다른 사용자의 댓글로 확인 문구를 만들지 않습니다.',
     'review-attention-bot-report': '같은 대상의 봇 보고서가 이미 있습니다. 관리자 초안과 섞지 말고 기존 봇 보고서·영수증을 확인하세요.',
     'review-attention-blocking-findings': '미해결 critical/high/medium 지적 또는 변경 요청 리뷰가 있어 통과 확인 문구를 만들지 않습니다. 수정 후 새 HEAD를 리뷰하세요.',

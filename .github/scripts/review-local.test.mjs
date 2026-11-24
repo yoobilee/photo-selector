@@ -224,7 +224,8 @@ test('복구 파생 결과도 CI 대기 중 원본 ledger·원문을 보존하�
   data.output.codex.stdout = observedReport;
   const current = collectPluginResult({ ...data, target: w.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
   // 복구 대상은 이전 형식(v2) 결과다. 이전 parser로 저장한 v3 결과는 재해석 복구하지 않는다(별도 테스트).
-  const result = { ...current, v: 2, findings: { ...current.findings, unknown: 1 } }; delete result.reviewerChecks;
+  // 원본보다 판정을 줄이는 복구는 게시하지 않으므로(recovery-reduced, 별도 테스트) 여기서는 줄이지 않는 원본으로 CI 대기 경로를 확인한다.
+  const result = { ...current, v: 2 }; delete result.reviewerChecks;
   const original = JSON.stringify({ state: 'completed', target: w.target, session: 'session-1', result });
   writeFileSync(path, original);
   Object.assign(f.ci.check, { status: 'in_progress', conclusion: null });
@@ -738,7 +739,10 @@ test('PR #28 형태 v2 ledger 복구: 원본 불변·parser v3로 실패를 분�
     const recovered = JSON.parse(readFileSync(w.path + '.recovered.v3.json', 'utf8'));
     assert.equal(recovered.recovery.parserVersion, parserVersion); assert.equal(recovered.result.v, 3);
     assert.deepEqual(recovered.result.findings, zeroFindings); assert.equal(recovered.result.report, pr28Report);
-    assert.equal(outputs[0].state, 'review-checks-need-attention'); assert.deepEqual(outputs[1], outputs[0]);
+    // v2 원본의 unknown 1은 복구본에서 사라지지 않는다(판정 최댓값). 검사 실패와 복구 축소도 함께 남긴다.
+    assert.equal(outputs[0].state, 'review-needs-attention'); assert.deepEqual(outputs[1], outputs[0]);
+    assert.deepEqual(outputs[0].blockers, ['findings', 'reviewer-check-failed', 'recovery-reduced']);
+    assert.equal(outputs[0].interpretation.effectiveFindings.unknown, 1); assert.equal(outputs[0].interpretation.original.resultVersion, 2);
     assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1);
     assert.equal(w.f.dispatches.length, 0); assert.equal(w.f.comments.length, 0);
   });
@@ -798,10 +802,10 @@ test('리뷰어 검사 실패 결과는 봇 보고서로 기록돼도 관리자 
 });
 
 // parser v2 --recover가 남긴 복구 기록 형태. 원래 ledger와 함께 만들고, 두 파일은 테스트 내내 바뀌면 안 된다.
-async function legacyRecoveryFixture(t, { report = pr23Report, legacy = () => {}, original = () => {}, legacyText = null } = {}) {
+async function legacyRecoveryFixture(t, { report = pr23Report, legacy = () => {}, original = () => {}, legacyText = null, originalUnknown = 1 } = {}) {
   const w = await wrapperFixture(t); w.data.output.codex.stdout = report;
   const current = collectPluginResult({ ...w.data, target: w.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
-  const v2 = { ...current, v: 2, findings: { ...current.findings, unknown: 1 } }; delete v2.reviewerChecks;
+  const v2 = { ...current, v: 2, findings: { ...current.findings, unknown: originalUnknown } }; delete v2.reviewerChecks;
   const originalLedger = { state: 'completed', target: structuredClone(w.target), session: 'session-1', result: v2 }; original(originalLedger);
   const originalText = JSON.stringify(originalLedger);
   writeFileSync(w.path, originalText);
@@ -837,8 +841,21 @@ test('v2 복구 파일 부재: v3 파일을 새로 만들고 legacyRecoveredHash
   assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1); assert.equal(w.f.dispatches.length, 1);
 });
 
-test('게시 요청 전 v2 복구 파일: 보존한 채 v3로 재해석, 한 번만 요청, v3 복구 중복 실행은 재사용', async t => {
+// PR #42 재검증: 복구본이 원본(v2)의 unknown을 줄이면 게시하지 않는다. 원본·v2 복구 파일은 보존하고 v3 복구 기록만 새로 만든다.
+test('게시 요청 전 v2 복구 파일 + 원본 unknown 1: v3 재해석이 unknown을 줄이므로 게시하지 않고 관리자 초안으로 넘김', async t => {
   const { w, text, unchanged, recover } = await legacyRecoveryFixture(t);
+  let output;
+  assert.equal(await recover({ out: value => { output = JSON.parse(value); } }), 2);
+  assert.deepEqual(output.blockers.slice(0, 2), ['findings', 'recovery-reduced']); assert.equal(output.interpretation.effectiveFindings.unknown, 1);
+  assert.equal(await recover({ out: () => {} }), 2); assert.equal(await w.run({ maxPolls: 1, out: () => {} }), 2);
+  unchanged();
+  const recovered = JSON.parse(readFileSync(w.path + '.recovered.v3.json', 'utf8'));
+  assert.equal(recovered.recovery.legacyRecoveredHash, sha256(text)); assert.equal(recovered.publicationRequested, undefined);
+  assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1); assert.equal(w.f.dispatches.length, 0);
+});
+
+test('게시 요청 전 v2 복구 파일(원본 판정을 줄이지 않음): 보존한 채 v3로 재해석, 한 번만 요청, v3 복구 중복 실행은 재사용', async t => {
+  const { w, text, unchanged, recover } = await legacyRecoveryFixture(t, { originalUnknown: 0 });
   await assert.rejects(recover(), /완료를 확인하지 못함/);
   unchanged();
   const recovered = JSON.parse(readFileSync(w.path + '.recovered.v3.json', 'utf8'));
@@ -861,7 +878,9 @@ test('게시 요청 전 v2 복구 파일 + PR #28 원문: v3 재해석 후 검�
   let output;
   assert.equal(await recover({ out: text => { output = JSON.parse(text); } }), 2);
   unchanged();
-  assert.equal(output.state, 'review-checks-need-attention'); assert.deepEqual(output.codeFindings, zeroFindings);
+  assert.equal(output.state, 'review-needs-attention'); assert.deepEqual(output.codeFindings, zeroFindings);
+  assert.deepEqual(output.blockers.slice(0, 3), ['findings', 'reviewer-check-failed', 'recovery-reduced']);
+  assert.equal(output.interpretation.effectiveFindings.unknown, 1);
   assert.deepEqual(output.reviewerCheckFailures.map(c => c.name), ['privacyGuard']);
   assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1); assert.equal(w.f.dispatches.length, 0);
 });

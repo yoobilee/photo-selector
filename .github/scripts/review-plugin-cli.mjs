@@ -12,8 +12,8 @@ import { reportHash, sha256 } from './review-gate-core.mjs';
 import { gitBlobSha } from './merge-pr-core.mjs';
 import { homedir } from 'node:os';
 import { ledgerKey, attentionPaths, readAttentionLedger, captureJobLog, buildAttentionDraft, writeNewOrSame, adminNextSteps, nodeFiles,
-  jobLogBlockers, requireBlocked, blockedState, jobLogSummary, interpretStoredResult, validateStoredResult, reportBlockers, attentionBlockers,
-  interpretationSummary } from './review-attention.mjs';
+  jobLogBlockers, requireBlocked, blockedState, jobLogSummary, interpretStoredResult, reportBlockers, attentionBlockers,
+  interpretationSummary, loadStoredLedger, interpretationDisagrees, recoverableOriginal } from './review-attention.mjs';
 
 // CLI에는 원시 오류/API 응답 대신 이 고정 안내만 출력한다.
 export function pluginPublicationFailureMessage(error) {
@@ -64,10 +64,9 @@ export function collectPluginResult({ output, stored, target, session, startedAt
 }
 
 // 원래 ledger는 이전 parser·결과 형식(v2)일 수 있다. 재해석에 쓰는 대상·출처·원문만 확인하고 원본은 바꾸지 않는다.
+// 관리자 초안·일반 실행이 복구 기록을 읽을 때와 같은 기준(recoverableOriginal)이다.
 function assertRecoverableOriginal(result, target) {
-  if (![2, pluginResultVersion].includes(result?.v) || !same(result.target, target) || result.status !== 'completed' || result.reviewComplete !== true
-      || typeof result.report !== 'string' || !result.report.trim() || result.source?.kind !== 'codex-plugin'
-      || result.source.outputHash !== reportHash(result.report)) throw new Error('Recovery original result invalid');
+  if (!recoverableOriginal(result, target)) throw new Error('Recovery original result invalid');
 }
 
 // parser v2 복구 기록은 게시 요청 전이고 같은 원본·세션·대상·원문에서 파생됐음을 확인할 수 있을 때만 건너뛴다.
@@ -157,7 +156,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
   const lockPath = `${originalPath}.lock`;
   const lock = openSync(lockPath, 'wx', 0o600); closeSync(lock);
   try {
-    let result; let captured; let storedLedger = null; let latestChecks = initial.packet.checks;
+    let result; let captured; let latestChecks = initial.packet.checks;
     if (options.recover && !existsSync(path)) {
       if (!existsSync(originalPath)) throw new Error('No completed ledger to recover');
       const originalText = readFileSync(originalPath, 'utf8');
@@ -190,7 +189,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       const ledger = JSON.parse(readFileSync(path, 'utf8'));
       if (!['completed', 'captured'].includes(ledger.state) || ledger.session !== options.session || !same(ledger.target, target)) throw new Error('이전 실행 미완료·실패·다른 세션. 리뷰를 자동 재실행하지 않음');
       result = ledger.result;
-      if (ledger.state === 'captured') captured = ledger; else storedLedger = ledger;
+      if (ledger.state === 'captured') captured = ledger;
     } else {
       if (options.recover) throw new Error('Recovery cannot start a model review');
       const existing = localReportsForTarget(initial.state.comments, target).length > 0;
@@ -227,16 +226,17 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       // 어느 parser 버전으로 해석했는지 남긴다. 이후 parser가 바뀌면 저장 결과와 재해석을 구분하는 데 쓴다.
       writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, parserVersion }), { mode: 0o600 });
     }
-    // 저장된 완료 결과는 리뷰 당시 parser의 해석이다. 현재 parser로 다시 해석해 바꾸지 않고 차이만 확인한다.
-    const storedParserVersion = storedLedger ? (path === recoveredPath ? storedLedger.recovery?.parserVersion : storedLedger.parserVersion) ?? null : parserVersion;
-    const interpretation = interpretStoredResult(result, storedParserVersion);
-    if (!interpretation.consistent && (storedLedger?.publicationRequested || storedLedger?.publication)) {
-      // 이미 요청·게시한 결과는 재해석으로 영수증 확인·재요청 경로에 넣지 않는다.
-      throw Object.assign(new Error('게시 요청한 결과의 해석이 현재 parser와 다름'), { code: 'review-parser-mismatch' });
-    }
-    if (interpretation.consistent) validatePluginResult(result, target, 'claude');
-    else validateStoredResult(result, target, 'claude', storedParserVersion);
+    // 완료 기록은 관리자 초안·`--confirm`과 같은 공통 기준(loadStoredLedger)으로 다시 읽는다. 복구 기록이 있어도 원본 ledger 연결을 검증하고,
+    // 원본·저장·현재 해석을 비교한다. 저장 결과는 리뷰 당시 parser의 해석이며 다시 해석해 바꾸지 않는다.
     const paths = attentionPaths(resolve(originalPath));
+    const stored = loadStoredLedger({ paths, target, implementedBy: 'claude', files, session: options.session, ignoreLock: true });
+    if (stored.path !== resolve(path)) throw new Error('판정 기록 경로 불일치');
+    result = stored.result;
+    const { interpretation } = stored;
+    if (stored.publicationRequested && interpretationDisagrees(interpretation)) {
+      // 이미 요청·게시한 결과는 재해석·복구로 영수증 확인·재요청 경로에 넣지 않는다.
+      throw Object.assign(new Error('게시 요청한 결과의 해석이 현재 parser·원본과 다름'), { code: 'review-parser-mismatch' });
+    }
     const blocked = (blockers, jobLog) => {
       const adminDraft = prepareAdminDraft({ paths, target, description: initial.state.evaluation.description, checks: latestChecks, jobLog, files, homeDir });
       out(JSON.stringify({ ...attentionOutput(result, blockers, jobLog, homeDir, interpretation), adminDraft }, null, 2));
