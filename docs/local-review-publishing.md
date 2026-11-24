@@ -20,8 +20,8 @@ npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설�
    - `reviewerChecks`: 리뷰어가 원문에 보고한 로컬 검사의 통과(`passed`)·실패(`failed`)·미실행(`not-run`)·건너뜀(`skipped`)과 리뷰어가 밝힌 환경 원인 주장
    - `checks`: GitHub API가 반환한 현재 HEAD의 원격 CI 상태
 
-   unknown이나 미해결 critical/high/medium이면 원문과 `review-needs-attention`을, 코드 지적은 없지만 리뷰어가 로컬 검사 실패를 보고했으면 `review-checks-need-attention`을 출력하고 게시하지 않는다. 지적 배지는 집계하되 나머지 문맥의 완전성을 증명할 수 없어 unknown도 함께 남긴다. 출력의 `unknownReasons`는 unknown마다 원문의 어느 문장에서 해석이 멈췄는지 알려 준다.
-   원문이 게시 가능해도 새 게시 요청 전에 같은 job의 plugin 로그를 대조한다. 로그를 확보·대조하지 못했거나, exit 0이 아닌 명령·완료 기록 없는 명령·실행 여부를 구분할 수 없는 줄이 있으면 `review-job-log-needs-attention`으로 게시하지 않는다(아래 "unknown 원인 진단과 job 실행 기록 대조").
+   unknown이나 미해결 critical/high/medium이면 원문과 `review-needs-attention`을, 코드 지적은 없지만 리뷰어가 로컬 검사 실패를 보고했으면 `review-checks-need-attention`을 출력하고 게시하지 않는다. 지적 배지는 집계하되 나머지 문맥의 완전성을 증명할 수 없어 unknown도 함께 남긴다. 출력의 `codeFindings`는 저장된 결과(리뷰 당시 해석)이고, `interpretation.current.unknownReasons`는 현재 parser가 unknown마다 원문의 어느 문장에서 해석이 멈췄는지 알려 준다.
+   원문이 게시 가능해도 새 게시 요청 전에 같은 job의 plugin 로그를 대조한다. 로그를 확보·대조하지 못했거나, 리뷰 완료 증거가 없거나, exit 0이 아닌 명령·완료 기록 없는 명령·실행 여부를 구분할 수 없는 줄이 있으면 `review-job-log-needs-attention`으로 게시하지 않는다(아래 "unknown 원인 진단과 job 실행 기록 대조").
 4. 기존 `review-evidence.yml`의 고정된 기본 브랜치에 등록 요청만 전달한다. 개인 GitHub 인증으로 PR 댓글을 쓰지 않는다. workflow는 PR 코드·모델·설치·테스트를 실행하지 않고 기본 브랜치 코드와 최소 `GITHUB_TOKEN` 권한으로 미인증 자료를 게시한다.
 5. workflow가 댓글 ID·본문을 확인한 뒤 `review-evidence-v2-<댓글 ID>-<본문 SHA-256>` 이름의 artifact를 만든다. 내용은 댓글 링크·ID·해시뿐이다. API가 artifact를 원본 run에 연결한 metadata가 게시 경로의 영수증이다. ZIP을 게이트에서 실행/추출하지 않는다.
 6. 성공한 실행과 댓글을 다시 검증해 stdout JSON에 댓글 링크·해시·관리자가 직접 작성할 `/review-gate`를 출력한다. 보고서를 수동 게시할 필요가 없다. 확인 내용만 다시 조회하려면:
@@ -157,15 +157,52 @@ PR #40 최종 job의 exit 1 명령 2건은 원인을 확인할 수 없었다. pl
 
 ### 해결
 
-1. parser에 `explainReviewText`를 추가했다. unknown마다 사유(`declaration-unrecognized`, `sentence-unrecognized`, `unexplained-check-failure`, `incomplete-review-phrase`, `malformed-badge`)와 해석이 멈춘 위치의 원문 발췌를 돌려준다. 사유 수는 항상 `findings.unknown`과 같다. wrapper 출력(`unknownReasons`), `review:attention` 출력과 관리자 초안 2절에 표시한다. 게시 결과 형식(v3)과 서버 검증은 바꾸지 않았다.
+1. parser에 `explainReviewText`를 추가했다. unknown마다 사유(`declaration-unrecognized`, `sentence-unrecognized`, `unexplained-check-failure`, `incomplete-review-phrase`, `malformed-badge`)와 해석이 멈춘 위치의 원문 발췌를 돌려준다. 사유 수는 항상 같은 parser가 계산한 `findings.unknown`과 같다. wrapper 출력(`interpretation.current.unknownReasons`), `review:attention` 출력과 관리자 초안 2절에 표시한다. 이전 parser로 저장한 결과와는 개수가 다를 수 있어 따로 표시한다(아래 "독립 검토 지적 반영" 3). 게시 결과 형식(v3)과 서버 검증은 바꾸지 않았다.
 2. 관찰한 선언 `No actionable (defects|regressions) were identified[ in the changes[ against the specified base]].`와 검사 어휘 `verification`을 추가했다. 그 결과 PR #37 최종 원문은 `All 127 targeted tests`(통과), `the full verification suite`(미실행)로 해석된다. 미실행은 미실행으로 남는다. 범위를 좁힌 선언("in the documentation … changes"), "regressions identified"(동사 없음), 쌍반점 선언은 받지 않는다.
 3. wrapper가 새 게시를 요청하기 전에 같은 job의 저장 기록(`result <job> --json`)만 조회해 로그 사본을 남기고 대조한다. 리뷰는 다시 실행하지 않는다. 아래 중 하나라도 있으면 `review-job-log-needs-attention`(종료 코드 2)으로 게시하지 않고 관리자 초안을 만든다.
    - `job-log-unverified`: 로그를 조회·저장하지 못했거나 사본이 ledger의 job·원문과 맞지 않음
    - `job-command-failed`: exit 0이 아니거나 종료 코드가 없거나(`exit ?`) 완료가 아닌 상태(declined 등)의 명령
    - `job-log-incomplete`: 완료 기록 없이 시작만 기록된 명령, 또는 리뷰어 글 블록 이후의 명령 형식 줄
+   - `job-log-not-completed`: 리뷰 완료 증거가 하나라도 없음(아래 "독립 검토 지적 반영" 1)
 4. 원문이 이미 차단된 경우에도 job 기록 차단 사유를 함께 표시한다(PR #40은 `findings`와 `job-command-failed`). 이미 게시됐거나 게시 요청한 결과는 기존 영수증 확인 경로를 그대로 쓰며 job 로그를 다시 조회하지 않는다.
 
-로컬 ledger 10건에 적용하면 PR #37 최종만 게시 대상이 된다. 나머지는 기존처럼 차단되고, 사유가 더 구체적으로 표시된다. job 사본이 없는 과거 기록은 `job-log-unverified`로도 차단된다.
+로컬 ledger에 적용한 결과는 아래 "독립 검토 지적 반영"의 표에 있다. PR #37 최종 원문은 새 리뷰라면 게시 대상이지만, 저장된 ledger는 이전 parser 해석이라 `parser-mismatch`로 차단된다. job 사본이 없는 과거 기록은 `job-log-unverified`로도 차단된다.
+
+### 독립 검토 지적 반영 (PR #42, 검토 HEAD `1fb9dcc`)
+
+별도 Codex CLI 독립 검토가 Medium 2건, Low 1건을 지적했다. 세 건 모두 수정 전 코드에서 재현한 뒤 고쳤다.
+
+1. **Medium: 빈 로그·불완전한 로그 허용.**
+   - 원인: `jobLogBlockers`는 실패·미완료·확인 불가 명령만 셌다. 그래서 0바이트 로그나 시작 이벤트만 남은 로그는 명령 목록이 비어 차단 사유가 `[]`였고, wrapper가 게시를 요청했다(재현: dispatch 1).
+   - 수정: 명령 개수와 별개로 리뷰 완료 증거를 요구한다. codex-companion 1.0.6 코드와 실제 로그 6건에서 확인한 증거는 세 가지다.
+     - 첫 줄 `Starting Codex Review.`와 `Reviewer started: …`
+     - 첫 블록 직전 마지막 이벤트 `Review output captured.`와, 그 직후 저장된 원문과 같은 본문의 `Review output` 블록
+     - 마지막 블록인 `Final output`(원문 포함)
+   - 하나라도 없으면 `job-log-not-completed`로 차단한다. 해당하는 경우는 0바이트 로그, 시작만 남은 로그, 리뷰 원문 전·최종 출력 전에 잘린 로그, 다른 job 원문의 로그, 최종 출력 뒤 다른 블록이다.
+   - 증거가 모두 있고 명령이 0건이면 명령 없이 정상 종료한 job으로 보고 기존 게시 경로를 쓴다. 원문의 미실행은 미실행으로 남는다.
+   - 실제 로그 6건은 모두 완료 증거를 갖춰 새로 차단되지 않는다.
+2. **Medium: 기존 v3 ledger 호환성.**
+   - 원인: 이 PR의 parser 문법 추가로 같은 원문의 해석이 달라졌다. 이전 parser가 저장한 v3 결과(실제 PR #37 최종 ledger `ad0bf470…`: unknown 1, 검사 기록 없음)는 새 parser로 검증하면 "원문과 다른 리뷰어 검사 기록"으로 실패했다. 그 결과 wrapper와 `review:attention` 모두 관리자 초안을 만들 수 없었다. 또 `--recover`가 이 결과를 unknown 0으로 재해석해 게시를 요청했다(재현: dispatch 1).
+   - 수정:
+     - parser 버전을 4로 올렸다. 새 완료 ledger에는 `parserVersion`을 기록한다.
+     - 저장된 결과는 다시 해석해 바꾸지 않는다. 현재 해석과 다르면 `parser-mismatch`로 차단하고 관리자 초안을 만든다. 판정과 확인 문구에는 두 해석 중 큰 지적 수를 쓴다.
+     - 원본 ledger, 이전 코드가 만든 `.recovered.v3.json`, 게시 요청 기록, job 로그 사본은 읽기만 한다.
+     - 해석이 다른 v3 원본에 `--recover`를 쓰면 `review-recovery-manual`로 중단한다. 복구 파일은 만들지 않는다.
+     - 이미 게시 요청한 결과의 해석이 다르면 `review-parser-mismatch`로 중단하고 재요청하지 않는다.
+     - v2 결과의 `--recover`(이전 형식 복구)와, 해석이 같은 v3 ledger의 처리는 그대로다.
+3. **Low: unknown 진단 불일치.**
+   - 원인: 출력과 초안이 저장된 `findings.unknown`(리뷰 당시 parser)과 현재 parser의 `unknownReasons`를 한 덩어리로 보여 줬다. 그래서 개수가 다를 수 있었다(위 ledger: 저장 1, 현재 사유 0).
+   - 수정: wrapper와 `review:attention` 출력의 `interpretation`이 `stored`(리뷰 당시 parser 버전·집계)와 `current`(현재 parser 버전·집계·사유)를 구분한다. 관리자 초안 2·3절은 두 해석을 별도 행·표로 보여 준다.
+   - 현재 사유로 설명되지 않는 저장 unknown은 `unexplainedStoredUnknown`으로 표시하고 지우거나 통과로 처리하지 않는다.
+
+로컬 ledger 11건(v3 9건, v2 2건)에 새 코드를 읽기 전용으로 적용한 결과다. ledger 파일은 바뀌지 않았다.
+
+| 리뷰 | 해석 일치 | 차단 사유 |
+|---|---|---|
+| PR #30 `72bec49`·`7c15203`, PR #34 `20a0887` | 일치 | `findings`, `job-log-unverified`(job 사본 없음) |
+| PR #37 `e64171b`·`a72091d`, PR #40 `d011b44`·`b352c1f`, PR #42 `1fb9dcc` | 일치 | `findings`, `job-command-failed` |
+| PR #37 최종 `1118f8f` | 불일치(저장 unknown 1, 현재 0) | `findings`, `parser-mismatch` |
+| PR #23 `3351890`, PR #28 `d3be5f4` | v2 결과 | 복구 경로만 해당 |
 
 ### 유지한 경계와 한계
 
@@ -174,7 +211,7 @@ PR #40 최종 job의 exit 1 명령 2건은 원인을 확인할 수 없었다. pl
 - job 로그가 없으면 자동 게시하지 않는다. plugin은 Claude 세션이 끝나면 job과 로그를 지우므로 wrapper는 리뷰를 실행한 같은 세션에서 실행해야 한다.
 - 리뷰어 글 블록(Reasoning summary 등)이 명령 실행 중간에 쓰이면 그 뒤 실제 명령도 확인 불가로 분류돼 차단된다. 관찰한 로그에서는 블록이 모든 명령 뒤에 있었다.
 - 이 PR은 parser(`publicationModules`)를 바꾸므로 자기 리뷰를 자동 게시할 수 없다(`review-publication-code-mismatch`). 실제 봇 게시 canary(Issue #22)는 병합 뒤 정상 Claude 구현 PR에서 확인한다.
-- 롤백: 이 변경을 revert하면 이전 parser·wrapper로 돌아간다. 새로 생기는 로컬 파일은 `<ledger>.job-log.json`뿐이며 기존 ledger·초안은 수정하지 않는다.
+- 롤백: 이 변경을 revert하면 이전 parser·wrapper로 돌아간다. 새로 생기는 로컬 파일은 `<ledger>.job-log.json`뿐이며 기존 ledger·초안은 수정하지 않는다. 새 완료 ledger에 추가한 `parserVersion` 필드는 이전 wrapper가 읽지 않는 필드다.
 
 ## 실패·중복·복구
 
@@ -188,7 +225,7 @@ PR #23에서 실제 완료 문장이 기존 허용 문법 밖이라 `unknown: 1`
 npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설치된 Codex 플러그인 루트> --session <원래 Claude 세션 ID> --recover
 ```
 
-`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.v3.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. parser v2가 만든 `<원래 ledger>.recovered.json`은 읽기만 하고 수정·삭제하지 않는다. 그 파일이 정확히 v2 복구 형식이고, 게시 요청·게시 기록이 없으며, 같은 원본 ledger hash·세션·대상·원문·출처에서 파생됐을 때만 모델 재호출 없이 v3로 다시 해석하고 그 파일의 hash를 `legacyRecoveredHash`로 남긴다. 게시 요청 기록이 있거나 알 수 없는 필드·부분 기록처럼 요청 여부가 불명확하면 `review-recovery-manual`로 중단하고 사람이 실제 댓글·Actions·영수증을 확인한다. v2 복구 파일만 있는 대상에서 `--recover` 없이 실행해도 원래 ledger로 되돌아가지 않고 같은 이유로 중단한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
+`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.v3.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. parser v2가 만든 `<원래 ledger>.recovered.json`은 읽기만 하고 수정·삭제하지 않는다. 그 파일이 정확히 v2 복구 형식이고, 게시 요청·게시 기록이 없으며, 같은 원본 ledger hash·세션·대상·원문·출처에서 파생됐을 때만 모델 재호출 없이 v3로 다시 해석하고 그 파일의 hash를 `legacyRecoveredHash`로 남긴다. 게시 요청 기록이 있거나 알 수 없는 필드·부분 기록처럼 요청 여부가 불명확하면 `review-recovery-manual`로 중단하고 사람이 실제 댓글·Actions·영수증을 확인한다. v2 복구 파일만 있는 대상에서 `--recover` 없이 실행해도 원래 ledger로 되돌아가지 않고 같은 이유로 중단한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 원래 결과가 이미 v3이면 저장 당시 해석이 현재 parser와 같을 때만 복구한다. 다르면 `review-recovery-manual`로 중단하고 복구 파일을 만들지 않는다. 이때는 `--recover` 없이 실행해 `parser-mismatch` 관리자 초안을 쓴다(재해석으로 저장된 unknown·검사 기록을 줄이지 않는다). 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
 
 PR #23처럼 이미 병합됐거나 base가 바뀐 결과는 복구 게시 대상으로 삼지 않는다. parser 수정은 옛 결과를 새 base에 재연결하는 허가가 아니다.
 

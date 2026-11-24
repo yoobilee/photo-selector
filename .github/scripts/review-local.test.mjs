@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localFixture, pr23Report, pr28Report, pr37FinalReport, cleanJobLog } from './review-local-fixture.mjs';
 
-// wrapper는 새 게시 요청 전에 같은 job의 로그를 대조한다. 기본 fixture는 모든 명령이 exit 0인 로그를 쓴다.
+// wrapper는 새 게시 요청 전에 같은 job의 로그를 대조한다. 기본 fixture는 모든 명령이 exit 0이고 완료 증거가 있는 로그를 쓴다.
+// 완료 증거에는 리뷰 원문 일치가 포함되므로, 테스트가 원문을 바꿔도 로그 경로를 읽는 시점의 원문으로 로그를 만든다.
 const jobLogDirectory = mkdtempSync(join(tmpdir(), 'review-job-log-'));
 after(() => rmSync(jobLogDirectory, { recursive: true, force: true }));
-const cleanJobLogPath = join(jobLogDirectory, 'job-1.log');
-writeFileSync(cleanJobLogPath, cleanJobLog());
-import { analyzeReviewText } from './review-result-parser.mjs';
+let jobLogCount = 0;
+import { analyzeReviewText, parserVersion } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 import { publishEvidence } from './review-evidence.mjs';
 import { parseLocalReport, renderLocalReport, validatePluginResult, verifyLocalReport, publicationModules, evidenceWorkflow } from './review-evidence-source.mjs';
@@ -130,8 +130,10 @@ test('CLI 중단 안내는 요청 전·불명확·충돌을 구분하고 원시 
 
 function pluginFixture(target) {
   const output = { review: 'Review', threadId: 'thread-1', target: { mode: 'branch', baseRef: target.base }, codex: { status: 0, stdout: 'No actionable defects were found. Build and E2E were not run.' } };
+  const logPath = join(jobLogDirectory, `job-${++jobLogCount}.log`);
   const job = { id: 'job-1', kind: 'review', status: 'completed', sessionId: 'session-1', threadId: 'thread-1', turnId: 'turn-1',
-    createdAt: '2026-11-09T00:00:01Z', completedAt: '2026-11-09T00:01:00Z', result: output, logFile: cleanJobLogPath };
+    createdAt: '2026-11-09T00:00:01Z', completedAt: '2026-11-09T00:01:00Z', result: output,
+    get logFile() { writeFileSync(logPath, cleanJobLog(output.codex.stdout)); return logPath; } };
   return { output, stored: { job: { status: 'completed' }, storedJob: job } };
 }
 
@@ -220,8 +222,9 @@ test('dispatch 준비 실패는 ledger 불변·재처리 가능, 실제 요청 �
 test('복구 파생 결과도 CI 대기 중 원본 ledger·원문을 보존하고 성공 뒤 한 번만 요청', async t => {
   const w = await wrapperFixture(t); const { f, data, path } = w;
   data.output.codex.stdout = observedReport;
-  const result = collectPluginResult({ ...data, target: w.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
-  result.findings.unknown = 1;
+  const current = collectPluginResult({ ...data, target: w.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+  // 복구 대상은 이전 형식(v2) 결과다. 이전 parser로 저장한 v3 결과는 재해석 복구하지 않는다(별도 테스트).
+  const result = { ...current, v: 2, findings: { ...current.findings, unknown: 1 } }; delete result.reviewerChecks;
   const original = JSON.stringify({ state: 'completed', target: w.target, session: 'session-1', result });
   writeFileSync(path, original);
   Object.assign(f.ci.check, { status: 'in_progress', conclusion: null });
@@ -376,7 +379,9 @@ test('PR23 관찰 문법 전체만 수용하고 혼재·모호함·미완료는 
   assert.equal(parsePluginArgs([...args, '--recover', '--recover'], {}), null);
 });
 
-test('완료 결과 복구는 result만 조회하고 원래 ledger 보존·재실행/중복 dispatch 금지', async () => {
+// PR #42 독립 검토 지적: 이전에는 이전 parser가 unknown 1로 저장한 v3 결과를 --recover가 현재 parser로 재해석해 unknown 0으로 게시 요청했다.
+// 이제 v3 결과는 저장 당시 해석이 현재와 다르면 복구하지 않고, 원본을 보존한 채 --recover 없는 실행에서 parser-mismatch 관리자 초안으로 넘긴다.
+test('이전 parser로 저장한 v3 결과는 --recover로 재해석·게시하지 않고 원본 보존, 일반 실행은 parser-mismatch로 차단', async () => {
   const f = localFixture(); const { target } = await f.result();
   const data = pluginFixture(target); data.output.codex.stdout = observedReport;
   const original = collectPluginResult({ ...data, target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
@@ -384,30 +389,25 @@ test('완료 결과 복구는 result만 조회하고 원래 ledger 보존·재�
   const directory = mkdtempSync(join(tmpdir(), 'review-recover-test-')); const path = join(directory, 'ledger.json');
   const originalText = JSON.stringify({ state: 'completed', session: 'session-1', target, result: original });
   const git = args => args[1] === '--git-path' ? path : args.at(-1) === 'HEAD' ? target.head : target.base;
-  let reads = 0;
+  let reads = 0; let jobReads = 0; const outputs = [];
   const plugin = args => {
-    // 게시 요청 전 job 로그 대조는 같은 job의 저장 기록 조회다(리뷰 실행 아님).
-    if (args.length === 3) { assert.deepEqual(args, ['result', 'job-1', '--json']); return data.stored; }
+    // 차단 시 job 로그 대조는 같은 job의 저장 기록 조회다(리뷰 실행 아님).
+    if (args.length === 3) { assert.deepEqual(args, ['result', 'job-1', '--json']); jobReads++; return data.stored; }
     assert.deepEqual(args, ['result', '--json']); reads++; return data.stored;
   };
   const run = (recover = true) => runPluginPublication({ options: { repository: 'owner/repo', number: 1, session: 'session-1', recover },
-    gh: f.gh, git, plugin, maxPolls: 1, out: () => {} });
+    gh: f.gh, git, plugin, maxPolls: 1, out: text => outputs.push(JSON.parse(text)), homeDir: null });
   try {
     await assert.rejects(run(), /No completed ledger/); assert.equal(reads, 0);
     writeFileSync(path, originalText);
-    await assert.rejects(run(), /완료를 확인하지 못함/);
-    const recovered = JSON.parse(readFileSync(path + '.recovered.v3.json'));
-    assert.equal(recovered.result.findings.unknown, 0);
-    assert.equal(recovered.result.report, original.report);
-    assert.equal(recovered.recovery.parserVersion, 3);
-    await assert.rejects(run(), /완료를 확인하지 못함/);
-    await assert.rejects(run(false), /완료를 확인하지 못함/);
-    assert.equal(reads, 1); assert.equal(f.dispatches.length, 1);
-    const p = await f.publish(recovered.result); f.finish(p);
-    assert.equal(await run(), 0);
+    await assert.rejects(run(), manualRecovery); await assert.rejects(run(), manualRecovery);
+    assert.equal(existsSync(path + '.recovered.v3.json'), false); assert.equal(reads, 0);
+    assert.equal(await run(false), 2);
+    assert.equal(outputs[0].state, 'review-needs-attention'); assert.deepEqual(outputs[0].blockers, ['findings', 'parser-mismatch']);
+    assert.deepEqual(outputs[0].codeFindings, { ...zeroFindings, unknown: 1 });
+    assert.equal(outputs[0].interpretation.current.findings.unknown, 0); assert.equal(outputs[0].interpretation.unexplainedStoredUnknown, 1);
     assert.equal(readFileSync(path, 'utf8'), originalText);
-    assert.ok(JSON.parse(readFileSync(path + '.recovered.v3.json')).recovery.originalLedgerHash);
-    assert.equal(reads, 1); assert.equal(f.comments.length, 1);
+    assert.equal(reads, 0); assert.equal(jobReads, 1); assert.equal(f.dispatches.length, 0); assert.equal(f.comments.length, 0);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -736,7 +736,7 @@ test('PR #28 형태 v2 ledger 복구: 원본 불변·parser v3로 실패를 분�
     assert.equal(await recover(), 2); assert.equal(await recover(), 2);
     assert.equal(readFileSync(w.path, 'utf8'), original);
     const recovered = JSON.parse(readFileSync(w.path + '.recovered.v3.json', 'utf8'));
-    assert.equal(recovered.recovery.parserVersion, 3); assert.equal(recovered.result.v, 3);
+    assert.equal(recovered.recovery.parserVersion, parserVersion); assert.equal(recovered.result.v, 3);
     assert.deepEqual(recovered.result.findings, zeroFindings); assert.equal(recovered.result.report, pr28Report);
     assert.equal(outputs[0].state, 'review-checks-need-attention'); assert.deepEqual(outputs[1], outputs[0]);
     assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 1);
@@ -842,7 +842,7 @@ test('게시 요청 전 v2 복구 파일: 보존한 채 v3로 재해석, 한 번
   await assert.rejects(recover(), /완료를 확인하지 못함/);
   unchanged();
   const recovered = JSON.parse(readFileSync(w.path + '.recovered.v3.json', 'utf8'));
-  assert.equal(recovered.recovery.legacyRecoveredHash, sha256(text)); assert.equal(recovered.recovery.parserVersion, 3);
+  assert.equal(recovered.recovery.legacyRecoveredHash, sha256(text)); assert.equal(recovered.recovery.parserVersion, parserVersion);
   assert.equal(recovered.result.v, 3); assert.deepEqual(recovered.result.findings, zeroFindings);
   assert.ok(recovered.result.reviewerChecks.some(c => c.status === 'skipped'));
   assert.equal(recovered.publicationRequested, true); assert.equal(w.f.dispatches.length, 1);

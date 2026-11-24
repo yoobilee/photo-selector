@@ -3,7 +3,7 @@ import { basename } from 'node:path';
 import { canonical, same, validatePluginResult, localPublicationBlockers, reviewerCheckFailures, localReportsForTarget, verifyEvidenceCi } from './review-evidence-source.mjs';
 import { decide, isReportBody, normalizeNewlines, parseConfirmation, reportHash, sha256 } from './review-gate-core.mjs';
 import { permissionReader } from './review-gate.mjs';
-import { explainReviewText, unknownReasonText } from './review-result-parser.mjs';
+import { analyzeReviewText, explainReviewText, parserVersion, unknownReasonText } from './review-result-parser.mjs';
 
 // 자동 게시가 차단된 독립 리뷰(unknown·리뷰어 로컬 검사 실패)를 관리자가 판단할 수 있게 자료를 준비한다.
 // 기존 완료 ledger와 plugin job 기록은 읽기만 한다. 모델 호출·게시 요청·댓글 작성·승인을 하지 않는다.
@@ -48,8 +48,55 @@ export function writeNewOrSame(files, path, content) {
   return 'created';
 }
 
+// 저장된 결과(리뷰 당시 parser의 해석)와 현재 parser의 재해석을 구분한다(PR #42 독립 검토 지적).
+// 저장된 지적 집계·리뷰어 검사 기록은 바꾸지 않는다. 다르면 자동 게시하지 않고(`parser-mismatch`) 관리자에게 두 해석을 함께 보여 준다.
+// 판정·확인 문구에는 두 해석 중 큰 지적 수(effectiveFindings)를 써서 재해석으로 unknown·지적이 줄어드는 경로를 만들지 않는다.
+const findingLevels = ['critical', 'high', 'medium', 'low', 'unknown'];
+export function interpretStoredResult(result, storedParserVersion = null) {
+  const current = analyzeReviewText(result?.report);
+  const unknownReasons = explainReviewText(result?.report);
+  const stored = result?.findings ?? {};
+  return {
+    consistent: same(result?.findings, current.findings) && same(result?.reviewerChecks, current.reviewerChecks),
+    stored: { parserVersion: storedParserVersion, findings: result?.findings, reviewerChecks: result?.reviewerChecks },
+    current: { parserVersion, findings: current.findings, reviewerChecks: current.reviewerChecks, unknownReasons },
+    effectiveFindings: Object.fromEntries(findingLevels.map(level => [level, Math.max(Number.isSafeInteger(stored[level]) ? stored[level] : 0, current.findings[level])])),
+    // 저장된 unknown 중 현재 parser가 사유를 재현하지 못한 수. 사유가 없어도 저장된 unknown을 지우지 않는다.
+    unexplainedStoredUnknown: Math.max(0, (Number.isSafeInteger(stored.unknown) ? stored.unknown : 0) - unknownReasons.length),
+  };
+}
+
+const checkStatuses = ['passed', 'failed', 'not-run', 'skipped'];
+const validStoredCheck = item => item && typeof item === 'object' && !Array.isArray(item)
+  && same(Object.keys(item).sort(), ['cause', 'count', 'name', 'status']) && typeof item.name === 'string' && item.name.length > 0 && item.name.length <= 500
+  && checkStatuses.includes(item.status) && (item.count === null || (Number.isSafeInteger(item.count) && item.count >= 0))
+  && (item.cause === null || (same(Object.keys(item.cause ?? {}).sort(), ['kind', 'text']) && item.cause.kind === 'environment-claimed' && typeof item.cause.text === 'string'));
+
+// 저장된 결과 검증. 현재 parser와 해석이 같으면 기존 검증(validatePluginResult) 그대로다.
+// 다르면 저장된 집계·검사 기록은 형식만 확인하고, 나머지(대상·출처·원문 hash·형식)는 같은 검증 함수로 확인한다. 결과는 저장된 값 그대로 돌려준다.
+export function validateStoredResult(input, target, implementedBy, storedParserVersion = null) {
+  if (typeof input?.report !== 'string') throw new Error('저장 결과 원문 오류');
+  const interpretation = interpretStoredResult(input, storedParserVersion);
+  if (interpretation.consistent) return { result: validatePluginResult(input, target, implementedBy), interpretation };
+  if (!input.findings || typeof input.findings !== 'object' || !same(Object.keys(input.findings).sort(), [...findingLevels].sort())
+      || Object.values(input.findings).some(n => !Number.isSafeInteger(n) || n < 0)) throw new Error('저장 결과 지적 집계 형식 오류');
+  if (!Array.isArray(input.reviewerChecks) || input.reviewerChecks.length > 200 || !input.reviewerChecks.every(validStoredCheck)) throw new Error('저장 결과 검사 기록 형식 오류');
+  const validated = validatePluginResult({ ...input, findings: interpretation.effectiveFindings, reviewerChecks: interpretation.current.reviewerChecks }, target, implementedBy);
+  return { result: { ...validated, findings: input.findings, reviewerChecks: input.reviewerChecks }, interpretation };
+}
+
+// 출력용 해석 요약. 저장 결과(리뷰 당시)와 현재 재해석을 다른 필드로 둔다.
+export const interpretationSummary = interpretation => ({
+  consistent: interpretation.consistent,
+  stored: { parserVersion: interpretation.stored.parserVersion, findings: interpretation.stored.findings },
+  current: { parserVersion: interpretation.current.parserVersion, findings: interpretation.current.findings, unknownReasons: interpretation.current.unknownReasons,
+    reviewerChecksMatch: same(interpretation.stored.reviewerChecks, interpretation.current.reviewerChecks) },
+  effectiveFindings: interpretation.effectiveFindings, unexplainedStoredUnknown: interpretation.unexplainedStoredUnknown,
+});
+
 // wrapper가 쓰는 ledger(복구 v3가 있으면 그 파일)를 읽기 전용으로 검증한다.
 // 현재 PR 대상(base/head/fingerprint/정책)과 다르거나 게시 요청 기록이 있으면 자료를 만들지 않는다.
+// 이전 parser로 저장한 결과도 읽는다. 저장 결과는 바꾸지 않고 현재 재해석과의 차이(interpretation)를 함께 돌려준다.
 // 차단 여부는 job 로그와 함께 requireBlocked로 판단한다.
 export function readAttentionLedger({ paths, target, implementedBy, files, ignoreLock = false }) {
   if (!ignoreLock && files.exists(paths.lock)) stop('review-attention-busy', '리뷰 wrapper 실행 중 lock 존재');
@@ -65,29 +112,46 @@ export function readAttentionLedger({ paths, target, implementedBy, files, ignor
     stop('review-attention-ledger-invalid', '복구 기록과 원본 ledger 연결 불일치');
   }
   if (ledger.publicationRequested || ledger.publication) stop('review-attention-publication-requested', '이미 게시 요청한 결과');
-  let result;
-  try { result = validatePluginResult(ledger.result, target, implementedBy); } catch { stop('review-attention-ledger-invalid', '완료 결과 형식 오류'); }
-  return { path, ledgerHash: sha256(text), session: ledger.session, result, recovered };
+  // 복구 기록은 복구 시점 parser 버전, 원래 ledger는 기록한 parser 버전(이 변경 이전 wrapper는 기록하지 않음)을 쓴다.
+  const storedParserVersion = (recovered ? ledger.recovery?.parserVersion : ledger.parserVersion) ?? null;
+  let validated;
+  try { validated = validateStoredResult(ledger.result, target, implementedBy, storedParserVersion); } catch { stop('review-attention-ledger-invalid', '완료 결과 형식 오류'); }
+  return { path, ledgerHash: sha256(text), session: ledger.session, result: validated.result, interpretation: validated.interpretation, recovered, storedParserVersion };
 }
 
 // job 실행 기록 기준 자동 게시 차단 사유(Issue #41). 원문이 지적 없음·검사 통과로 해석돼도
 // 로그를 확인할 수 없거나 exit 0이 아닌 명령, 완료 기록 없는 명령, 실행 여부를 구분할 수 없는 줄이 있으면 게시하지 않는다.
 // 로그의 명령은 96자에서 잘리고 출력이 없어 실패 원인을 판단할 수 없다. 원인 미상 실패를 통과로 처리하지 않는다.
+// 명령 개수만으로는 판단하지 않는다(PR #42 독립 검토 지적). 0바이트·시작 이벤트만 남은·중간에 잘린 로그도 명령 목록은 비어 있다.
+// 리뷰 시작부터 원문 기록·최종 출력까지 완료 증거(completion)가 모두 있어야 "명령 없이 정상 종료"로 본다.
+export const jobLogCompleted = jobLog => Boolean(jobLog?.completion?.reviewStarted && jobLog.completion.reviewOutput && jobLog.completion.finalOutput);
 export function jobLogBlockers(jobLog) {
   if (jobLog?.status !== 'captured') return ['job-log-unverified'];
   const blockers = [];
   if (jobLog.commands.some(item => item.status !== 'completed' || item.exitCode !== 0)) blockers.push('job-command-failed');
   if (jobLog.unfinished.length || jobLog.ambiguous.length) blockers.push('job-log-incomplete');
+  if (!jobLogCompleted(jobLog)) blockers.push('job-log-not-completed');
   return blockers;
 }
-export const attentionBlockers = (result, jobLog) => [...localPublicationBlockers(result), ...jobLogBlockers(jobLog)];
-export function requireBlocked(result, jobLog) {
-  const blockers = attentionBlockers(result, jobLog);
+// 원문 기준 차단 사유. 저장 결과와 현재 재해석이 같으면 기존 판정(localPublicationBlockers)과 같다.
+// 다르면 두 해석 중 하나라도 지적·unknown·검사 실패가 있으면 차단하고 `parser-mismatch`를 더한다.
+export function reportBlockers(result, interpretation = interpretStoredResult(result)) {
+  if (interpretation.consistent) return localPublicationBlockers(result);
+  const blockers = [];
+  if (['critical', 'high', 'medium', 'unknown'].some(level => interpretation.effectiveFindings[level] !== 0)) blockers.push('findings');
+  if ([...result.reviewerChecks, ...interpretation.current.reviewerChecks].some(item => item.status === 'failed')) blockers.push('reviewer-check-failed');
+  blockers.push('parser-mismatch');
+  return blockers;
+}
+export const attentionBlockers = (result, jobLog, interpretation = interpretStoredResult(result)) => [...reportBlockers(result, interpretation), ...jobLogBlockers(jobLog)];
+export function requireBlocked(result, jobLog, interpretation = interpretStoredResult(result)) {
+  const blockers = attentionBlockers(result, jobLog, interpretation);
   if (!blockers.length) stop('review-attention-not-blocked', '자동 게시 대상 결과');
   return blockers;
 }
 export const blockedState = blockers => blockers.includes('findings') ? 'review-needs-attention'
-  : blockers.includes('reviewer-check-failed') ? 'review-checks-need-attention' : 'review-job-log-needs-attention';
+  : blockers.includes('reviewer-check-failed') ? 'review-checks-need-attention'
+    : blockers.includes('parser-mismatch') ? 'review-parser-needs-attention' : 'review-job-log-needs-attention';
 
 // plugin job 로그(Codex 명령 실행 기록). codex-companion 1.0.6은 이벤트 줄을 빈 줄 없이 쓰고,
 // 리뷰어가 쓴 글(Assistant message·Review output·Reasoning summary·Final output 등)은 빈 줄 + 제목 줄로 시작하는 블록으로 쓴다.
@@ -97,11 +161,42 @@ const timestamp = String.raw`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z`;
 const completedLine = new RegExp(`^\\[(${timestamp})\\] Command ([A-Za-z]+): (.+) \\(exit (-?\\d+|\\?)\\)$`);
 const startedLine = new RegExp(`^\\[(${timestamp})\\] Running command: (.+)$`);
 const blockTitleLine = new RegExp(`^\\[${timestamp}\\] (?:Final output|Assistant message|Review output|Reasoning summary|Subagent .+ (?:message|reasoning summary))$`);
+const eventLine = new RegExp(`^\\[${timestamp}\\] `);
+const event = text => new RegExp(`^\\[${timestamp}\\] ${text}$`);
+const jobStartLine = event(String.raw`Starting Codex Review\.`);
+const reviewerStartedLine = event('Reviewer started: .+');
+const reviewCapturedLine = event(String.raw`Review output captured\.`);
+const reviewOutputTitle = event('Review output');
+const finalOutputTitle = event('Final output');
 
-export function parseJobCommands(log) {
+// 리뷰 완료 증거. codex-companion 1.0.6은 job 시작 시 "Starting Codex Review."를 쓰고, 리뷰어가 시작하면 "Reviewer started: …",
+// 리뷰가 끝나면 "Review output captured." 직후 리뷰 원문 블록(Review output)을, job 완료 기록 뒤 마지막으로 Final output 블록을 쓴다.
+// 실제 로그 6건(PR #37·#40·#42) 모두 이 구조였고 Review output 본문은 저장된 원문과 같았다.
+// 하나라도 없으면 기록 유실·잘림 또는 다른 job의 로그일 수 있어 완료로 보지 않는다.
+function jobCompletion(lines, report) {
+  const expected = typeof report === 'string' ? normalizeNewlines(report).trim() : null;
+  const firstBlank = lines.findIndex(line => !line.trim() || blockTitleLine.test(line));
+  const trustedEnd = firstBlank < 0 ? lines.length : firstBlank;
+  const trusted = lines.slice(0, trustedEnd);
+  const reviewStarted = jobStartLine.test(trusted[0] ?? '') && trusted.some(line => reviewerStartedLine.test(line));
+  let reviewOutput = false;
+  if (expected && reviewCapturedLine.test(trusted.at(-1) ?? '') && lines[trustedEnd] === '' && reviewOutputTitle.test(lines[trustedEnd + 1] ?? '')) {
+    const body = [];
+    for (let i = trustedEnd + 2; i < lines.length && !eventLine.test(lines[i]); i++) body.push(lines[i]);
+    reviewOutput = body.join('\n').trim() === expected;
+  }
+  // 마지막 블록이 Final output이고 그 본문에 원문이 있어야 한다. 그 뒤에 다른 블록이 있으면 완료로 보지 않는다.
+  let lastBlock = -1;
+  for (let i = 1; i < lines.length; i++) if (lines[i - 1] === '' && blockTitleLine.test(lines[i])) lastBlock = i;
+  const finalOutput = Boolean(expected) && lastBlock > 0 && finalOutputTitle.test(lines[lastBlock]) && lines.slice(lastBlock + 1).join('\n').includes(expected);
+  return { reviewStarted, reviewOutput, finalOutput };
+}
+
+export function parseJobCommands(log, report = null) {
   const commands = []; const unfinished = []; const ambiguous = [];
   let trusted = true;
-  for (const line of normalizeNewlines(log).split('\n')) {
+  const lines = normalizeNewlines(log).split('\n');
+  for (const line of lines) {
     if (!line.trim() || blockTitleLine.test(line)) { trusted = false; continue; }
     if (!trusted) {
       const looks = completedLine.exec(line) ?? startedLine.exec(line);
@@ -118,7 +213,7 @@ export function parseJobCommands(log) {
     const started = startedLine.exec(line);
     if (started) unfinished.push(started[2]);
   }
-  return { commands, unfinished, ambiguous };
+  return { commands, unfinished, ambiguous, completion: jobCompletion(lines, report) };
 }
 
 const jobMatches = (job, source) => job && job.id === source.jobId && job.threadId === source.threadId && job.turnId === source.turnId
@@ -132,7 +227,7 @@ export function loadJobLog({ paths, result, files }) {
   if (snapshot?.v !== 1 || !jobMatches(snapshot, result.source) || typeof snapshot.log !== 'string' || sha256(snapshot.log) !== snapshot.logSha256) {
     return { status: 'invalid', reason: 'job 로그 사본이 ledger의 job·원문과 일치하지 않거나 손상됐습니다.' };
   }
-  return { status: 'captured', logSha256: snapshot.logSha256, capturedAt: snapshot.capturedAt, ...parseJobCommands(snapshot.log) };
+  return { status: 'captured', logSha256: snapshot.logSha256, capturedAt: snapshot.capturedAt, ...parseJobCommands(snapshot.log, result.report) };
 }
 
 // 차단 직후 기존 job 기록만 조회해 로그 사본을 남긴다. `result <job>`은 저장된 결과 조회이며 리뷰를 실행하지 않는다.
@@ -154,7 +249,7 @@ export function captureJobLog({ plugin, result, paths, files, now }) {
   const snapshot = { v: 1, id: source.jobId, threadId: source.threadId, turnId: source.turnId, completedAt: source.completedAt,
     outputHash: source.outputHash, capturedAt: now(), logSha256: sha256(log), log };
   files.writeNew(paths.jobLog, JSON.stringify(snapshot));
-  return { status: 'captured', logSha256: snapshot.logSha256, capturedAt: snapshot.capturedAt, ...parseJobCommands(log) };
+  return { status: 'captured', logSha256: snapshot.logSha256, capturedAt: snapshot.capturedAt, ...parseJobCommands(log, result.report) };
 }
 
 // 초안 marker. 같은 대상·ledger·원문·job에서 만든 초안만 `/review-gate` 준비에 쓴다.
@@ -191,7 +286,13 @@ const blockerText = {
   'job-log-unverified': '`job-log-unverified`: plugin job 실행 기록을 확보·대조하지 못함(4절)',
   'job-command-failed': '`job-command-failed`: job 기록에 exit 0이 아니거나 종료 코드가 없는 명령이 있음. 명령이 잘리고 출력이 없어 원인을 판단할 수 없음(4절)',
   'job-log-incomplete': '`job-log-incomplete`: job 기록에 완료 기록 없는 명령 또는 실행 여부를 구분할 수 없는 명령 형식 줄이 있음(4절)',
+  'job-log-not-completed': '`job-log-not-completed`: job 기록에 리뷰 시작·원문 기록·최종 출력의 완료 증거가 모두 있지 않음. 빈 로그·잘린 로그·다른 job 로그일 수 있으며 명령 0건을 미실행이나 정상 종료로 보지 않음(4절)',
+  'parser-mismatch': '`parser-mismatch`: 리뷰 당시 저장된 해석(지적 집계·리뷰어 검사)과 현재 parser 재해석이 다름. 저장 결과를 유지하고 재해석으로 바꾸거나 게시하지 않음(2·3절)',
 };
+const completionText = completion => [['리뷰 시작(Starting Codex Review·Reviewer started)', completion?.reviewStarted],
+  ['리뷰 원문 기록(Review output captured + 원문 일치)', completion?.reviewOutput], ['최종 출력(마지막 Final output 블록, 원문 포함)', completion?.finalOutput]]
+  .map(([name, ok]) => `${name} ${ok ? '있음' : '없음'}`).join(', ');
+const parserLabel = version => version ? `parser v${version}` : 'parser 버전 기록 없음(이 기록을 남기기 이전 wrapper)';
 
 const cell = text => String(text).replace(/\|/g, '\\|').replace(/\n/g, ' ');
 const code = text => {
@@ -219,16 +320,21 @@ export function jobLogSummary(jobLog, homeDir = null) {
   const failed = jobLog.commands.filter(item => item.status !== 'completed' || item.exitCode !== 0);
   return { status: 'captured', reason: null, commands: jobLog.commands.length,
     failedCommands: failed.slice(0, 20).map(item => ({ command: redact(item.command), status: item.status, exitCode: item.exitCode, truncated: item.truncated })),
-    failedCommandCount: failed.length, unfinished: jobLog.unfinished.length, ambiguous: jobLog.ambiguous.length };
+    failedCommandCount: failed.length, unfinished: jobLog.unfinished.length, ambiguous: jobLog.ambiguous.length,
+    completed: jobLogCompleted(jobLog), completion: { ...jobLog.completion } };
 }
 
 // unknown 사유 한 줄 표시. 발췌는 리뷰 원문의 일부다.
 export const unknownReasonLine = reason => `${unknownReasonText[reason.kind] ?? reason.kind}${reason.excerpt ? `: ${code(clip(reason.excerpt, 200))}` : ''}${reason.checks ? `: ${reason.checks.map(code).join(', ')}` : ''}`;
 
-function uncertainties({ result, jobLog, remoteChecks }) {
+function uncertainties({ result, jobLog, remoteChecks, interpretation }) {
   const items = [];
-  const failures = reviewerCheckFailures(result);
-  if (result.findings.unknown) items.push(`unknown ${result.findings.unknown}건: 원문 일부가 자동 해석 문법 밖이거나, 원인 미상 검사 실패·사용량 한도·형식 이상 표현이 있습니다. 결함 없음이나 검사 성공을 뜻하지 않습니다.`);
+  // 저장 결과와 현재 재해석의 검사 실패를 모두 보여 준다. 같은 항목은 한 번만 쓴다.
+  const failures = [...reviewerCheckFailures(result), ...interpretation.current.reviewerChecks.filter(item => item.status === 'failed')]
+    .filter((item, index, all) => all.findIndex(other => same(other, item)) === index);
+  const unknown = interpretation.effectiveFindings.unknown;
+  if (unknown) items.push(`unknown ${unknown}건: 원문 일부가 자동 해석 문법 밖이거나, 원인 미상 검사 실패·사용량 한도·형식 이상 표현이 있습니다. 결함 없음이나 검사 성공을 뜻하지 않습니다.`);
+  if (!interpretation.consistent) items.push(`리뷰 당시 저장된 해석(${parserLabel(interpretation.stored.parserVersion)})과 현재 parser v${interpretation.current.parserVersion} 재해석이 다릅니다. 어느 해석도 실행 증명이 아니며, 재해석 결과로 저장된 unknown·검사 기록을 대체하지 않았습니다.`);
   for (const item of failures) {
     items.push(item.cause
       ? `${code(item.name)} 실패의 환경 원인("${cell(item.cause.text)}")은 리뷰어의 주장이며 확인되지 않았습니다.`
@@ -236,6 +342,7 @@ function uncertainties({ result, jobLog, remoteChecks }) {
   }
   if (jobLog.status !== 'captured') items.push(`job 실행 기록 확인 불가: ${jobLog.reason}`);
   else {
+    if (!jobLogCompleted(jobLog)) items.push('job 로그에 리뷰 완료 증거가 모두 있지 않아 기록 유실·잘림 또는 다른 job 로그일 가능성을 배제할 수 없습니다. 명령 기록이 없거나 적어도 미실행·정상 종료로 보지 않습니다.');
     if (jobLog.commands.some(item => item.truncated)) items.push('job 로그의 명령 문자열은 96자에서 잘립니다(`...`로 끝나는 항목). Windows에서는 셸 경로가 앞에 붙어 실제 명령이 잘려 5절 표에 "기록 없음"으로 보일 수 있으니 4절 전체 명령 표를 함께 확인하세요.');
     if (jobLog.unfinished.length) items.push(`완료 기록 없이 시작만 기록된 명령 ${jobLog.unfinished.length}건이 있습니다.`);
     const failed = jobLog.commands.filter(item => item.exitCode !== 0);
@@ -255,12 +362,16 @@ function uncertainties({ result, jobLog, remoteChecks }) {
 export const maxDraftChars = 60_000;
 export function buildAttentionDraft(input, listLimit = maxListedCommands) {
   const { target, risk, implementedBy, result, blockers, ledger, jobLog, remoteChecks, homeDir = null } = input;
+  const interpretation = input.interpretation ?? ledger.interpretation ?? interpretStoredResult(result, ledger.storedParserVersion ?? null);
   const key = draftKey({ target, ledgerHash: ledger.ledgerHash, result });
   const redact = redactor(homeDir);
   const f = result.findings;
+  const current = interpretation.current;
+  const effective = interpretation.effectiveFindings;
   const state = blockedState(blockers);
-  const reasons = explainReviewText(result.report);
-  const blocking = blockingLevels.reduce((sum, level) => sum + f[level], 0);
+  const reasons = current.unknownReasons;
+  const blocking = blockingLevels.reduce((sum, level) => sum + effective[level], 0);
+  const findingsRow = (label, value) => `| ${label} | ${value.critical} | ${value.high} | ${value.medium} | ${value.low} | ${value.unknown} |`;
   const lines = [
     '# 독립 리뷰 보고서', '', `<!-- ${draftMarker} ${key} -->`, '',
     '> **관리자 검토 초안(자동 생성)**: Codex 독립 리뷰의 자동 게시가 차단되어 기존 완료 ledger와 job 기록으로 만든 자료입니다. 관리자가 원문과 기록을 확인하고 "8. 관리자 판단"을 직접 작성한 뒤 본인 계정으로 게시합니다. 이 초안은 관리자 확인·`/review-gate`·병합 승인이 아닙니다.',
@@ -273,25 +384,38 @@ export function buildAttentionDraft(input, listLimit = maxListedCommands) {
     `- Codex job: \`${result.source.jobId}\` (thread \`${result.source.threadId}\`, turn \`${result.source.turnId}\`)`,
     `- 리뷰 시작·완료: ${result.source.startedAt} → ${result.source.completedAt}`,
     `- 리뷰 원문 SHA-256: \`${result.source.outputHash}\` (ledger 기록값과 재계산 일치)`,
-    `- 로컬 ledger: \`${basename(ledger.path)}\` (SHA-256 \`${ledger.ledgerHash}\`, 상태 completed, 게시 요청 기록 없음${ledger.recovered ? ', parser v3 복구 기록' : ''})`,
+    `- 로컬 ledger: \`${basename(ledger.path)}\` (SHA-256 \`${ledger.ledgerHash}\`, 상태 completed, 게시 요청 기록 없음${ledger.recovered ? `, 복구 기록(복구 시 ${parserLabel(ledger.storedParserVersion)})` : ''})`,
     '', '## 1. 자동 게시 차단 사유', '', `- 상태: \`${state}\``, '- 차단 항목:',
     ...blockers.map(item => `  - ${blockerText[item] ?? code(item)}`),
     '- wrapper는 fail-closed 정책에 따라 게시를 요청하지 않았습니다. 새 리뷰·자동 재시도·결과 수정·실패 기록 삭제를 하지 않았습니다.',
     '', '## 2. 코드 지적 (리뷰 원문 집계)', '',
-    '| Critical | High | Medium | Low | Unknown |', '|---|---|---|---|---|', `| ${f.critical} | ${f.high} | ${f.medium} | ${f.low} | ${f.unknown} |`, '',
+    '| 해석 | Critical | High | Medium | Low | Unknown |', '|---|---|---|---|---|---|',
+    findingsRow(`리뷰 당시 저장 결과 (${parserLabel(interpretation.stored.parserVersion)})`, f),
+    findingsRow(`현재 parser v${current.parserVersion} 재해석 (참고, 저장 결과를 바꾸지 않음)`, current.findings), '',
+    interpretation.consistent ? '- 저장 결과와 현재 parser 재해석(지적 집계·리뷰어 검사)이 같습니다.'
+      : '- 저장 결과와 현재 parser 재해석이 다릅니다(`parser-mismatch`). 저장 결과를 유지하고 자동 게시하지 않습니다. 판정·확인 문구에는 두 해석 중 큰 지적 수를 씁니다.',
     blocking ? `- 차단 지적 ${blocking}건이 있습니다. 이 리뷰로 통과 확인을 만들 수 없으며 수정 후 새 HEAD를 다시 리뷰해야 합니다.`
       : '- critical/high/medium 지적은 없습니다. unknown은 결함 없음이나 검사 성공을 뜻하지 않습니다.',
   ];
-  if (reasons.length) lines.push('- unknown 사유(현재 parser 자동 진단, 발췌는 리뷰 원문 일부):', ...reasons.map(reason => `  - ${unknownReasonLine(reason)}`));
+  if (reasons.length) lines.push(`- unknown 사유(현재 parser v${current.parserVersion} 재해석 진단, 발췌는 리뷰 원문 일부):`, ...reasons.map(reason => `  - ${unknownReasonLine(reason)}`));
+  if (interpretation.unexplainedStoredUnknown) {
+    lines.push(`- 저장된 unknown ${f.unknown}건 중 ${interpretation.unexplainedStoredUnknown}건은 현재 parser로 사유를 재현할 수 없습니다. 리뷰 당시 판정이므로 유지하며 결함 없음·검사 통과로 보지 않습니다. 부록의 원문을 직접 확인하세요.`);
+  }
+  const checkTable = checks => ['| 검사 | 결과 | 개수 | 원인 주장 |', '|---|---|---|---|',
+    ...checks.map(item => `| ${cellCode(item.name)} | ${checkStatus[item.status] ?? cell(item.status)} | ${item.count ?? '-'} | ${item.cause ? `${cell(item.cause.text)} (확인 안 됨)` : '-'} |`)];
   lines.push('', '## 3. 리뷰어가 원문에 보고한 로컬 검사 (주장, 실행 증명 아님)', '');
-  if (result.reviewerChecks.length) {
-    lines.push('| 검사 | 결과 | 개수 | 원인 주장 |', '|---|---|---|---|');
-    for (const item of result.reviewerChecks) lines.push(`| ${cellCode(item.name)} | ${checkStatus[item.status] ?? cell(item.status)} | ${item.count ?? '-'} | ${item.cause ? `${cell(item.cause.text)} (확인 안 됨)` : '-'} |`);
-  } else lines.push('- 자동 해석된 검사 문장이 없습니다. 부록의 원문을 직접 확인하세요.');
-  if (f.unknown) lines.push('', '- 원문 일부가 자동 해석 문법 밖이므로 이 표에 없는 검사 주장이 원문에 있을 수 있습니다.');
+  if (result.reviewerChecks.length) lines.push(...checkTable(result.reviewerChecks));
+  else lines.push('- 자동 해석된 검사 문장이 없습니다. 부록의 원문을 직접 확인하세요.');
+  if (!same(result.reviewerChecks, current.reviewerChecks)) {
+    lines.push('', `- 위 표는 리뷰 당시 저장된 기록입니다. 현재 parser v${current.parserVersion}로 다시 해석한 검사는 아래와 같으며 참고용입니다(저장 기록을 바꾸지 않음).`, '');
+    if (current.reviewerChecks.length) lines.push(...checkTable(current.reviewerChecks));
+    else lines.push('- 현재 parser로 해석된 검사 문장이 없습니다.');
+  }
+  if (effective.unknown) lines.push('', '- 원문 일부가 자동 해석 문법 밖이므로 이 표에 없는 검사 주장이 원문에 있을 수 있습니다.');
   lines.push('', '## 4. 리뷰어 job 실행 기록 (plugin 로컬 로그)', '');
   if (jobLog.status === 'captured') {
-    lines.push(`- 로그 사본 SHA-256: \`${jobLog.logSha256}\` (저장 ${jobLog.capturedAt})`, '');
+    lines.push(`- 로그 사본 SHA-256: \`${jobLog.logSha256}\` (저장 ${jobLog.capturedAt})`,
+      `- 리뷰 완료 증거: ${completionText(jobLog.completion)}`, '');
     if (jobLog.commands.length) {
       lines.push('| 시각 | 명령 | 결과 |', '|---|---|---|');
       for (const item of jobLog.commands.slice(0, listLimit)) lines.push(`| ${item.at} | ${cellCode(redact(item.command))} | ${exitText(item)} |`);
@@ -316,7 +440,7 @@ export function buildAttentionDraft(input, listLimit = maxListedCommands) {
   if (reportedNotRun.length) lines.push(`- 리뷰어가 원문에서 미실행·건너뜀으로 보고: ${reportedNotRun.map(item => `${code(item.name)}(${checkStatus[item.status]})`).join(', ')}`);
   lines.push('', '## 6. 원격 CI (GitHub API, 초안 생성 시점의 현재 HEAD)', '', '| 검사 | 상태 |', '|---|---|');
   for (const item of remoteChecks) lines.push(`| ${cell(item.name)} | ${cell(item.state)} |`);
-  lines.push('', '## 7. 불확실성', '', ...uncertainties({ result, jobLog, remoteChecks }).map(item => `- ${item}`));
+  lines.push('', '## 7. 불확실성', '', ...uncertainties({ result, jobLog, remoteChecks, interpretation }).map(item => `- ${item}`));
   lines.push('', '## 8. 관리자 판단 (관리자 작성)', '',
     '> 아래 항목을 확인하고 판단을 작성하세요. 자동 생성 부분은 수정하지 않는 것을 권장합니다. marker·대상 SHA·원문이 없거나 바뀌면 `/review-gate` 준비 도구가 거부합니다.', '',
     blocking ? '- [ ] 차단 지적을 수정하고 새 HEAD를 다시 리뷰할 계획' : '- [ ] critical/high/medium 지적 0건과 리뷰 완료 기록을 인정하는가',
@@ -363,12 +487,14 @@ export async function prepareAttentionConfirmation({ github, packet, state, ledg
   if (!isReportBody(body) || !body.includes(target.head) || !body.includes(target.base) || !body.includes(`<!-- ${draftMarker} ${key} -->`)
       || !body.includes(ledger.result.report)) stop('review-attention-comment-invalid', '초안 marker·대상 SHA·원문 불일치');
   if (localReportsForTarget(state.comments, target).length) stop('review-attention-bot-report', '같은 대상의 봇 보고서가 이미 있음');
-  if (state.evaluation.blocked || blockingLevels.some(level => ledger.result.findings[level] !== 0)) stop('review-attention-blocking-findings', '미해결 차단 지적');
+  // 저장 결과와 현재 재해석 중 큰 지적 수를 쓴다. 해석이 같으면 저장 결과와 같다. 재해석으로 unknown·지적을 줄이지 않는다.
+  const findings = (ledger.interpretation ?? interpretStoredResult(ledger.result, ledger.storedParserVersion ?? null)).effectiveFindings;
+  if (state.evaluation.blocked || blockingLevels.some(level => findings[level] !== 0)) stop('review-attention-blocking-findings', '미해결 차단 지적');
   if (ledger.result.reviewer !== description.reviewer) stop('review-attention-gate-mismatch', 'reviewer 불일치');
   try { await verifyEvidenceCi({ github, repo: state.repo, pr: state.current, config: state.config, checkRuns: state.checkRuns }); } catch { stop('review-attention-ci', '필수 CI 미통과·출처 불명확'); }
   const evidenceHash = reportHash(body);
   const confirmation = { fingerprint: target.fingerprint, decision: 'pass', reviewer: description.reviewer, reviewComplete: true,
-    evidence: `${prefix}${id}`, evidenceHash, findings: ledger.result.findings };
+    evidence: `${prefix}${id}`, evidenceHash, findings };
   // 기존 게이트 판정 함수로 같은 형식이 통과 조건을 만족하는지 미리 확인한다. 실제 판정은 관리자 게시 후 게이트가 한다.
   if (decide(description, confirmation, { body, hash: evidenceHash }).state !== 'success') stop('review-attention-gate-mismatch', '게이트 형식 불일치');
   // 게이트는 가장 최근 관리자 `/review-gate`만 확인으로 읽는다. 게이트가 실제로 고른 댓글과 같을 때만 완료로 안내한다.
@@ -378,5 +504,5 @@ export async function prepareAttentionConfirmation({ github, packet, state, ledg
   const existingConfirmationId = effective && same(parseConfirmation(effective.body), confirmation) ? effective.id : null;
   return { state: existingConfirmationId ? 'already-confirmed' : 'awaiting-admin-post', target, commentId: comment.id, commentUrl: confirmation.evidence,
     evidenceHash, confirmation, existingConfirmationId, text: `/review-gate\n\`\`\`json\n${JSON.stringify(confirmation, null, 2)}\n\`\`\``,
-    unknown: ledger.result.findings.unknown, published: false, approved: false };
+    unknown: findings.unknown, published: false, approved: false };
 }

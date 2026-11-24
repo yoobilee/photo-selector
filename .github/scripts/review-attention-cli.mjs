@@ -5,8 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { createEvidenceGitHub } from './review-evidence-cli.mjs';
 import { collectReviewPacket } from './review-evidence.mjs';
 import { attentionPaths, ledgerFileName, readAttentionLedger, loadJobLog, requireBlocked, buildAttentionDraft, writeNewOrSame, adminNextSteps,
-  prepareAttentionConfirmation, nodeFiles, jobLogSummary } from './review-attention.mjs';
-import { explainReviewText } from './review-result-parser.mjs';
+  prepareAttentionConfirmation, nodeFiles, jobLogSummary, interpretationSummary } from './review-attention.mjs';
 import { sha256 } from './review-gate-core.mjs';
 
 export const attentionUsage = '사용법: npm run review:attention -- owner/repo PR번호 [--confirm <관리자가 게시한 보고서 댓글 URL 또는 ID>]';
@@ -28,8 +27,7 @@ export function attentionFailureMessage(error) {
     'review-attention-ledger-invalid': '완료 ledger가 현재 PR 대상(base/head/fingerprint/정책)과 다르거나 형식·복구 연결이 맞지 않습니다. ledger를 수정하지 않았으며 이전 결과를 현재 대상에 연결하지 않습니다.',
     'review-attention-publication-requested': '이 결과는 이미 봇 게시를 요청했습니다. 관리자 초안 대신 실제 Actions·봇 댓글·영수증을 확인하세요.',
     'review-attention-not-blocked': '자동 게시가 차단되지 않은 결과입니다. 기존 npm run review:publish 흐름을 사용하세요.',
-    'review-recovery-manual': '이전 형식(v2) 복구 기록이 있어 사람이 먼저 확인해야 합니다. 기존 파일은 수정하지 않았습니다.',
-    'review-attention-comment-invalid': '지정한 댓글이 이 PR의 관리자 검토 초안이 아니거나 marker·대상 SHA·리뷰 원문이 현재 ledger와 맞지 않습니다. 초안을 다시 만들고 원문·marker를 유지해 게시하세요.',
+    'review-recovery-manual': '이전 형식(v2) 복구 기록이 있어 사람이 먼저 확인해야 합니다. 기존 파일은 수정하지 않았습니다.',    'review-attention-comment-invalid': '지정한 댓글이 이 PR의 관리자 검토 초안이 아니거나 marker·대상 SHA·리뷰 원문이 현재 ledger와 맞지 않습니다. 초안을 다시 만들고 원문·marker를 유지해 게시하세요.',
     'review-attention-not-admin': '지정한 댓글은 관리자(admin/maintain) 사용자가 직접 게시한 것이 아닙니다. 봇·다른 사용자의 댓글로 확인 문구를 만들지 않습니다.',
     'review-attention-bot-report': '같은 대상의 봇 보고서가 이미 있습니다. 관리자 초안과 섞지 말고 기존 봇 보고서·영수증을 확인하세요.',
     'review-attention-blocking-findings': '미해결 critical/high/medium 지적 또는 변경 요청 리뷰가 있어 통과 확인 문구를 만들지 않습니다. 수정 후 새 HEAD를 리뷰하세요.',
@@ -55,14 +53,15 @@ export async function runAttentionCli({ argv, gh, git, files = nodeFiles, out = 
     const ledger = readAttentionLedger({ paths, target, implementedBy: description.meta['implemented-by'], files });
     // 원문 해석과 저장한 job 로그 사본 기준으로 자동 게시가 차단된 결과만 다룬다. 확인 문구 준비도 같다.
     const jobLog = loadJobLog({ paths, result: ledger.result, files });
-    const blockers = requireBlocked(ledger.result, jobLog);
+    const blockers = requireBlocked(ledger.result, jobLog, ledger.interpretation);
     if (options.confirm === null) {
       const draft = buildAttentionDraft({ target, risk: description.risk, implementedBy: description.meta['implemented-by'], result: ledger.result,
         blockers, ledger, jobLog, remoteChecks: packet.checks, homeDir });
       const draftPath = paths.draft(draft.sha256);
       writeNewOrSame(files, draftPath, draft.body);
+      // codeFindings는 리뷰 당시 저장 결과, interpretation.current는 현재 parser 재해석이다.
       out(JSON.stringify({ state: 'admin-draft-ready', draftPath, draftSha256: draft.sha256, draftKey: draft.key, blockedState: draft.state,
-        blockers, codeFindings: ledger.result.findings, unknownReasons: explainReviewText(ledger.result.report), jobLog: jobLogSummary(jobLog, homeDir),
+        blockers, codeFindings: ledger.result.findings, interpretation: interpretationSummary(ledger.interpretation), jobLog: jobLogSummary(jobLog, homeDir),
         nextSteps: adminNextSteps({ target, draftPath }), published: false, approved: false }, null, 2));
       return 0;
     }

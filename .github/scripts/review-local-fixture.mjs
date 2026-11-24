@@ -21,20 +21,23 @@ export const pr40FinalReport = 'No actionable regressions were identified in the
 // codex-companion 1.0.6 job 로그 형식. Windows에서는 명령이 powershell 경로로 감싸지고 96자에서 잘린다.
 const shell = '"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe" -Command ';
 const commandLines = (at, command, ending) => [`[${at[0]}] Running command: ${shell}${command}`, `[${at[1]}] ${ending.replace('$', () => `${shell}${command}`)}`];
-const reviewBlocks = report => ['[2026-11-22T02:44:31.916Z] Review output captured.', '', '[2026-11-22T02:44:31.916Z] Review output', report,
-  '[2026-11-22T02:44:32.235Z] Reviewer finished.', '', '[2026-11-22T02:44:32.542Z] Final output', '# Codex Review', '', report, ''];
-const jobLogStart = ['[2026-11-22T02:42:51.655Z] Starting Codex Review.', '[2026-11-22T02:42:53.787Z] Thread ready (thread-1).'];
+// 리뷰 완료 증거: "Review output captured." 직후 원문 블록, 마지막 Final output 블록(실제 로그 6건과 같은 순서). extra는 그 사이의 리뷰어 글 블록이다.
+export const jobLogEnd = (report, extra = []) => ['[2026-11-22T02:44:31.916Z] Review output captured.', '', '[2026-11-22T02:44:31.916Z] Review output', report,
+  '[2026-11-22T02:44:32.235Z] Reviewer finished.', ...extra, '', '[2026-11-22T02:44:32.542Z] Final output', '# Codex Review', '', 'Target: branch diff against base', '', report, ''];
+// job 시작 증거: "Starting Codex Review."로 시작하고 "Reviewer started: …"가 있다.
+export const jobLogStart = ['[2026-11-22T02:42:51.655Z] Starting Codex Review.', '[2026-11-22T02:42:52.100Z] Starting Codex review thread.',
+  '[2026-11-22T02:42:53.787Z] Thread ready (thread-1).', "[2026-11-22T02:42:54.010Z] Reviewer started: changes against 'base'"];
+// 완료 증거를 모두 갖춘 job 로그. events는 시작과 원문 기록 사이의 명령 이벤트 줄이다.
+export const completeJobLog = (report, events = [], extra = []) => [...jobLogStart, ...events, ...jobLogEnd(report, extra)].join('\n');
 // 모든 명령이 exit 0으로 끝난 로그(PR #37 최종 job과 같은 형태).
-export const cleanJobLog = (report = pr37FinalReport) => [...jobLogStart,
+export const cleanJobLog = (report = pr37FinalReport) => completeJobLog(report, [
   ...commandLines(['2026-11-22T02:43:00.390Z', '2026-11-22T02:43:00.806Z'], "'git status --short...", 'Command completed: $ (exit 0)'),
-  ...commandLines(['2026-11-22T02:43:05.373Z', '2026-11-22T02:43:05.731Z'], '"node --test --test...', 'Command completed: $ (exit 0)'),
-  ...reviewBlocks(report)].join('\n');
+  ...commandLines(['2026-11-22T02:43:05.373Z', '2026-11-22T02:43:05.731Z'], '"node --test --test...', 'Command completed: $ (exit 0)')]);
 // PR #40 최종 job에서 관찰한 exit 1 명령 2건(잘린 명령, 출력 없음).
-export const pr40FinalJobLog = (report = pr40FinalReport) => [...jobLogStart,
+export const pr40FinalJobLog = (report = pr40FinalReport) => completeJobLog(report, [
   ...commandLines(['2026-11-22T02:43:00.390Z', '2026-11-22T02:43:00.806Z'], "'git status --short...", 'Command completed: $ (exit 0)'),
   ...commandLines(['2026-11-22T02:43:40.974Z', '2026-11-22T02:43:43.191Z'], `"git grep -n -F 'RE...`, 'Command failed: $ (exit 1)'),
-  ...commandLines(['2026-11-22T02:43:51.357Z', '2026-11-22T02:43:51.496Z'], '"node --input-type=...', 'Command failed: $ (exit 1)'),
-  ...reviewBlocks(report)].join('\n');
+  ...commandLines(['2026-11-22T02:43:51.357Z', '2026-11-22T02:43:51.496Z'], '"node --input-type=...', 'Command failed: $ (exit 1)')]);
 
 export function localFixture() {
   const fake = createFake({ risk: 'high', implementedBy: 'claude', gate: false, approval: 'none', codex: 'none', requests: 0 });

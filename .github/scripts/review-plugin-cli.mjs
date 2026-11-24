@@ -6,13 +6,14 @@ import { collectReviewPacket, prepareLocalConfirmation } from './review-evidence
 import { createEvidenceGitHub, runEvidenceCli } from './review-evidence-cli.mjs';
 import { same, validatePluginResult, localReportsForTarget, parseLocalReport, verifyEvidenceCi, pluginResultVersion,
   publicationModules, localPublicationBlockers, reviewerCheckFailures } from './review-evidence-source.mjs';
-import { analyzeReviewText, explainReviewText, parserVersion } from './review-result-parser.mjs';
+import { analyzeReviewText, parserVersion } from './review-result-parser.mjs';
 export { findingsFromText, analyzeReviewText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 import { gitBlobSha } from './merge-pr-core.mjs';
 import { homedir } from 'node:os';
 import { ledgerKey, attentionPaths, readAttentionLedger, captureJobLog, buildAttentionDraft, writeNewOrSame, adminNextSteps, nodeFiles,
-  jobLogBlockers, requireBlocked, blockedState, jobLogSummary } from './review-attention.mjs';
+  jobLogBlockers, requireBlocked, blockedState, jobLogSummary, interpretStoredResult, validateStoredResult, reportBlockers, attentionBlockers,
+  interpretationSummary } from './review-attention.mjs';
 
 // CLI에는 원시 오류/API 응답 대신 이 고정 안내만 출력한다.
 export function pluginPublicationFailureMessage(error) {
@@ -21,7 +22,8 @@ export function pluginPublicationFailureMessage(error) {
     'review-publication-uncertain': '게시 요청의 성공 여부가 불명확합니다. 자동 재요청하지 않습니다. 기존 ledger를 보존하고 Actions 실행·실제 댓글·영수증을 확인하세요.',
     'review-publication-conflict': '게시 결과 충돌: 같은 대상에 다른 job/결과 또는 중복 보고서가 이미 게시됐습니다. 기존 ledger·댓글·영수증을 보존하고 확인하세요.',
     'review-publication-code-mismatch': '로컬 게시·판정 코드가 기본 브랜치와 달라 게시 요청하지 않았습니다. 서버는 기본 브랜치 코드로 원문을 다시 해석하므로 같은 결과를 보장할 수 없습니다. 완료 결과와 원문은 .git의 ledger에 보존했습니다. 이 대상은 수동 리뷰 보고 절차로 진행하고 모델 재호출·게시 재시도를 하지 않습니다.',
-    'review-recovery-manual': '이전 형식(v2) 복구 기록의 게시 요청 여부가 불명확하거나 이미 요청됐거나 원본과의 연결을 검증할 수 없어 중단했습니다. 기존 ledger·복구 파일을 수정하지 않았으며 자동 재해석·재요청·모델 호출을 하지 않습니다. 실제 댓글·Actions·영수증을 사람이 확인하세요. 게시 요청 전 기록이면 --recover로 v3 재해석을 시도할 수 있습니다.',
+    'review-recovery-manual': '이전 형식(v2) 복구 기록의 게시 요청 여부가 불명확하거나 이미 요청됐거나 원본과의 연결을 검증할 수 없어, 또는 v3 결과의 리뷰 당시 해석이 현재 parser와 달라 중단했습니다. 기존 ledger·복구 파일을 수정하지 않았으며 자동 재해석·재요청·모델 호출을 하지 않습니다. 실제 댓글·Actions·영수증을 사람이 확인하세요. v2 복구 기록이 게시 요청 전이면 --recover로 재해석을 시도할 수 있습니다. 해석이 다른 v3 결과는 --recover 없이 실행해 관리자 검토 초안을 사용하세요.',
+    'review-parser-mismatch': '이미 게시 요청한 결과의 리뷰 당시 해석이 현재 parser와 다릅니다. 저장 결과를 바꾸거나 다시 요청하지 않았습니다. 실제 Actions·봇 댓글·영수증을 사람이 확인하세요.',
     'review-report-too-large': '리뷰 원문이 16000바이트를 초과했습니다. .git의 captured ledger에 원문·job을 보존했으며 자동 게시하지 않습니다.',
   };
   return Object.hasOwn(messages, error?.code) ? messages[error.code] : '리뷰 수집/게시 중단. 완료·대상·형식·기존 ledger와 Actions를 확인하세요. 자동 재시도·추가 AI 호출·관리자 확인·승인은 하지 않습니다. 원시 오류는 출력하지 않습니다.';
@@ -95,11 +97,12 @@ async function changedPublicationModules(github, defaultBranch) {
   return changed;
 }
 
-// 게시하지 않는 이유를 코드 지적(unknown 사유 포함)·리뷰어 로컬 검사·job 실행 기록·원격 CI로 나눠 원문과 함께 보여준다.
-export function attentionOutput(result, blockers, jobLog = null, homeDir = null) {
+// 게시하지 않는 이유를 코드 지적·리뷰어 로컬 검사·job 실행 기록·원격 CI로 나눠 원문과 함께 보여준다.
+// codeFindings는 저장 결과(리뷰 당시 해석), interpretation.current는 현재 parser 재해석(unknown 사유 포함)이다.
+export function attentionOutput(result, blockers, jobLog = null, homeDir = null, interpretation = interpretStoredResult(result)) {
   return {
     state: blockedState(blockers), published: false, blockers,
-    codeFindings: result.findings, unknownReasons: explainReviewText(result.report),
+    codeFindings: result.findings, interpretation: interpretationSummary(interpretation),
     reviewerCheckFailures: reviewerCheckFailures(result), reviewerChecks: result.reviewerChecks,
     jobLog: jobLogSummary(jobLog, homeDir), remoteChecks: result.checks,
     note: '코드 지적 집계와 리뷰어 로컬 검사는 별개입니다. 실패를 통과로 바꾸지 않았고 환경 원인은 리뷰어 주장일 뿐 확인되지 않았습니다. 원문이 실행한 모든 명령을 나열한다는 보장이 없어 plugin job 기록도 대조했습니다. job 기록의 exit 0이 아닌 명령·미완료·확인 불가 기록은 원인을 알 수 없어 차단합니다. 자동 게시하지 않았습니다. adminDraft의 관리자 검토 초안을 확인해 관리자가 직접 판단·게시하세요.',
@@ -117,7 +120,7 @@ function readJobLog({ plugin, result, paths, files, now }) {
 function prepareAdminDraft({ paths, target, description, checks, jobLog, files, homeDir }) {
   try {
     const ledger = readAttentionLedger({ paths, target, implementedBy: description.meta['implemented-by'], files, ignoreLock: true });
-    const blockers = requireBlocked(ledger.result, jobLog);
+    const blockers = requireBlocked(ledger.result, jobLog, ledger.interpretation);
     const draft = buildAttentionDraft({ target, risk: description.risk, implementedBy: description.meta['implemented-by'], result: ledger.result,
       blockers, ledger, jobLog, remoteChecks: checks, homeDir });
     const draftPath = paths.draft(draft.sha256);
@@ -154,7 +157,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
   const lockPath = `${originalPath}.lock`;
   const lock = openSync(lockPath, 'wx', 0o600); closeSync(lock);
   try {
-    let result; let captured; let latestChecks = initial.packet.checks;
+    let result; let captured; let storedLedger = null; let latestChecks = initial.packet.checks;
     if (options.recover && !existsSync(path)) {
       if (!existsSync(originalPath)) throw new Error('No completed ledger to recover');
       const originalText = readFileSync(originalPath, 'utf8');
@@ -162,6 +165,11 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       if (original.state !== 'completed' || original.session !== options.session || !same(original.target, target)
           || original.publicationRequested || original.publication) throw new Error('Recovery requires an unpublished completed target');
       assertRecoverableOriginal(original.result, target);
+      // 현재 형식(v3) 결과를 현재 parser로 다시 해석해 저장된 unknown·검사 기록을 바꾸지 않는다(PR #42 독립 검토 지적).
+      // 해석이 같으면 복구 결과도 같다. 다르면 복구하지 않고, --recover 없이 실행해 `parser-mismatch` 관리자 초안을 쓴다.
+      if (original.result.v === pluginResultVersion && !interpretStoredResult(original.result).consistent) {
+        throw Object.assign(new Error('v3 result parsed by an earlier parser requires manual check'), { code: 'review-recovery-manual' });
+      }
       const legacyRecoveredHash = existsSync(legacyRecoveredPath)
         ? assertUnrequestedLegacyRecovery(readFileSync(legacyRecoveredPath, 'utf8'), { original, originalText, target, session: options.session }) : null;
       const stored = plugin(['result', '--json']); // Read the existing native job, never invoke review.
@@ -182,7 +190,7 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       const ledger = JSON.parse(readFileSync(path, 'utf8'));
       if (!['completed', 'captured'].includes(ledger.state) || ledger.session !== options.session || !same(ledger.target, target)) throw new Error('이전 실행 미완료·실패·다른 세션. 리뷰를 자동 재실행하지 않음');
       result = ledger.result;
-      if (ledger.state === 'captured') captured = ledger;
+      if (ledger.state === 'captured') captured = ledger; else storedLedger = ledger;
     } else {
       if (options.recover) throw new Error('Recovery cannot start a model review');
       const existing = localReportsForTarget(initial.state.comments, target).length > 0;
@@ -216,19 +224,27 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       latestChecks = current.packet.checks;
       result = collectPluginResult({ output, stored: captured.stored, target, session: options.session, startedAt, checks: current.packet.checks });
       validatePluginResult(result, target, 'claude');
-      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result }), { mode: 0o600 });
+      // 어느 parser 버전으로 해석했는지 남긴다. 이후 parser가 바뀌면 저장 결과와 재해석을 구분하는 데 쓴다.
+      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, parserVersion }), { mode: 0o600 });
     }
-    validatePluginResult(result, target, 'claude');
+    // 저장된 완료 결과는 리뷰 당시 parser의 해석이다. 현재 parser로 다시 해석해 바꾸지 않고 차이만 확인한다.
+    const storedParserVersion = storedLedger ? (path === recoveredPath ? storedLedger.recovery?.parserVersion : storedLedger.parserVersion) ?? null : parserVersion;
+    const interpretation = interpretStoredResult(result, storedParserVersion);
+    if (!interpretation.consistent && (storedLedger?.publicationRequested || storedLedger?.publication)) {
+      // 이미 요청·게시한 결과는 재해석으로 영수증 확인·재요청 경로에 넣지 않는다.
+      throw Object.assign(new Error('게시 요청한 결과의 해석이 현재 parser와 다름'), { code: 'review-parser-mismatch' });
+    }
+    if (interpretation.consistent) validatePluginResult(result, target, 'claude');
+    else validateStoredResult(result, target, 'claude', storedParserVersion);
     const paths = attentionPaths(resolve(originalPath));
     const blocked = (blockers, jobLog) => {
       const adminDraft = prepareAdminDraft({ paths, target, description: initial.state.evaluation.description, checks: latestChecks, jobLog, files, homeDir });
-      out(JSON.stringify({ ...attentionOutput(result, blockers, jobLog, homeDir), adminDraft }, null, 2));
+      out(JSON.stringify({ ...attentionOutput(result, blockers, jobLog, homeDir, interpretation), adminDraft }, null, 2));
       return 2;
     };
-    const reportBlockers = localPublicationBlockers(result);
-    if (reportBlockers.length) {
+    if (reportBlockers(result, interpretation).length) {
       const jobLog = readJobLog({ plugin, result, paths, files, now });
-      return blocked([...reportBlockers, ...jobLogBlockers(jobLog)], jobLog);
+      return blocked(attentionBlockers(result, jobLog, interpretation), jobLog);
     }
     const existingPublication = state => {
       const matches = localReportsForTarget(state.comments, target);
@@ -286,8 +302,9 @@ export async function runPluginPublication({ options, gh, git, plugin, out = con
       if (!same(confirmed.publisher.result, result)) {
         throw Object.assign(new Error('게시 결과 충돌: 같은 대상에 다른 job/결과가 이미 게시됨'), { code: 'review-publication-conflict' });
       }
-      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, recovery: JSON.parse(readFileSync(path, 'utf8')).recovery, publicationRequested: true,
-        publication: { commentUrl: confirmed.commentUrl, evidenceHash: confirmed.evidenceHash } }), { mode: 0o600 });
+      const previous = JSON.parse(readFileSync(path, 'utf8'));
+      writeFileSync(path, JSON.stringify({ state: 'completed', target, session: options.session, result, recovery: previous.recovery, parserVersion: previous.parserVersion,
+        publicationRequested: true, publication: { commentUrl: confirmed.commentUrl, evidenceHash: confirmed.evidenceHash } }), { mode: 0o600 });
       out(JSON.stringify({ state: 'published-awaiting-human', ...confirmed }, null, 2));
       return 0;
     }

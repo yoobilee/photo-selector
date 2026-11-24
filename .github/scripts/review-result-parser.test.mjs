@@ -11,8 +11,9 @@ const blockersFor = text => {
   return localPublicationBlockers({ findings, reviewerChecks });
 };
 
-test('parser 버전은 v3', () => {
-  assert.equal(parserVersion, 3);
+// v4: Issue #41 선언·검사 어휘 추가로 같은 원문의 해석이 v3와 달라질 수 있어 버전을 올렸다(저장 결과와 재해석 구분용).
+test('parser 버전은 v4', () => {
+  assert.equal(parserVersion, 4);
 });
 
 test('PR #28 한국어 원문: 코드 지적 0건과 리뷰어 로컬 검사 실패·미실행을 따로 보존', () => {

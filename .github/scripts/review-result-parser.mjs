@@ -1,7 +1,9 @@
 // 리뷰 원문을 처음부터 끝까지 문장 단위로 해석한다. 관찰한 문형만 받으며 남는 산문은 판단 불가(unknown)로 둔다.
 // 코드 지적(findings)과 리뷰어가 보고한 로컬 검사(reviewerChecks)는 서로 섞지 않는다.
 // 검사 문장은 리뷰어의 주장일 뿐 실행 증명이 아니다. 실패를 통과로 바꾸거나 원인을 환경 문제로 확정하지 않는다.
-export const parserVersion = 3;
+// v4: Issue #41에서 관찰한 "identified" 선언과 검사 어휘 `verification`을 추가했다. 같은 원문도 v3와 해석이 다를 수 있으므로
+// 저장된 결과는 다시 해석해 바꾸지 않고 해석 차이를 따로 표시한다(review-attention.mjs interpretStoredResult).
+export const parserVersion = 4;
 
 const levels = ['critical', 'high', 'medium', 'low'];
 const capitalized = word => `[${word[0].toUpperCase()}${word[0]}]${word.slice(1)}`;

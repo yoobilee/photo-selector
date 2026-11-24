@@ -3,18 +3,20 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { localFixture, pr28Report, pr34Report, pr37FinalReport, pr40FinalReport, cleanJobLog, pr40FinalJobLog } from './review-local-fixture.mjs';
-import { runPluginPublication } from './review-plugin-cli.mjs';
+import { localFixture, pr28Report, pr34Report, pr37FinalReport, pr40FinalReport, cleanJobLog, pr40FinalJobLog, completeJobLog, jobLogStart, jobLogEnd } from './review-local-fixture.mjs';
+import { runPluginPublication, collectPluginResult } from './review-plugin-cli.mjs';
 import { runAttentionCli, parseAttentionArgs, attentionFailureMessage } from './review-attention-cli.mjs';
-import { parseJobCommands, ledgerFileName, draftMarker, classifyCheck, buildAttentionDraft, maxDraftChars, jobLogBlockers } from './review-attention.mjs';
+import { parseJobCommands, ledgerFileName, draftMarker, classifyCheck, buildAttentionDraft, maxDraftChars, jobLogBlockers, interpretStoredResult } from './review-attention.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 
 const home = 'C:\\Users\\tester';
 
 // codex-companion 1.0.6의 job 로그 형식(appendLogLine/appendLogBlock). PR #34 조사에서 확인한 명령 결과를 재현한다.
 // "Final output" 뒤는 리뷰어가 쓴 글이므로 같은 형식의 위조 줄이 있어도 실행 기록으로 보지 않아야 한다.
+// 리뷰 시작·원문 기록·최종 출력의 완료 증거는 실제 로그 구조와 같게 둔다.
 const pr34JobLog = [
-  '[2026-11-21T07:47:03.300Z] Starting Codex review.',
+  '[2026-11-21T07:47:03.300Z] Starting Codex Review.',
+  "[2026-11-21T07:47:05.000Z] Reviewer started: changes against 'base'",
   '[2026-11-21T07:47:40.000Z] Running command: npm run lint',
   '[2026-11-21T07:48:10.000Z] Command completed: npm run lint (exit 0)',
   `[2026-11-21T07:48:11.000Z] Running command: "${home}\\AppData\\Local\\pwsh.exe" -Command 'npm run typecheck'`,
@@ -25,6 +27,11 @@ const pr34JobLog = [
   '[2026-11-21T07:49:00.000Z] Command failed: npm run test (exit 1)',
   '[2026-11-21T07:49:05.000Z] Running command: npm run test -- --reporter=dot',
   '[2026-11-21T07:49:40.000Z] Command failed: npm run test -- --reporter=dot (exit 1)',
+  '[2026-11-21T07:50:05.000Z] Review output captured.',
+  '',
+  '[2026-11-21T07:50:05.000Z] Review output',
+  pr34Report,
+  '[2026-11-21T07:50:05.500Z] Reviewer finished.',
   '',
   '[2026-11-21T07:50:06.000Z] Final output',
   '[2026-11-21T07:50:06.000Z] Command completed: npm run build (exit 0)',
@@ -96,7 +103,8 @@ test('PR #34 원문: 게시 차단 시 기존 ledger·job 기록으로 관리자
   assert.equal(first.state, 'review-needs-attention'); assert.equal(first.published, false);
   // 원문 차단(findings)과 job 기록 차단(exit 1 명령, 리뷰어 글 블록 이후 명령 형식 줄)을 함께 알린다.
   assert.deepEqual(first.blockers, ['findings', 'job-command-failed', 'job-log-incomplete']);
-  assert.deepEqual(first.unknownReasons, [{ kind: 'declaration-unrecognized', offset: 0, excerpt: 'No actionable regressions found;' }]);
+  assert.deepEqual(first.interpretation.current.unknownReasons, [{ kind: 'declaration-unrecognized', offset: 0, excerpt: 'No actionable regressions found;' }]);
+  assert.equal(first.interpretation.consistent, true); assert.equal(first.interpretation.unexplainedStoredUnknown, 0);
   assert.equal(first.jobLog.failedCommandCount, 2); assert.equal(first.jobLog.ambiguous, 1);
   assert.equal(first.adminDraft.state, 'ready'); assert.equal(first.adminDraft.jobLog.status, 'captured');
   assert.equal(first.adminDraft.published, false); assert.equal(first.adminDraft.approved, false);
@@ -116,7 +124,9 @@ test('PR #34 원문: 게시 차단 시 기존 ledger·job 기록으로 관리자
   assert.match(draft, /\| E2E \| `npm run test:e2e` \| 기록 없음 \|/);
   assert.match(draft, /\| verify \| success \|/);
   assert.match(draft, /unknown 1건/); assert.match(draft, /exit 0이 아닌 명령 2건/);
-  assert.match(draft, /- unknown 사유\(현재 parser 자동 진단[^\n]*\n {2}- 첫 문장이 관찰한 "지적 없음" 선언 문형이 아님[^\n]*: `No actionable regressions found;`/);
+  assert.match(draft, /- unknown 사유\(현재 parser v4 재해석 진단[^\n]*\n {2}- 첫 문장이 관찰한 "지적 없음" 선언 문형이 아님[^\n]*: `No actionable regressions found;`/);
+  assert.match(draft, /- 저장 결과와 현재 parser 재해석\(지적 집계·리뷰어 검사\)이 같습니다\./);
+  assert.match(draft, /- 리뷰 완료 증거: 리뷰 시작[^\n]* 있음, 리뷰 원문 기록[^\n]* 있음, 최종 출력[^\n]* 있음/);
   assert.match(draft, /`job-command-failed`/); assert.match(draft, /`job-log-incomplete`/);
   assert.match(draft, /## 8\. 관리자 판단 \(관리자 작성\)/);
   assert.ok(draft.includes("~\\AppData\\Local\\pwsh.exe")); assert.ok(!draft.includes(home));
@@ -427,7 +437,7 @@ test('PR #40 최종 원문 + 실제 exit 1 job 기록: 선언 문법 차단과 j
   assert.equal(await s.publish(), 2);
   const [output] = s.outputs;
   assert.equal(output.state, 'review-needs-attention'); assert.deepEqual(output.blockers, ['findings', 'job-command-failed']);
-  assert.deepEqual(output.unknownReasons, [{ kind: 'declaration-unrecognized', offset: 0,
+  assert.deepEqual(output.interpretation.current.unknownReasons, [{ kind: 'declaration-unrecognized', offset: 0,
     excerpt: 'No actionable regressions were identified in the documentation reorganization or configuration changes.' }]);
   assert.equal(output.jobLog.status, 'captured'); assert.equal(output.jobLog.failedCommandCount, 2);
   assert.deepEqual(output.jobLog.failedCommands.map(c => [c.exitCode, c.status, c.truncated]), [[1, 'failed', true], [1, 'failed', true]]);
@@ -437,14 +447,25 @@ test('PR #40 최종 원문 + 실제 exit 1 job 기록: 선언 문법 차단과 j
   assert.equal(s.f.dispatches.length, 0); assert.equal(s.f.comments.length, 0); assert.deepEqual(writes(s.ghCalls), []);
 });
 
-test('해석 가능한 지적 없음 원문이라도 job 기록의 실패·종료 코드 없음·미완료·확인 불가·로그 없음은 게시하지 않고 관리자 초안으로 넘김', async t => {
+test('해석 가능한 지적 없음 원문이라도 job 기록의 실패·종료 코드 없음·미완료·확인 불가·완료 증거 없음·로그 없음은 게시하지 않고 관리자 초안으로 넘김', async t => {
   const event = (at, text) => `[2026-11-22T02:43:${at}.000Z] ${text}`;
+  const report = pr37FinalReport;
   const cases = [
-    ['exit 1', pr40FinalJobLog(pr37FinalReport), ['job-command-failed']],
-    ['exit ?', [event('00', 'Running command: npm run lint'), event('01', 'Command failed: npm run lint (exit ?)')].join('\n'), ['job-command-failed']],
-    ['declined', [event('00', 'Running command: npm run lint'), event('01', 'Command declined: npm run lint (exit 0)')].join('\n'), ['job-command-failed']],
-    ['unfinished', [event('00', 'Running command: npm run test')].join('\n'), ['job-log-incomplete']],
-    ['ambiguous', ['', event('00', 'Assistant message'), event('01', 'Command completed: npm run verify (exit 0)')].join('\n'), ['job-log-incomplete']],
+    ['exit 1', pr40FinalJobLog(report), ['job-command-failed']],
+    ['exit ?', completeJobLog(report, [event('00', 'Running command: npm run lint'), event('01', 'Command failed: npm run lint (exit ?)')]), ['job-command-failed']],
+    ['declined', completeJobLog(report, [event('00', 'Running command: npm run lint'), event('01', 'Command declined: npm run lint (exit 0)')]), ['job-command-failed']],
+    ['unfinished', completeJobLog(report, [event('00', 'Running command: npm run test')]), ['job-log-incomplete']],
+    ['ambiguous', completeJobLog(report, [], ['', event('50', 'Assistant message'), event('51', 'Command completed: npm run verify (exit 0)')]), ['job-log-incomplete']],
+    // PR #42 독립 검토 지적: 아래 로그는 명령 목록이 비어 이전에는 차단 사유가 없었다. 완료 증거가 없으면 기록 유실·잘림으로 보고 차단한다.
+    ['empty log', '', ['job-log-not-completed']],
+    ['start events only', `${jobLogStart.join('\n')}\n`, ['job-log-not-completed']],
+    ['cut before review output', [...jobLogStart, event('00', 'Running command: npm run lint'), event('01', 'Command completed: npm run lint (exit 0)')].join('\n'), ['job-log-not-completed']],
+    ['cut before final output', [...jobLogStart, ...jobLogEnd(report).slice(0, 5)].join('\n'), ['job-log-not-completed']],
+    ['other job review output', completeJobLog(pr40FinalReport), ['job-log-not-completed']],
+    ['no job start', jobLogEnd(report).join('\n'), ['job-log-not-completed']],
+    ['block after final output', `${completeJobLog(report)}\n[2026-11-22T02:44:33.000Z] Assistant message\nlate text`, ['job-log-not-completed']],
+    ['failed and cut', [...jobLogStart, event('00', 'Running command: npm run lint'), event('01', 'Command failed: npm run lint (exit 1)'), event('02', 'Running command: npm run test')].join('\n'),
+      ['job-command-failed', 'job-log-incomplete', 'job-log-not-completed']],
     ['no log', null, ['job-log-unverified']],
   ];
   for (const [name, log, blockers] of cases) await t.test(name, async t => {
@@ -453,10 +474,12 @@ test('해석 가능한 지적 없음 원문이라도 job 기록의 실패·종�
     const ledgerText = readFileSync(s.ledgerPath, 'utf8');
     const [output] = s.outputs;
     assert.equal(output.state, 'review-job-log-needs-attention'); assert.deepEqual(output.blockers, blockers);
-    assert.deepEqual(output.codeFindings, { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }); assert.deepEqual(output.unknownReasons, []);
+    assert.deepEqual(output.codeFindings, { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 }); assert.deepEqual(output.interpretation.current.unknownReasons, []);
     assert.equal(output.published, false); assert.equal(output.adminDraft.state, 'ready');
+    if (log !== null) assert.equal(output.jobLog.completed, !blockers.includes('job-log-not-completed'));
     const draft = readFileSync(output.adminDraft.draftPath, 'utf8');
     for (const blocker of blockers) assert.ok(draft.includes(`\`${blocker}\``), blocker);
+    if (blockers.includes('job-log-not-completed')) assert.match(draft, /job 로그에 리뷰 완료 증거가 모두 있지 않아 기록 유실·잘림/);
     // 재실행해도 리뷰·게시를 반복하지 않고 같은 결과를 낸다. 완료 ledger는 바뀌지 않는다.
     assert.equal(await s.publish(), 2); assert.deepEqual(s.outputs[1], output);
     assert.equal(readFileSync(s.ledgerPath, 'utf8'), ledgerText);
@@ -478,11 +501,22 @@ test('해석 가능한 지적 없음 원문이라도 job 기록의 실패·종�
   });
 });
 
-test('job 기록 차단 사유는 확인된 사본의 모든 명령이 exit 0으로 완료되고 미완료·확인 불가 줄이 없을 때만 비어 있음', () => {
-  const captured = (commands = [], unfinished = [], ambiguous = []) => ({ status: 'captured', commands, unfinished, ambiguous });
+test('job 기록 차단 사유는 확인된 사본에 완료 증거가 모두 있고 모든 명령이 exit 0으로 완료되고 미완료·확인 불가 줄이 없을 때만 비어 있음', () => {
+  const done = { reviewStarted: true, reviewOutput: true, finalOutput: true };
+  const captured = (commands = [], unfinished = [], ambiguous = [], completion = done) => ({ status: 'captured', commands, unfinished, ambiguous, completion });
   const ok = { status: 'completed', exitCode: 0 };
   assert.deepEqual(jobLogBlockers(captured([ok, ok])), []);
+  // 명령 0건은 완료 증거가 있을 때만 정상 종료다. 개수만으로 성공·실패를 정하지 않는다.
   assert.deepEqual(jobLogBlockers(captured()), []);
+  for (const missing of ['reviewStarted', 'reviewOutput', 'finalOutput']) {
+    assert.deepEqual(jobLogBlockers(captured([], [], [], { ...done, [missing]: false })), ['job-log-not-completed'], missing);
+    assert.deepEqual(jobLogBlockers(captured([ok], [], [], { ...done, [missing]: false })), ['job-log-not-completed'], missing);
+  }
+  assert.deepEqual(jobLogBlockers(captured([], [], [], null)), ['job-log-not-completed']);
+  assert.deepEqual(jobLogBlockers({ status: 'captured', ...parseJobCommands('', pr37FinalReport) }), ['job-log-not-completed']);
+  assert.deepEqual(jobLogBlockers({ status: 'captured', ...parseJobCommands(completeJobLog(pr37FinalReport), pr37FinalReport) }), []);
+  // 원문 없이 해석하면 원문 일치를 확인할 수 없어 완료로 보지 않는다.
+  assert.deepEqual(jobLogBlockers({ status: 'captured', ...parseJobCommands(completeJobLog(pr37FinalReport)) }), ['job-log-not-completed']);
   for (const status of ['missing', 'invalid', 'unavailable', undefined]) assert.deepEqual(jobLogBlockers({ status }), ['job-log-unverified']);
   assert.deepEqual(jobLogBlockers(null), ['job-log-unverified']);
   assert.deepEqual(jobLogBlockers(captured([ok, { status: 'completed', exitCode: 2 }])), ['job-command-failed']);
@@ -491,4 +525,123 @@ test('job 기록 차단 사유는 확인된 사본의 모든 명령이 exit 0으
   assert.deepEqual(jobLogBlockers(captured([ok], ['npm run test'])), ['job-log-incomplete']);
   assert.deepEqual(jobLogBlockers(captured([ok], [], ['npm run verify'])), ['job-log-incomplete']);
   assert.deepEqual(jobLogBlockers(captured([{ status: 'failed', exitCode: 1 }], ['x'])), ['job-command-failed', 'job-log-incomplete']);
+});
+
+// PR #42 독립 검토 지적 1: 명령 0건만으로 판단하지 않는다. 완료 증거가 모두 있으면 명령 없이 끝난 리뷰는 기존 게시 경로를 쓴다.
+test('완료 증거가 있는 명령 0건 job은 정상 종료로 보고 기존 게시를 요청하며 원문의 미실행은 미실행으로 남김', async t => {
+  const report = 'No actionable defects were found. Build and E2E were not run.';
+  const s = await setup(t, { report, log: completeJobLog(report) });
+  await assert.rejects(s.publish(), /완료를 확인하지 못함/);
+  assert.equal(s.f.dispatches.length, 1);
+  const ledger = JSON.parse(readFileSync(s.ledgerPath, 'utf8'));
+  assert.equal(ledger.parserVersion, 4); assert.equal(ledger.publicationRequested, true);
+  assert.deepEqual(ledger.result.reviewerChecks.map(c => [c.name, c.status]), [['Build', 'not-run'], ['E2E', 'not-run']]);
+  const published = await s.f.publish(s.f.dispatches[0].result); s.f.finish(published);
+  assert.equal(await s.publish(), 0); assert.equal(s.f.dispatches.length, 1); assert.equal(s.f.comments.length, 1);
+  assert.deepEqual(s.calls, { reviews: 1, reads: 1, jobReads: 1 });
+});
+
+// PR #42 독립 검토 지적 2·3: 이전 parser(v3)로 저장한 완료 ledger. 실제 PR #37 최종 ledger(1118f8f)와 같이 unknown 1·검사 기록 없음으로 저장돼 있고
+// 현재 parser는 같은 원문을 unknown 0·검사 2건으로 해석한다. 이전에는 wrapper·review:attention 모두 "원문과 다른 리뷰어 검사 기록"으로 실패했다.
+async function oldParserLedger(t, { report = pr37FinalReport, log = completeJobLog(report), mutate = () => {}, recovered = false } = {}) {
+  const s = await setup(t, { report, log });
+  const current = collectPluginResult({ output: s.job.result, stored: { job: { status: 'completed' }, storedJob: s.job }, target: s.target,
+    session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+  const result = { ...current, findings: { ...current.findings, unknown: 1 }, reviewerChecks: [] };
+  const ledger = { state: 'completed', target: s.target, session: 'session-1', result }; mutate(ledger);
+  const originalText = JSON.stringify(ledger);
+  writeFileSync(s.ledgerPath, originalText);
+  let recoveredText = null;
+  if (recovered) {
+    recoveredText = JSON.stringify({ ...ledger, recovery: { originalLedgerHash: sha256(originalText), legacyRecoveredHash: null, parserVersion: 3 } });
+    writeFileSync(`${s.ledgerPath}.recovered.v3.json`, recoveredText);
+  }
+  const unchanged = () => {
+    assert.equal(readFileSync(s.ledgerPath, 'utf8'), originalText);
+    if (recovered) assert.equal(readFileSync(`${s.ledgerPath}.recovered.v3.json`, 'utf8'), recoveredText);
+  };
+  return { ...s, result, unchanged };
+}
+
+test('이전 parser로 저장한 v3 ledger는 재해석으로 바꾸거나 게시하지 않고 parser-mismatch 관리자 초안으로 넘기며 저장 unknown을 유지', async t => {
+  const recoverOptions = { options: { repository: 'owner/repo', number: 1, session: 'session-1', recover: true } };
+  await t.test('원래 ledger', async t => {
+    const s = await oldParserLedger(t);
+    assert.equal(await s.publish(), 2);
+    const [output] = s.outputs;
+    assert.equal(output.state, 'review-needs-attention'); assert.deepEqual(output.blockers, ['findings', 'parser-mismatch']);
+    // 저장 결과(리뷰 당시)와 현재 재해석을 다른 필드로 구분한다. 사유를 재현할 수 없는 저장 unknown도 지우지 않는다.
+    assert.deepEqual(output.codeFindings, { critical: 0, high: 0, medium: 0, low: 0, unknown: 1 });
+    assert.deepEqual(output.interpretation.stored, { parserVersion: null, findings: { critical: 0, high: 0, medium: 0, low: 0, unknown: 1 } });
+    assert.deepEqual(output.interpretation.current.findings, { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 });
+    assert.equal(output.interpretation.current.parserVersion, 4); assert.deepEqual(output.interpretation.current.unknownReasons, []);
+    assert.equal(output.interpretation.current.reviewerChecksMatch, false); assert.equal(output.interpretation.consistent, false);
+    assert.equal(output.interpretation.unexplainedStoredUnknown, 1); assert.equal(output.interpretation.effectiveFindings.unknown, 1);
+    assert.deepEqual(output.reviewerChecks, []); assert.equal(output.jobLog.completed, true);
+    const draft = readFileSync(output.adminDraft.draftPath, 'utf8');
+    assert.match(draft, /\| 리뷰 당시 저장 결과 \(parser 버전 기록 없음[^|]*\| 0 \| 0 \| 0 \| 0 \| 1 \|/);
+    assert.match(draft, /\| 현재 parser v4 재해석 \(참고, 저장 결과를 바꾸지 않음\) \| 0 \| 0 \| 0 \| 0 \| 0 \|/);
+    assert.match(draft, /저장 결과와 현재 parser 재해석이 다릅니다\(`parser-mismatch`\)/);
+    assert.match(draft, /저장된 unknown 1건 중 1건은 현재 parser로 사유를 재현할 수 없습니다\. 리뷰 당시 판정이므로 유지하며/);
+    assert.match(draft, /- 자동 해석된 검사 문장이 없습니다/); assert.match(draft, /\| `All 127 targeted tests` \| 통과 \| - \| - \|/);
+    assert.match(draft, /unknown 1건: /); assert.doesNotMatch(draft, /- unknown 사유\(/);
+    // 재실행·세션 종료 뒤 review:attention도 같은 차단과 같은 초안을 낸다. 리뷰·게시·ledger 변경이 없다.
+    assert.equal(await s.publish(), 2); assert.deepEqual(s.outputs[1], output);
+    assert.equal(await s.attention(), 0);
+    assert.deepEqual(s.cliOut.at(-1).blockers, ['findings', 'parser-mismatch']); assert.equal(s.cliOut.at(-1).draftPath, output.adminDraft.draftPath);
+    assert.deepEqual(s.cliOut.at(-1).codeFindings, output.codeFindings); assert.deepEqual(s.cliOut.at(-1).interpretation, output.interpretation);
+    // 관리자 확인 문구에도 저장된 unknown을 그대로 넣는다(두 해석 중 큰 값).
+    assert.equal(await s.attention('--confirm', s.post(draft)), 0);
+    assert.deepEqual(s.cliOut.at(-1).confirmation.findings, { critical: 0, high: 0, medium: 0, low: 0, unknown: 1 });
+    s.unchanged();
+    assert.equal(s.calls.reviews, 0); assert.equal(s.f.dispatches.length, 0); assert.equal(s.f.comments.length, 1); assert.deepEqual(writes(s.ghCalls), []);
+  });
+  await t.test('이전 코드가 만든 복구 기록(.recovered.v3.json, 복구 시 parser v3)', async t => {
+    const s = await oldParserLedger(t, { recovered: true });
+    assert.equal(await s.publish(), 2);
+    assert.deepEqual(s.outputs[0].blockers, ['findings', 'parser-mismatch']); assert.equal(s.outputs[0].interpretation.stored.parserVersion, 3);
+    // --recover를 다시 줘도 기존 복구 기록을 재사용하며 새로 재해석하지 않는다.
+    assert.equal(await s.publish(recoverOptions), 2);
+    assert.deepEqual(s.outputs[1], s.outputs[0]);
+    assert.match(readFileSync(s.outputs[0].adminDraft.draftPath, 'utf8'), /복구 기록\(복구 시 parser v3\)/);
+    assert.equal(await s.attention(), 0); assert.deepEqual(s.cliOut.at(-1).blockers, ['findings', 'parser-mismatch']);
+    s.unchanged(); assert.equal(s.calls.reads, 0); assert.equal(s.f.dispatches.length, 0); assert.equal(s.f.comments.length, 0);
+  });
+  await t.test('이전 v3 원래 ledger의 --recover', async t => {
+    const s = await oldParserLedger(t);
+    await assert.rejects(s.publish(recoverOptions), error => error.code === 'review-recovery-manual');
+    s.unchanged(); assert.deepEqual(s.files().filter(name => name.includes('.recovered')), []);
+    assert.equal(s.calls.reads, 0); assert.equal(s.f.dispatches.length, 0);
+  });
+  await t.test('이미 게시 요청한 결과(중복 게시 방지)', async t => {
+    const s = await oldParserLedger(t, { mutate: ledger => { ledger.publicationRequested = true; } });
+    await assert.rejects(s.publish(), error => error.code === 'review-parser-mismatch');
+    await assert.rejects(s.publish(), error => error.code === 'review-parser-mismatch');
+    assert.equal(await s.attention(), 1); assert.match(s.cliErr.at(-1), /이미 봇 게시를 요청/);
+    s.unchanged(); assert.equal(s.calls.jobReads, 0); assert.equal(s.f.dispatches.length, 0); assert.equal(s.f.comments.length, 0);
+  });
+  await t.test('저장 집계가 현재 해석보다 작은 기록', async t => {
+    // 원문은 현재 parser로 unknown 1인데 저장 결과가 0이면, 저장 값을 믿지 않고 큰 값으로 차단·확인한다.
+    const s = await oldParserLedger(t, { report: pr40FinalReport, log: completeJobLog(pr40FinalReport),
+      mutate: ledger => { ledger.result.findings.unknown = 0; } });
+    assert.equal(await s.publish(), 2);
+    assert.deepEqual(s.outputs[0].blockers, ['findings', 'parser-mismatch']); assert.equal(s.outputs[0].interpretation.effectiveFindings.unknown, 1);
+    assert.equal(await s.attention('--confirm', s.post(readFileSync(s.outputs[0].adminDraft.draftPath, 'utf8'))), 0);
+    assert.equal(s.cliOut.at(-1).confirmation.findings.unknown, 1);
+    s.unchanged(); assert.equal(s.f.dispatches.length, 0);
+  });
+  await t.test('형식이 깨진 저장 검사 기록', async t => {
+    const s = await oldParserLedger(t, { mutate: ledger => { ledger.result.reviewerChecks = [{ name: 'Lint', status: 'passed' }]; } });
+    await assert.rejects(s.publish());
+    assert.equal(await s.attention(), 1); assert.match(s.cliErr.at(-1), /형식/);
+    s.unchanged(); assert.equal(s.f.dispatches.length, 0);
+  });
+  await t.test('해석이 같은 버전 기록 없는 ledger는 기존 판정 그대로', async t => {
+    const s = await oldParserLedger(t, { report: pr40FinalReport, log: pr40FinalJobLog(),
+      mutate: ledger => { const { findings, reviewerChecks } = interpretStoredResult(ledger.result).current; Object.assign(ledger.result, { findings, reviewerChecks }); } });
+    assert.equal(await s.publish(), 2);
+    assert.deepEqual(s.outputs[0].blockers, ['findings', 'job-command-failed']); assert.equal(s.outputs[0].interpretation.consistent, true);
+    assert.equal(s.outputs[0].interpretation.stored.parserVersion, null);
+    s.unchanged();
+  });
 });
