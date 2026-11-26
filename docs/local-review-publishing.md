@@ -20,7 +20,7 @@ npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설�
    - `reviewerChecks`: 리뷰어가 원문에 보고한 로컬 검사의 통과(`passed`)·실패(`failed`)·미실행(`not-run`)·건너뜀(`skipped`)과 리뷰어가 밝힌 환경 원인 주장
    - `checks`: GitHub API가 반환한 현재 HEAD의 원격 CI 상태
 
-   unknown이나 미해결 critical/high/medium이면 원문과 `review-needs-attention`을, 코드 지적은 없지만 리뷰어가 로컬 검사 실패를 보고했으면 `review-checks-need-attention`을 출력하고 게시하지 않는다. 지적 배지는 집계하되 나머지 문맥의 완전성을 증명할 수 없어 unknown도 함께 남긴다. 출력의 `codeFindings`는 저장된 결과(리뷰 당시 해석)이고, `interpretation.current.unknownReasons`는 현재 parser가 unknown마다 원문의 어느 문장에서 해석이 멈췄는지 알려 준다.
+   unknown이나 미해결 critical/high/medium이면 원문과 `review-needs-attention`을, 코드 지적은 없지만 리뷰어가 로컬 검사 실패를 보고했으면 `review-checks-need-attention`을 출력하고 게시하지 않는다. 지적 배지는 집계하되 나머지 문맥의 완전성을 증명할 수 없어 unknown도 함께 남긴다. 출력의 `codeFindings`는 판정에 쓰는 값(모든 기록과 현재 재해석의 항목별 최댓값)이다. 기록별 값은 `interpretation`에 따로 있고, `interpretation.current.unknownReasons`는 현재 parser가 unknown마다 원문의 어느 문장에서 해석이 멈췄는지 알려 준다. 최신 형식·현재 parser로 만든 원본 완료 기록만 자동 게시 대상이며, 구형·복구 기록은 `legacy-record`로 관리자 검토에 넘긴다(아래 "4차 재검증 지적 반영").
    원문이 게시 가능해도 새 게시 요청 전에 같은 job의 plugin 로그를 대조한다. 로그를 확보·대조하지 못했거나, 리뷰 완료 증거가 없거나, exit 0이 아닌 명령·완료 기록 없는 명령·실행 여부를 구분할 수 없는 줄이 있으면 `review-job-log-needs-attention`으로 게시하지 않는다(아래 "unknown 원인 진단과 job 실행 기록 대조").
 4. 기존 `review-evidence.yml`의 고정된 기본 브랜치에 등록 요청만 전달한다. 개인 GitHub 인증으로 PR 댓글을 쓰지 않는다. workflow는 PR 코드·모델·설치·테스트를 실행하지 않고 기본 브랜치 코드와 최소 `GITHUB_TOKEN` 권한으로 미인증 자료를 게시한다.
 5. workflow가 댓글 ID·본문을 확인한 뒤 `review-evidence-v2-<댓글 ID>-<본문 SHA-256>` 이름의 artifact를 만든다. 내용은 댓글 링크·ID·해시뿐이다. API가 artifact를 원본 run에 연결한 metadata가 게시 경로의 영수증이다. ZIP을 게이트에서 실행/추출하지 않는다.
@@ -123,7 +123,7 @@ npm run review:attention -- yoobilee/photo-selector <PR번호> --confirm <게시
 - job 로그는 차단 직후 같은 Claude 세션에서만 복사할 수 있다. 이미 정리된 기록(예: PR #34)은 "확인 불가"로 남는다. 로그의 명령 문자열은 96자에서 잘리고, 실패한 테스트 파일·원인은 로그만으로 특정되지 않는다. Windows에서는 명령이 `powershell.exe -Command '…'`로 감싸져 실제 명령이 잘리므로 표준 검사 표가 "기록 없음"으로 보일 수 있다(PR #37 실제 로그에서 확인). 관리자는 전체 명령 표를 함께 본다.
 - ledger·job 로그·초안은 로컬 미인증 자료다. 관리자가 원문과 실행 기록을 직접 확인해야 한다.
 - CI workflow 자체를 바꾸는 PR은 `verifyEvidenceCi`가 출처를 확정하지 못해 `--confirm`이 거부한다. 이때는 초안을 참고해 기존 수동 절차로 `/review-gate`를 작성한다.
-- 초안 marker는 현재 ledger에서 계산한다. 초안을 만든 뒤 `--recover`로 복구 v3 기록이 생기면 marker가 달라지므로 초안을 다시 만들어 게시한다.
+- 초안 marker는 현재 판정 기록에서 계산한다. 판정 기록이 바뀌면 marker가 달라지므로 초안을 다시 만들어 게시한다. `--recover`로 복구 기록을 새로 만드는 경로는 4차에서 없앴다.
 
 ## unknown 원인 진단과 job 실행 기록 대조 (Issue #41)
 
@@ -262,7 +262,7 @@ PR #40 최종 job의 exit 1 명령 2건은 원인을 확인할 수 없었다. pl
 - `publicationState(record, kind)`: 원본 ledger·v2 복구 기록·v3 복구 기록·수집 직후 기록의 게시 이력을 한 기준으로 `none`·`requested`·`confirmed`·`unclear` 중 하나로 판정한다.
   - `requested`: `publicationRequested: true`만 있음. `confirmed`: 여기에 형식이 맞는 영수증(`commentUrl`, `evidenceHash`)이 있음.
   - `false`·`null`·문자열 값, 빈 영수증, 영수증만 있음, 기록 종류에 없는 필드는 모두 `unclear`이며 요청한 것으로 본다. 이전 wrapper(v2 복구 포함)는 `true`와 이 영수증 형식만 썼다.
-- `verifyRecoveryOriginal`·`verifyLegacyRecovery`: v3 복구를 처음 만들 때(`--recover`)와 이미 만든 복구 기록을 다시 읽을 때 같은 함수로 원본 ledger와 v2 복구 기록을 검증한다.
+- `verifyRecoveryOriginal`·`verifyLegacyRecovery`: v3 복구를 처음 만들 때(`--recover`)와 이미 만든 복구 기록을 다시 읽을 때 같은 함수로 원본 ledger와 v2 복구 기록을 검증한다. (4차에서 `--recover` 생성 경로를 없애고 모든 기록 검증을 `readCompletedRecord`·`validateRecordResult`로 합쳤다.)
   - 원본·v2 기록 모두 게시 이력 `none`, 완료 상태, 같은 대상·세션, 허용 필드, 결과 형식(v2·v3 필드 목록, 출처 필드 목록, 출처 세션), 지적 집계 형식, 같은 원문·출처가 필요하다. v2 기록은 parser v2와 원본 hash 연결도 확인한다.
   - v3 복구 기록은 복구 필드 형식, 원본 hash, v2 기록 hash(없으면 `null`)로 둘을 연결한다.
 - 판정은 원본·v2 복구·v3 복구(저장)·현재 재해석 네 가지를 비교한다. 항목별 최댓값(`effectiveFindings`)과 모든 검사 실패(`failedChecks`, 출처 `sources` 포함)를 판정·관리자 초안·wrapper 출력·`review:attention` 출력·확인 문구가 함께 쓴다. v3 복구가 원본이나 v2 복구 기록보다 줄었으면 `recovery-reduced`다.
@@ -295,7 +295,92 @@ plugin 1.0.6은 한 리뷰 job에서 `Starting Codex Review.`, `Reviewer started
 **상태 조합 검증표**: 원본 상태 8가지(v2·v3 복구 없음), 원본 3 × v2 복구 기록 6(v3 없음), 원본 5 × v3 복구 기록 8, v2 복구 기록 8 × v3 복구 기록 3을 합쳐 90개 기록 조합을 만들었다. 각 조합을 지적 없음·unknown 판정, 일반·`--recover`·관리자 초안+`--confirm`, 원격 보고서 유무로 실행해 720개 경우를 비교한다. 모델 호출, dispatch, ledger 쓰기, 초안, 확인 문구, 영수증 재조회를 기대 동작표와 대조한다.
 
 - `94a8c5f`: 273건이 기대와 달랐다. 차단 대상에서 dispatch가 일어난 경우 43건, 기대와 다른 ledger 쓰기 113건이다.
-- 수정 후: 720건 모두 기대와 같다. dispatch는 모든 기록이 유효하고 게시 이력이 없으며 지적 없음·원격 보고서 없음인 7건에서만 1회씩 일어났다. 모델 호출은 0회, 원본·v2 복구 기록 쓰기도 0회다.
+- 수정 후: 720건 모두 기대와 같다. dispatch는 모든 기록이 유효하고 게시 이력이 없으며 지적 없음·원격 보고서 없음인 7건에서만 1회씩 일어났다. 모델 호출은 0회다.
+- ledger 쓰기(4차 정정): 처음 이 절에 "원본·v2 복구 기록 쓰기도 0회"라고 적었으나 정확하지 않았다. 정상 요청(`publicationRequested`)과 영수증 기록은 판정 기록에 썼다. 원본 ledger만 있는 대상에서는 원본 ledger가 판정 기록이라 원본에 썼고, `--recover`·v3 복구 기록이 있는 대상에서는 v3 복구 기록에 썼다. 쓰지 않은 것은 판정 기록이 아닌 보존 대상, 즉 v3 복구 기록이 있을 때의 원본 ledger와 v2 복구 기록이다. 4차에서는 복구 기록이 있는 대상의 쓰기를 모두 없앴다(아래 "4차 재검증 지적 반영").
+
+### 4차 재검증 지적 반영 (PR #42, 검토 HEAD `1d924c9`)
+
+4차 재검증은 직전 지적 5건이 해결됐다고 확인했지만, 복구 과정에서 독립성 정보가 새 값으로 바뀌는 Medium 1건을 지적했다. 이번에는 복구·게시 예외 조건을 더 늘리지 않았다. 대신 복구 정책을 보수적으로 단순화했다. 목적은 정상적인 신규 리뷰의 자동 게시를 안전하고 단순하게 유지하는 것이며, 과거 기록을 모두 자동 게시할 수 있게 만드는 것이 아니다.
+
+**Medium: 복구 과정에서 독립성 정보가 대체됨**
+
+`1d924c9`의 복구 기록 검증(`validRecordResult`)은 대상·완료 상태·출처 종류·원문 hash·필드 목록·출처 세션·집계 형식만 확인했다. 수집 결과 검증(`validatePluginResult`)과 비교하면 다음 의미 검증이 빠져 있었다.
+
+- 역할 `independent`, 리뷰어 `codex`, 구현자 `claude`
+- 출처 ID 형식, 시작·완료 시각 순서
+- 원격 검사(`checks`)·미실행 항목(`notRun`) 형식, 원문 크기 상한
+
+`--recover`는 저장된 job에서 `collectPluginResult`로 결과를 다시 만들었는데, 이 함수는 역할·리뷰어를 `independent`/`codex`로 고정해 쓴다. 그래서 모순된 원본이 정상 값으로 보정됐다.
+
+| 재현 조건 (대상·세션·job·원문·hash 일치) | `1d924c9` 일반 실행 | `1d924c9` `--recover` | 수정 후 (일반 실행 / `--recover` / 초안·`--confirm`) |
+|---|---|---|---|
+| v3 원본 `role: self` | `ledger-invalid` | 복구본(`independent/codex`) 생성, dispatch 1 | `ledger-invalid` / 안내만 / 거부 |
+| v3 원본 `reviewer: claude` | `ledger-invalid` | 복구본(`independent/codex`) 생성, dispatch 1 | `ledger-invalid` / 안내만 / 거부 |
+| v2 복구 기록만 `role: self`, v3 복구 전 | `recovery-manual` | 복구본 생성, dispatch 1 | `recovery-manual` / 안내만 / 거부 |
+| 원본 `role: self` + 기존 v3 복구 기록 | dispatch 1 | dispatch 1 | `recovery-manual` / 안내만 / 거부 |
+| v2 `role: self` + 기존 v3 복구 기록 | dispatch 1 | dispatch 1 | `recovery-manual` / 안내만 / 거부 |
+
+마지막 두 경우는 `1d924c9`에서 관리자 초안을 만들고 `/review-gate` 통과 확인 문구까지 준비했다. 수정 후에는 모든 경우에서 복구본 생성, dispatch, 초안, 확인 문구가 0회다.
+
+수정: `validateRecordResult`가 원본 ledger·v2 복구 기록·v3 복구 기록을 모두 같은 방식으로 검증한다. 이 함수는 `validatePluginResult`를 그대로 호출하고, 형식 버전 차이와 parser 차이만 맞춰서 넘긴다.
+
+- 형식 버전 차이: v2는 버전 번호가 다르고 `reviewerChecks`가 없다.
+- parser 차이: 저장 집계·검사 기록이 현재 재해석과 다를 수 있다.
+- 저장 집계·검사 기록은 형식만 확인하고 값을 바꾸지 않는다. 판정은 기존처럼 모든 기록과 현재 재해석의 최댓값이다.
+
+**단순화한 복구 정책**
+
+- 자동 게시 대상은 최신 형식(v3)·현재 parser로 만든 원본 완료 기록 하나뿐이다(공통 로더의 `autoPublish`). 정상 신규 리뷰와 수집 직후 기록을 완료한 경우가 여기에 해당하며, 기존 자동 게시 경로를 그대로 쓴다.
+- 구형 v2 결과, 이전 parser 기록(`parserVersion` 없음·다름), 복구 기록(`.recovered.json`·`.recovered.v3.json`)이 있는 대상은 새 자동 게시에서 제외한다. 차단 사유 `legacy-record`(상태 `review-legacy-needs-attention`)로 관리자 초안에 넘긴다.
+- `--recover`는 GitHub 조회·lock·파일 읽기와 쓰기·plugin 호출 없이 `review-recovery-retired` 안내만 출력한다. 관리자 검토 자료는 `npm run review:attention`으로 만든다.
+- 이미 게시 요청한 결과(`requested`·`confirmed`)는 기록 종류와 관계없이 새 요청 없이 영수증만 재조회한다. 영수증은 판정 기록인 원본 ledger에만 쓴다. 복구 기록은 보존 대상이라 영수증을 확인만 하고 쓰지 않는다.
+- 유효한 구형 기록은 관리자 초안과 `--confirm`에 그대로 쓴다. 원문, 기록별 판정, 검사 실패와 출처, 구형 사유("기록 구분")를 보존한다. 판정 기록이 v2 결과면 검사 기록이 없다고 밝히고 현재 재해석 표를 함께 보여 준다.
+- 독립성이 모순되거나 출처 검증에 실패한 기록은 관리자 검토 전용이라는 이유로 유효한 리뷰로 취급하지 않는다. 일반 실행·초안·`--confirm` 모두 `ledger-invalid`나 `recovery-manual`로 중단한다. `--confirm`은 확인 문구 직전에 역할·리뷰어를 한 번 더 대조한다.
+- 미해결 critical/high/medium이 남은 기록은 구형이어도 통과 확인 문구를 만들지 않는다(`review-attention-blocking-findings`).
+
+**제거한 실행 경로와 코드**
+
+- `--recover`의 복구본 생성 경로를 없앴다(원본 검증, v2 hash 연결, 저장 job 재조회, `collectPluginResult` 재생성, `.recovered.v3.json` 쓰기). 이에 따라 `verifyRecoveryOriginal`, `verifyLegacyRecovery`, `recoverableOriginal`, `validateStoredResult`를 정리했다.
+- 복구 기록에서 dispatch하던 경로와 복구 기록에 요청·영수증 기록을 쓰던 경로도 없앴다.
+- 유지한 코드: 기존 기록을 읽고 검증하는 공통 로더(`loadStoredLedger`), 기록별 판정 비교(`recovery-reduced`·`parser-mismatch`), 관리자 초안·`--confirm`, 영수증 재조회.
+- 3차까지 v2 복구 기록만 있는 대상(v3 복구 전)은 무조건 `recovery-manual`이었다. 이제는 v2 복구 기록을 판정 기록으로 읽는다. 게시 이력이 불명확하면 `publication-uncertain`, 요청 기록이 있으면 `parser-mismatch`, 게시 이력이 없으면 관리자 초안이다. 모두 새 요청·기록 변경은 없다.
+
+**기존 기록에 미치는 영향(로컬 ledger 14건, 읽기 전용 확인)**
+
+- 현재 parser(v4)로 만든 PR #42 ledger 3건(`3cbf421`·`94a8c5f`·`1d924c9`)은 자동 게시 대상 형식이지만 지금처럼 `findings`·`job-command-failed`로 차단된다.
+- 이전 parser v3 ledger 9건은 기존 차단 사유에 `legacy-record`가 더해진다.
+- v2 원본 2건(PR #23·#28)은 3차까지 `ledger-invalid`로 관리자 자료를 만들 수 없었다. 이제 유효한 구형 기록으로 읽혀 관리자 초안을 만들 수 있다. 원본 unknown 1을 유지하고, PR #28은 현재 해석의 `privacyGuard` 실패를 출처와 함께 보여 준다.
+- 새로 자동 게시 대상이 되는 기록은 없다. 검증에 쓴 파일 36개(ledger·초안·job 로그 사본)는 바뀌지 않았다.
+
+**신뢰 범위: 서버 측 중복 댓글 방지와 로컬 요청 횟수 보장**
+
+- 서버 측 중복 댓글 방지(기본 브랜치의 `review-evidence.yml`): 같은 PR의 게시 실행은 `concurrency` 그룹으로 한 번에 하나씩 처리된다(`cancel-in-progress: false`). 각 실행은 같은 저장소·PR·base/head의 유효한 봇 보고서를 먼저 찾는다. 결과가 같으면 기존 댓글을 재사용하고, 다르거나 2건 이상이면 실패한다. 그래서 어느 checkout에서 몇 번 요청이 와도 같은 대상의 봇 보고서는 1건을 넘지 않는다. 서버는 로컬 ledger를 볼 수 없다. 모델 호출 횟수나 dispatch 요청 횟수도 제한하지 않는다.
+- 로컬 요청 횟수 보장(wrapper): 하나의 checkout에서 정상 실행하면 같은 대상의 모델 호출과 dispatch 요청이 각각 최대 1회다. lock 파일, 완료 ledger 재사용, 게시 이력(`publicationState`), `decidePublication`, 게시 직전 재확인이 이를 보장한다. 응답을 잃은 요청은 다시 보내지 않는다.
+- 이번 PR에서 해결하지 않는 한계:
+  - 서로 다른 checkout·worktree는 ledger와 lock이 따로 있다. 동시에 실행하면 모델 호출과 dispatch 요청이 중복될 수 있다(댓글 중복은 서버가 막는다).
+  - 사용자가 로컬 기록을 임의로 삭제·위조하는 경우.
+  - 미인증 로컬 job 로그의 구조적 한계.
+  - 관리자와 Agent의 GitHub 인증 공유.
+
+**상태 조합 검증표(4차)**
+
+3차의 90개 기록 조합(720개 경우)을 모두 유지하고 24개 조합을 더했다.
+
+- 원본 단독: 집계 형식 오류, `role: self`, `reviewer: claude`
+- 이전 parser 원본 × 게시 이력 3가지
+- v2 복구 기록의 `role: self`
+- v3 복구 기록·원본의 역할·리뷰어 위반
+
+모두 114개 조합, 912개 경우다. 기대 동작표는 4차 정책으로 다시 썼다.
+
+- `1d924c9`를 새 기대표와 비교하면 410건이 달랐다.
+  - 차단 대상인데 dispatch가 일어난 경우 17건
+  - 기대 밖 ledger 쓰기 29건
+  - `--recover`가 쓰기나 dispatch를 한 경우 31건
+  - 역할·리뷰어 위반을 받아들인 경우 29건(통과 확인 문구 6건 포함)
+  - 나머지는 같은 결과를 다른 코드로 알리는 차이다. 예를 들어 `--recover`가 3차에는 `recovery-manual`, 4차에는 `recovery-retired`다.
+- 수정 후 912건 모두 기대와 같다. dispatch는 "최신 원본 기록 하나·게시 이력 없음·지적 없음·원격 보고서 없음·일반 실행" 1건에서만 1회 일어났다. 모델 호출은 0회다.
+- 복구 기록이 있는 대상과 `--recover`·관리자 초안 실행에서 ledger 쓰기는 0회다. 정상 요청·영수증 기록은 원본 ledger만 있을 때 그 원본(판정 기록)에만 쓴다.
 
 ### 유지한 경계와 한계
 
@@ -312,13 +397,15 @@ plugin 1.0.6은 한 리뷰 job에서 `Starting Codex Review.`, `Reviewer started
 
 PR #23에서 실제 완료 문장이 기존 허용 문법 밖이라 `unknown: 1`로 분류됐다. 수집기와 서버는 이제 같은 parser로 관찰한 전체 문장을 검사한다. 검사 생략·Build/E2E 미실행은 원문 그대로 보존하며, 임의 후속 산문·원인 불명 실패·한도·미완료·지적 혼재는 `unknown` 또는 차단 지적으로, 원인을 밝힌 실패는 `reviewerChecks`의 실패로 남긴다. 서버는 원문보다 지적 수를 줄인 제출과 원문과 다른 검사 기록도 거부한다.
 
-동일 대상의 **아직 게시 요청하지 않은 completed ledger**가 있을 때만 다음 복구 명령을 사용한다.
+**4차 복구 정책(현재)**: 자동 게시를 위해 새 복구 기록을 만들던 `--recover`는 중단했다. 지금 `--recover`를 주면 GitHub 조회·lock·파일 읽기와 쓰기·plugin 호출 없이 `review-recovery-retired` 안내만 출력한다. 구형 v2 결과, 이전 parser 기록, 기존 복구 기록(`.recovered.json`·`.recovered.v3.json`)은 새로 자동 게시하지 않는다. `npm run review:attention -- owner/repo PR번호`(또는 `--recover` 없는 같은 wrapper 명령)로 관리자 검토 초안을 만든다. 기록끼리 맞지 않거나 독립 리뷰 계약(역할·리뷰어·출처)이 다르면 초안도 만들지 않는다. 이미 게시 요청한 결과는 `--recover` 없이 같은 명령으로 새 요청 없이 영수증만 확인한다. 자세한 내용은 위 "4차 재검증 지적 반영"에 있다. 아래는 3차까지의 `--recover` 동작 기록이다.
+
+(3차까지) 동일 대상의 **아직 게시 요청하지 않은 completed ledger**가 있을 때만 다음 복구 명령을 사용했다.
 
 ```text
 npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설치된 Codex 플러그인 루트> --session <원래 Claude 세션 ID> --recover
 ```
 
-`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.v3.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. parser v2가 만든 `<원래 ledger>.recovered.json`은 읽기만 하고 수정·삭제하지 않는다. 그 파일이 정확히 v2 복구 형식이고, 게시 요청·게시 기록이 없으며, 같은 원본 ledger hash·세션·대상·원문·출처에서 파생됐을 때만 모델 재호출 없이 v3로 다시 해석하고 그 파일의 hash를 `legacyRecoveredHash`로 남긴다. 게시 요청 기록이 있거나 알 수 없는 필드·부분 기록처럼 요청 여부가 불명확하면 `review-recovery-manual`로 중단하고 사람이 실제 댓글·Actions·영수증을 확인한다. v2 복구 파일만 있는 대상에서 `--recover` 없이 실행해도 원래 ledger로 되돌아가지 않고 같은 이유로 중단한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 복구 결과가 원본의 지적·unknown·검사 기록을 줄이면 `recovery-reduced`로 게시하지 않고 관리자 초안으로 넘긴다. 이미 만든 복구 기록을 다시 쓸 때도 원본·v2 복구 기록과의 연결, 두 기록의 게시 이력·형식, 판정을 생성 시와 같은 함수로 매번 다시 확인한다(위 "재검증 지적 반영" 1, "3차 재검증 지적 반영"). 원래 결과가 이미 v3이면 저장 당시 해석이 현재 parser와 같을 때만 복구한다. 다르면 `review-recovery-manual`로 중단하고 복구 파일을 만들지 않는다. 이때는 `--recover` 없이 실행해 `parser-mismatch` 관리자 초안을 쓴다(재해석으로 저장된 unknown·검사 기록을 줄이지 않는다). 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
+`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않았다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.v3.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. parser v2가 만든 `<원래 ledger>.recovered.json`은 읽기만 하고 수정·삭제하지 않는다. 그 파일이 정확히 v2 복구 형식이고, 게시 요청·게시 기록이 없으며, 같은 원본 ledger hash·세션·대상·원문·출처에서 파생됐을 때만 모델 재호출 없이 v3로 다시 해석하고 그 파일의 hash를 `legacyRecoveredHash`로 남긴다. 게시 요청 기록이 있거나 알 수 없는 필드·부분 기록처럼 요청 여부가 불명확하면 `review-recovery-manual`로 중단하고 사람이 실제 댓글·Actions·영수증을 확인한다. v2 복구 파일만 있는 대상에서 `--recover` 없이 실행해도 원래 ledger로 되돌아가지 않고 같은 이유로 중단한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 복구 결과가 원본의 지적·unknown·검사 기록을 줄이면 `recovery-reduced`로 게시하지 않고 관리자 초안으로 넘긴다. 이미 만든 복구 기록을 다시 쓸 때도 원본·v2 복구 기록과의 연결, 두 기록의 게시 이력·형식, 판정을 생성 시와 같은 함수로 매번 다시 확인한다(위 "재검증 지적 반영" 1, "3차 재검증 지적 반영"). 원래 결과가 이미 v3이면 저장 당시 해석이 현재 parser와 같을 때만 복구한다. 다르면 `review-recovery-manual`로 중단하고 복구 파일을 만들지 않는다. 이때는 `--recover` 없이 실행해 `parser-mismatch` 관리자 초안을 쓴다(재해석으로 저장된 unknown·검사 기록을 줄이지 않는다). 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
 
 PR #23처럼 이미 병합됐거나 base가 바뀐 결과는 복구 게시 대상으로 삼지 않는다. parser 수정은 옛 결과를 새 base에 재연결하는 허가가 아니다.
 
@@ -326,7 +413,7 @@ PR #23처럼 이미 병합됐거나 base가 바뀐 결과는 복구 게시 대�
 
 게시 전과 `/review-gate` 내용 준비 시 현재 필수 CI의 성공·앱·check suite·pull_request run·저장소·head·workflow blob을 자동 검증한다. CI workflow 자체가 바뀐 경우에는 자동 게시를 중단하고 별도 수동 검증이 필요하다. 이 검사는 리뷰어가 로컬에서 검사를 실행했다는 증명이 아니며 관리자 직접 확인과 High의 `/merge-approve`는 그대로다.
 
-wrapper는 요청 자료 준비를 마치고 실제 dispatch하기 직전에 서버와 같은 `verifyEvidenceCi`를 실행한다. CI가 진행 중·실패·불명확하거나 workflow 출처가 맞지 않으면 `publicationRequested`를 기록하지 않는다. completed 결과·원문·기존 검사 상태는 보존하며, CI 성공 뒤 같은 명령을 재실행하면 모델 호출 없이 게시를 이어간다. 복구 모드도 파생 ledger만 사용하며 원본 ledger는 그대로 둔다. 요청 자료 준비 실패도 같은 방식으로 재처리할 수 있다. 실제 요청 직전에 기록한 뒤 응답을 잃은 경우는 자동 재요청하지 않는다. 확인과 dispatch 사이의 변경 가능성 때문에 서버의 대상·CI 재검증도 유지한다.
+wrapper는 요청 자료 준비를 마치고 실제 dispatch하기 직전에 서버와 같은 `verifyEvidenceCi`를 실행한다. CI가 진행 중·실패·불명확하거나 workflow 출처가 맞지 않으면 `publicationRequested`를 기록하지 않는다. completed 결과·원문·기존 검사 상태는 보존하며, CI 성공 뒤 같은 명령을 재실행하면 모델 호출 없이 게시를 이어간다. 복구 기록이 있는 대상은 자동 게시하지 않으므로 이 경로를 타지 않는다(4차 복구 정책). 요청 자료 준비 실패도 같은 방식으로 재처리할 수 있다. 실제 요청 직전에 기록한 뒤 응답을 잃은 경우는 자동 재요청하지 않는다. 확인과 dispatch 사이의 변경 가능성 때문에 서버의 대상·CI 재검증도 유지한다.
 
 같은 대상에 다른 job/결과 또는 중복 보고서가 있으면 일반 시간 초과 대신 게시 결과 충돌로 중단한다. 게시·wrapper·확인 준비는 같은 보고서 선별 함수를 사용한다. 대상·형식·원문이 손상됐거나 구형 v1이라 출처를 확인할 수 없는 봇 보고서는 자동으로 무시하지 않는다. 기존 댓글·영수증을 보존하고 사람이 조사해야 하며, 이를 지우거나 다른 결과를 재게시해 우회하지 않는다.
 

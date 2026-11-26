@@ -24,10 +24,10 @@ export function attentionFailureMessage(error) {
   const messages = {
     'review-attention-busy': '리뷰 wrapper가 실행 중입니다(lock 존재). 실행이 끝난 뒤 다시 시도하세요. lock을 지우지 마세요.',
     'review-attention-no-ledger': '이 PR의 현재 base/head에 대한 완료 ledger가 없습니다. 이 checkout에서 실행한 리뷰가 아니면 수동 리뷰 보고 절차를 사용하세요. 새 리뷰를 실행하지 않습니다.',
-    'review-attention-ledger-invalid': '완료 ledger가 현재 PR 대상(base/head/fingerprint/정책)과 다르거나 형식·복구 연결이 맞지 않습니다. ledger를 수정하지 않았으며 이전 결과를 현재 대상에 연결하지 않습니다.',
+    'review-attention-ledger-invalid': '완료 ledger가 현재 PR 대상(base/head/fingerprint/정책)과 다르거나 형식·독립 리뷰 계약(역할 independent·리뷰어 codex·출처)이 맞지 않습니다. ledger를 수정하지 않았으며 이 기록을 유효한 독립 리뷰로 쓰거나 현재 대상에 연결하지 않습니다.',
     'review-attention-publication-requested': '이 결과는 이미 봇 게시를 요청했거나 게시 요청 기록이 불명확·손상됐습니다. 관리자 초안 대신 실제 Actions·봇 댓글·영수증과 ledger를 확인하세요.',
     'review-attention-not-blocked': '자동 게시가 차단되지 않은 결과입니다. 기존 npm run review:publish 흐름을 사용하세요.',
-    'review-recovery-manual': '복구 기록을 사람이 먼저 확인해야 합니다. v2 복구 파일만 있거나, v3 복구 기록과 원본 ledger·v2 복구 기록의 연결(대상·세션·job·원문·hash·형식)이 맞지 않거나, 원본·v2 복구 기록에 게시 요청 기록이 있거나 불명확합니다. 기존 파일은 수정하지 않았습니다.',
+    'review-recovery-manual': '복구 기록을 사람이 먼저 확인해야 합니다. 원본 ledger·v2 복구 기록·v3 복구 기록의 연결(대상·세션·job·원문·hash·형식)이 맞지 않거나, 독립 리뷰 계약(역할·리뷰어·출처)과 다르거나, 원본·v2 복구 기록에 게시 요청 기록이 있거나 불명확합니다. 유효한 독립 리뷰로 쓰지 않으며 관리자 초안·확인 문구를 만들지 않습니다. 기존 파일은 수정하지 않았습니다.',
     'review-attention-comment-invalid': '지정한 댓글이 이 PR의 관리자 검토 초안이 아니거나 marker·대상 SHA·리뷰 원문이 현재 ledger와 맞지 않습니다. 초안을 다시 만들고 원문·marker를 유지해 게시하세요.',
     'review-attention-not-admin': '지정한 댓글은 관리자(admin/maintain) 사용자가 직접 게시한 것이 아닙니다. 봇·다른 사용자의 댓글로 확인 문구를 만들지 않습니다.',
     'review-attention-bot-report': '같은 대상의 봇 보고서가 이미 있습니다. 관리자 초안과 섞지 말고 기존 봇 보고서·영수증을 확인하세요.',
@@ -54,7 +54,7 @@ export async function runAttentionCli({ argv, gh, git, files = nodeFiles, out = 
     const ledger = readAttentionLedger({ paths, target, implementedBy: description.meta['implemented-by'], files });
     // 원문 해석과 저장한 job 로그 사본 기준으로 자동 게시가 차단된 결과만 다룬다. 확인 문구 준비도 같다.
     const jobLog = loadJobLog({ paths, result: ledger.result, files });
-    const blockers = requireBlocked(ledger.result, jobLog, ledger.interpretation);
+    const blockers = requireBlocked(ledger, jobLog);
     if (options.confirm === null) {
       const draft = buildAttentionDraft({ target, risk: description.risk, implementedBy: description.meta['implemented-by'], result: ledger.result,
         blockers, ledger, jobLog, remoteChecks: packet.checks, homeDir });
