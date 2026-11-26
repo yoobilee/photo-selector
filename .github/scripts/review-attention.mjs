@@ -48,32 +48,44 @@ export function writeNewOrSame(files, path, content) {
   return 'created';
 }
 
-// 저장된 결과와 현재 parser 재해석, 복구 기록이면 원본 ledger의 결과까지 함께 비교한다(PR #42 독립 검토·재검증 지적).
-// - stored: 판정에 쓰는 기록(복구 기록이 있으면 복구 기록)의 저장 결과. 리뷰 당시 parser의 해석이다.
-// - original: 복구 기록일 때 원본 ledger의 저장 결과(v2 결과는 검사 기록이 없다).
+// 저장된 결과와 현재 parser 재해석, 복구 기록이면 원본 ledger·v2 복구 기록의 결과까지 함께 비교한다(PR #42 독립 검토·재검증 지적).
+// - stored: 판정에 쓰는 기록(복구 기록이 있으면 v3 복구 기록)의 저장 결과. 리뷰 당시 parser의 해석이다.
+// - previous: 복구 기록일 때 그 이전 기록들의 저장 결과. 원본 ledger(record 'original')와 v2 복구 기록(record 'legacyRecovered')이다.
+//   v2 결과는 검사 기록이 없다(reviewerChecks null).
 // - current: 같은 원문을 현재 parser로 다시 해석한 결과(참고, 저장 결과를 바꾸지 않는다).
-// 판정·확인 문구에는 세 해석 중 가장 큰 지적 수(effectiveFindings)와 모든 검사 실패(failedChecks)를 쓴다.
-// 그래서 재해석·복구로 unknown·지적·검사 실패가 줄어드는 경로가 없다. 줄었으면 `recovery-reduced`로 따로 알린다.
+// 판정·관리자 초안·CLI 출력·확인 문구는 모두 이 해석의 effectiveFindings(항목별 최댓값)와 failedChecks(모든 검사 실패, 출처 표시)를 쓴다.
+// 그래서 재해석·복구로 unknown·지적·검사 실패가 줄어드는 경로가 없다. 이전 기록보다 줄었으면 `recovery-reduced`로 따로 알린다.
 const findingLevels = ['critical', 'high', 'medium', 'low', 'unknown'];
 const count = (findings, level) => Number.isSafeInteger(findings?.[level]) ? findings[level] : 0;
 const recordedChecks = value => Array.isArray(value) ? value : null;
-export function interpretStoredResult(result, storedParserVersion = null, original = null) {
+export const interpretationRecords = ['original', 'legacyRecovered', 'stored', 'current'];
+export function interpretStoredResult(result, storedParserVersion = null, previous = []) {
   const parsed = analyzeReviewText(result?.report);
   const unknownReasons = explainReviewText(result?.report);
-  const stored = { parserVersion: storedParserVersion, findings: result?.findings, reviewerChecks: result?.reviewerChecks };
-  const current = { parserVersion, findings: parsed.findings, reviewerChecks: parsed.reviewerChecks, unknownReasons };
-  const views = [stored, current, ...(original ? [original] : [])];
-  const failedChecks = views.flatMap(view => (recordedChecks(view.reviewerChecks) ?? []).filter(item => item?.status === 'failed'))
-    .filter((item, index, all) => all.findIndex(other => same(other, item)) === index);
-  // 복구 기록이 원본보다 지적을 줄였거나 원본의 검사 기록(실패·미실행 포함)을 빼거나 바꿨는지.
-  const recoveryReduced = Boolean(original) && (findingLevels.some(level => count(original.findings, level) > count(stored.findings, level))
-    || (recordedChecks(original.reviewerChecks) ?? []).some(item => !(recordedChecks(stored.reviewerChecks) ?? []).some(other => same(other, item))));
+  const stored = { record: 'stored', parserVersion: storedParserVersion, findings: result?.findings, reviewerChecks: result?.reviewerChecks };
+  const current = { record: 'current', parserVersion, findings: parsed.findings, reviewerChecks: parsed.reviewerChecks, unknownReasons };
+  const views = [...previous, stored, current];
+  // 같은 검사 실패는 한 번만 쓰고, 어느 기록·해석에서 나왔는지(sources)를 남긴다.
+  const failedChecks = [];
+  for (const view of views) {
+    for (const item of (recordedChecks(view.reviewerChecks) ?? []).filter(check => check?.status === 'failed')) {
+      const known = failedChecks.find(other => same({ ...other, sources: undefined }, item));
+      if (known) { if (!known.sources.includes(view.record)) known.sources.push(view.record); } else failedChecks.push({ ...item, sources: [view.record] });
+    }
+  }
+  // 복구 기록이 이전 기록(원본·v2 복구)보다 지적을 줄였거나 이전 기록의 검사 기록(실패·미실행 포함)을 빼거나 바꿨는지.
+  const recoveryReduced = previous.some(view => findingLevels.some(level => count(view.findings, level) > count(stored.findings, level))
+    || (recordedChecks(view.reviewerChecks) ?? []).some(item => !(recordedChecks(stored.reviewerChecks) ?? []).some(other => same(other, item))));
+  // 기록된 unknown(현재 재해석 제외). 어느 기록이 몇 건인지 함께 둔다.
+  const recordedUnknown = [...previous, stored].map(view => ({ record: view.record, unknown: count(view.findings, 'unknown') }));
+  const recordedUnknownMax = Math.max(...recordedUnknown.map(item => item.unknown));
   return {
     consistent: same(stored.findings, current.findings) && same(stored.reviewerChecks, current.reviewerChecks),
-    stored, original, current, recoveryReduced, failedChecks,
+    stored, previous, original: previous.find(view => view.record === 'original') ?? null, current, recoveryReduced, failedChecks,
     effectiveFindings: Object.fromEntries(findingLevels.map(level => [level, Math.max(...views.map(view => count(view.findings, level)))])),
-    // 저장된 unknown(원본 포함) 중 현재 parser가 사유를 재현하지 못한 수. 사유가 없어도 저장된 unknown을 지우지 않는다.
-    unexplainedStoredUnknown: Math.max(0, Math.max(count(stored.findings, 'unknown'), count(original?.findings, 'unknown')) - unknownReasons.length),
+    recordedUnknown, recordedUnknownMax,
+    // 기록된 unknown(원본·v2 복구 포함) 최댓값 중 현재 parser가 사유를 재현하지 못한 수. 사유가 없어도 기록된 unknown을 지우지 않는다.
+    unexplainedStoredUnknown: Math.max(0, recordedUnknownMax - unknownReasons.length),
   };
 }
 
@@ -97,15 +109,18 @@ export function validateStoredResult(input, target, implementedBy, interpretatio
   return { ...validated, findings: input.findings, reviewerChecks: input.reviewerChecks };
 }
 
-// 출력용 해석 요약. 원본(복구 기록일 때)·저장 결과·현재 재해석을 다른 필드로 둔다.
+// 출력용 해석 요약. 이전 기록(원본·v2 복구)·저장 결과·현재 재해석을 다른 필드로 둔다.
+const previousSummary = view => ({ record: view.record, parserVersion: view.parserVersion, resultVersion: view.resultVersion,
+  findings: view.findings, reviewerChecksRecorded: Array.isArray(view.reviewerChecks) });
 export const interpretationSummary = interpretation => ({
   consistent: interpretation.consistent,
-  original: interpretation.original && { parserVersion: interpretation.original.parserVersion, resultVersion: interpretation.original.resultVersion,
-    findings: interpretation.original.findings, reviewerChecksRecorded: Array.isArray(interpretation.original.reviewerChecks) },
+  original: interpretation.original && previousSummary(interpretation.original),
+  previous: interpretation.previous.map(previousSummary),
   stored: { parserVersion: interpretation.stored.parserVersion, findings: interpretation.stored.findings },
   current: { parserVersion: interpretation.current.parserVersion, findings: interpretation.current.findings, unknownReasons: interpretation.current.unknownReasons,
     reviewerChecksMatch: same(interpretation.stored.reviewerChecks, interpretation.current.reviewerChecks) },
-  recoveryReduced: interpretation.recoveryReduced, effectiveFindings: interpretation.effectiveFindings, unexplainedStoredUnknown: interpretation.unexplainedStoredUnknown,
+  recoveryReduced: interpretation.recoveryReduced, effectiveFindings: interpretation.effectiveFindings, failedChecks: interpretation.failedChecks,
+  recordedUnknown: interpretation.recordedUnknown, unexplainedStoredUnknown: interpretation.unexplainedStoredUnknown,
 });
 
 // 복구 대상이 될 수 있는 원본 결과(v2·v3). 재해석에 쓰는 대상·완료 상태·출처·원문만 확인한다.
@@ -115,11 +130,101 @@ export const recoverableOriginal = (result, target) => [2, pluginResultVersion].
 
 const manualRecovery = message => stop('review-recovery-manual', message);
 const parseJson = (text, onError) => { try { return JSON.parse(text); } catch { return onError(); } };
+const isObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const hasOnly = (value, allowed, required = []) => isObject(value) && Object.keys(value).every(key => allowed.includes(key)) && required.every(key => Object.hasOwn(value, key));
+const digestPattern = /^[a-f0-9]{64}$/;
 
-// 완료 ledger를 읽는 공통 기준. wrapper 일반 실행·--recover·관리자 초안·`--confirm`이 모두 이 함수로 같은 기록·판정을 얻는다.
-// 복구 기록(.recovered.v3.json)이 있으면 그 기록으로 판정하되 원본 ledger 검증을 생략하지 않는다.
-// 원본은 완료 상태·같은 대상·같은 세션·게시 요청 기록 없음·복구 가능한 결과여야 하고, 복구 기록과 같은 원문·출처(job·thread·turn·완료 시각·원문 hash)·
-// 원본 hash·v2 복구 파일 hash로 연결돼야 한다. 하나라도 어긋나면 `review-recovery-manual`로 중단한다. 어떤 파일도 쓰지 않는다.
+// 게시 이력 상태(PR #42 재검증 지적). 원본 ledger·v2 복구 기록·v3 복구 기록 모두 이 기준 하나로 판정한다.
+// - none: 게시 요청·게시 기록 필드가 모두 없음
+// - requested: publicationRequested: true만 있음(요청 직전에 기록, 응답·영수증 미확인)
+// - confirmed: publicationRequested: true와 형식이 맞는 게시 영수증(publication: commentUrl·evidenceHash)
+// - unclear: 그 밖의 모든 경우(false·null·빈 객체·영수증만 있음·영수증 형식 오류·알 수 없는 필드). 요청했는지 알 수 없으므로 요청한 것으로 본다.
+// 이전 wrapper(v2 복구 포함)는 publicationRequested를 true로만, publication을 {commentUrl, evidenceHash}로만 썼다.
+export const publicationStates = ['none', 'requested', 'confirmed', 'unclear'];
+const ledgerFields = {
+  // 원래 ledger: 완료 기록(parser 버전은 PR #42부터) + 게시 기록
+  original: ['state', 'target', 'session', 'result', 'parserVersion', 'publicationRequested', 'publication'],
+  // v3 복구 기록: 완료 기록 + 복구 연결 + 게시 기록
+  recovered: ['state', 'target', 'session', 'result', 'recovery', 'publicationRequested', 'publication'],
+  // v2 복구 기록(이전 wrapper): 완료 기록 + 복구 연결 + 게시 기록
+  legacyRecovered: ['state', 'target', 'session', 'result', 'recovery', 'publicationRequested', 'publication'],
+  // 리뷰 실행 중·원문 수집 직후 기록(게시 기록 없음)
+  running: ['state', 'target', 'session', 'startedAt'],
+  captured: ['state', 'target', 'session', 'startedAt', 'output', 'stored'],
+};
+export function publicationState(record, kind = 'original') {
+  if (!isObject(record) || !hasOnly(record, ledgerFields[kind] ?? ledgerFields.original)) return 'unclear';
+  const requested = Object.hasOwn(record, 'publicationRequested');
+  const published = Object.hasOwn(record, 'publication');
+  if (!requested && !published) return 'none';
+  if (record.publicationRequested !== true) return 'unclear';
+  if (!published) return 'requested';
+  return hasOnly(record.publication, ['commentUrl', 'evidenceHash'], ['commentUrl', 'evidenceHash'])
+    && typeof record.publication.commentUrl === 'string' && record.publication.commentUrl.length > 0
+    && digestPattern.test(record.publication.evidenceHash ?? '') ? 'confirmed' : 'unclear';
+}
+
+// 복구 기록의 이전 기록(원본 ledger·v2 복구 기록) 검증. v3 복구를 처음 만들 때(--recover)와 이미 만든 복구 기록을 다시 읽을 때(일반 실행·--recover·
+// 관리자 초안·`--confirm`) 같은 함수를 쓴다. 어긋나면 `review-recovery-manual`로 중단하고 어떤 파일도 쓰지 않는다.
+const resultFields = {
+  2: ['v', 'target', 'role', 'reviewer', 'status', 'reviewComplete', 'findings', 'report', 'source', 'checks', 'notRun'],
+  [pluginResultVersion]: ['v', 'target', 'role', 'reviewer', 'status', 'reviewComplete', 'findings', 'report', 'source', 'checks', 'notRun', 'reviewerChecks'],
+};
+const sourceFields = ['kind', 'sessionId', 'jobId', 'threadId', 'turnId', 'startedAt', 'completedAt', 'outputHash'];
+const validRecordResult = (result, target, session) => recoverableOriginal(result, target)
+  && hasOnly(result, resultFields[result.v], resultFields[result.v]) && hasOnly(result.source, sourceFields, sourceFields) && result.source.sessionId === session
+  && validFindings(result.findings) && (result.v !== pluginResultVersion || validChecks(result.reviewerChecks));
+const previousView = (record, result, parserVersion) => ({ record, parserVersion, resultVersion: result.v, findings: result.findings,
+  reviewerChecks: result.v === pluginResultVersion ? result.reviewerChecks : null });
+
+// 원본 ledger: 완료 상태·같은 대상·같은 세션·게시 이력 없음·허용 필드·복구 가능한 결과(대상·출처·원문 hash·형식).
+export function verifyRecoveryOriginal(originalText, { target, session }) {
+  const original = parseJson(originalText, () => manualRecovery('원본 ledger 형식 오류'));
+  if (!isObject(original) || original.state !== 'completed' || !same(original.target, target) || original.session !== session
+      || publicationState(original, 'original') !== 'none' || !validRecordResult(original.result, target, session)
+      || (original.parserVersion !== undefined && !Number.isSafeInteger(original.parserVersion))) {
+    manualRecovery('원본 ledger가 게시 요청 전 완료 기록이 아니거나 대상·세션·출처·형식이 다름');
+  }
+  return { original, view: previousView('original', original.result, original.parserVersion ?? null) };
+}
+
+// v2 복구 기록: 허용 필드만·게시 이력 없음·완료 상태·같은 대상·세션·원본 hash 연결·parser v2·v2 결과 형식·원본과 같은 원문·출처.
+export function verifyLegacyRecovery(legacyText, { original, originalText, target, session }) {
+  const legacy = parseJson(legacyText, () => manualRecovery('v2 복구 기록 형식 오류'));
+  if (!isObject(legacy) || !hasOnly(legacy, ['state', 'target', 'session', 'result', 'recovery'], ['state', 'target', 'session', 'result', 'recovery'])
+      || publicationState(legacy, 'legacyRecovered') !== 'none' || legacy.state !== 'completed' || legacy.session !== session || !same(legacy.target, target)
+      || !hasOnly(legacy.recovery, ['originalLedgerHash', 'parserVersion'], ['originalLedgerHash', 'parserVersion']) || legacy.recovery.parserVersion !== 2
+      || legacy.recovery.originalLedgerHash !== sha256(originalText) || legacy.result?.v !== 2 || !validRecordResult(legacy.result, target, session)
+      || legacy.result.report !== original.result.report || !same(legacy.result.source, original.result.source)) {
+    manualRecovery('v2 복구 기록의 게시 요청 여부가 불명확하거나 원본과의 연결·형식이 다름');
+  }
+  return { legacy, hash: sha256(legacyText), view: previousView('legacyRecovered', legacy.result, 2) };
+}
+
+// v3 복구 기록과 이전 기록의 연결: 복구 필드 형식·원본 hash·v2 복구 파일 hash(없으면 null)·원본과 같은 원문·출처.
+function verifyRecoveredLinks(ledger, { paths, files, target }) {
+  if (!files.exists(paths.original)) manualRecovery('복구 기록의 원본 ledger 없음');
+  const originalText = files.read(paths.original);
+  const { original, view } = verifyRecoveryOriginal(originalText, { target, session: ledger.session });
+  const previous = [view];
+  let legacyHash = null;
+  if (files.exists(paths.legacyRecovered)) {
+    const legacy = verifyLegacyRecovery(files.read(paths.legacyRecovered), { original, originalText, target, session: ledger.session });
+    legacyHash = legacy.hash;
+    previous.push(legacy.view);
+  }
+  if (!hasOnly(ledger.recovery, ['originalLedgerHash', 'legacyRecoveredHash', 'parserVersion'], ['originalLedgerHash', 'legacyRecoveredHash', 'parserVersion'])
+      || !Number.isSafeInteger(ledger.recovery.parserVersion) || ledger.recovery.originalLedgerHash !== sha256(originalText)
+      || ledger.recovery.legacyRecoveredHash !== legacyHash
+      || ledger.result?.report !== original.result.report || !same(ledger.result?.source, original.result.source)) {
+    manualRecovery('복구 기록과 원본 ledger·v2 복구 기록의 연결 불일치');
+  }
+  return previous;
+}
+
+// 완료 ledger를 읽는 공통 기준. wrapper 일반 실행·--recover·게시 직전 확인·영수증 재조회·관리자 초안·`--confirm`이 모두 이 함수로 같은 기록·판정·게시 이력을 얻는다.
+// 복구 기록(.recovered.v3.json)이 있으면 그 기록으로 판정하되 원본 ledger·v2 복구 기록 검증을 생략하지 않는다(verifyRecoveredLinks).
+// 원본·v2 복구 기록은 게시 이력이 없어야 하고, 판정 기록의 게시 이력(publication)은 publicationState 하나로 판정한다. 어떤 파일도 쓰지 않는다.
 export function loadStoredLedger({ paths, target, implementedBy, files, session = null, ignoreLock = false, rejectRequested = false }) {
   if (!ignoreLock && files.exists(paths.lock)) stop('review-attention-busy', '리뷰 wrapper 실행 중 lock 존재');
   const recovered = files.exists(paths.recovered);
@@ -131,39 +236,22 @@ export function loadStoredLedger({ paths, target, implementedBy, files, session 
   if (ledger?.state !== 'completed' || !same(ledger.target, target) || (session !== null && ledger.session !== session)) {
     stop('review-attention-ledger-invalid', '완료 상태가 아니거나 현재 PR 대상·세션과 다름');
   }
-  let original = null;
-  if (recovered) {
-    if (!files.exists(paths.original)) manualRecovery('복구 기록의 원본 ledger 없음');
-    const originalText = files.read(paths.original);
-    const source = parseJson(originalText, () => manualRecovery('원본 ledger 형식 오류'));
-    const legacyExists = files.exists(paths.legacyRecovered);
-    const legacyHash = ledger.recovery?.legacyRecoveredHash ?? null;
-    if (source?.state !== 'completed' || !same(source.target, target) || source.session !== ledger.session
-        || source.publicationRequested !== undefined || source.publication !== undefined
-        || ledger.recovery?.originalLedgerHash !== sha256(originalText)
-        || !recoverableOriginal(source.result, target) || !validFindings(source.result.findings)
-        || (source.result.v === pluginResultVersion && !validChecks(source.result.reviewerChecks))
-        || ledger.result?.report !== source.result.report || !same(ledger.result?.source, source.result.source)
-        || (legacyExists ? legacyHash !== sha256(files.read(paths.legacyRecovered)) : legacyHash !== null)) {
-      manualRecovery('복구 기록과 원본 ledger 연결 불일치');
-    }
-    original = { parserVersion: source.parserVersion ?? null, resultVersion: source.result.v, findings: source.result.findings,
-      reviewerChecks: source.result.v === pluginResultVersion ? source.result.reviewerChecks : null };
-  }
-  const publicationRequested = ledger.publicationRequested !== undefined || ledger.publication !== undefined;
-  if (rejectRequested && publicationRequested) stop('review-attention-publication-requested', '이미 게시 요청한 결과');
+  const previous = recovered ? verifyRecoveredLinks(ledger, { paths, files, target }) : [];
+  const publication = publicationState(ledger, recovered ? 'recovered' : 'original');
+  if (rejectRequested && publication !== 'none') stop('review-attention-publication-requested', '이미 게시 요청했거나 게시 요청 여부가 불명확한 결과');
   // 복구 기록은 복구 시점 parser 버전, 원래 ledger는 기록한 parser 버전(이 기록을 남기기 이전 wrapper는 없음)을 쓴다.
   const storedParserVersion = (recovered ? ledger.recovery?.parserVersion : ledger.parserVersion) ?? null;
-  const interpretation = interpretStoredResult(ledger.result, storedParserVersion, original);
+  const interpretation = interpretStoredResult(ledger.result, storedParserVersion, previous);
   let result;
   try { result = validateStoredResult(ledger.result, target, implementedBy, interpretation); } catch (error) {
     if (error.code === 'review-report-too-large') throw error;
     stop('review-attention-ledger-invalid', '완료 결과 형식 오류');
   }
-  return { path, ledgerHash: sha256(text), ledger, session: ledger.session, result, interpretation, recovered, storedParserVersion, publicationRequested };
+  return { path, ledgerHash: sha256(text), ledger, session: ledger.session, result, interpretation, recovered, storedParserVersion,
+    publication, publicationRequested: publication !== 'none' };
 }
 
-// 관리자 자료(초안·`--confirm`)용. 공통 기준으로 읽고, 이미 게시 요청한 결과는 다루지 않는다. 차단 여부는 job 로그와 함께 requireBlocked로 판단한다.
+// 관리자 자료(초안·`--confirm`)용. 공통 기준으로 읽고, 게시 이력이 있거나 불명확한 결과는 다루지 않는다. 차단 여부는 job 로그와 함께 requireBlocked로 판단한다.
 export const readAttentionLedger = ({ paths, target, implementedBy, files, ignoreLock = false }) =>
   loadStoredLedger({ paths, target, implementedBy, files, ignoreLock, rejectRequested: true });
 
@@ -192,9 +280,26 @@ export function reportBlockers(result, interpretation = interpretStoredResult(re
   if (interpretation.recoveryReduced) blockers.push('recovery-reduced');
   return blockers;
 }
-// 이미 게시 요청한 기록도 해석이 서로 다르거나 복구가 판정을 줄였으면 영수증·재요청 경로에 넣지 않는다.
-export const interpretationDisagrees = interpretation => !interpretation.consistent || interpretation.recoveryReduced;
 export const attentionBlockers = (result, jobLog, interpretation = interpretStoredResult(result)) => [...reportBlockers(result, interpretation), ...jobLogBlockers(jobLog)];
+
+// 게시 단계 결정(PR #42 재검증 지적). 새 게시 요청(dispatch)은 이 함수가 'dispatch'를 돌려줄 때만 한다. 다른 곳에 dispatch 허용 기준을 두지 않는다.
+// 입력은 공통 로더(loadStoredLedger)의 게시 이력·판정과, 필요할 때만 읽는 원격 봇 보고서 수·job 로그다(읽는 순서도 이 함수가 정한다).
+// - unclear(요청 여부 불명확·기록 손상): 중단. 자동 재요청·영수증 기록을 하지 않고 사람이 확인한다.
+// - requested·confirmed(이미 요청): 새 요청 없이 영수증만 재조회한다. 판정 차단 사유(해석 불일치·복구 축소·지적·검사 실패)가 있으면 그것도 하지 않고 중단한다.
+// - none: 판정 차단 → 관리자 초안. 같은 대상의 원격 봇 보고서가 이미 있으면 영수증 재조회. job 로그 차단 → 관리자 초안. 모두 통과해야 dispatch.
+export async function decidePublication({ publication, result, interpretation, remoteReports, jobLog }) {
+  if (!publicationStates.includes(publication) || publication === 'unclear') return { action: 'stop', code: 'review-publication-uncertain' };
+  const report = reportBlockers(result, interpretation);
+  if (publication !== 'none') return report.length ? { action: 'stop', code: 'review-parser-mismatch', blockers: report } : { action: 'receipt' };
+  if (report.length) {
+    const log = await jobLog();
+    return { action: 'blocked', blockers: [...report, ...jobLogBlockers(log)], jobLog: log };
+  }
+  if (await remoteReports() > 0) return { action: 'receipt' };
+  const log = await jobLog();
+  const blockers = jobLogBlockers(log);
+  return blockers.length ? { action: 'blocked', blockers, jobLog: log } : { action: 'dispatch', jobLog: log };
+}
 export function requireBlocked(result, jobLog, interpretation = interpretStoredResult(result)) {
   const blockers = attentionBlockers(result, jobLog, interpretation);
   if (!blockers.length) stop('review-attention-not-blocked', '자동 게시 대상 결과');
@@ -228,17 +333,23 @@ const reviewerFinishedLine = event(String.raw`Reviewer finished\.`);
 //   → "Review output captured." + 원문 블록(Review output, 본문 = 리뷰 원문) → "Reviewer finished." → … → job 완료 기록 뒤 마지막 Final output 블록.
 // 진행 블록 본문은 리뷰어가 쓴 글이며 plugin이 따로 보관하지 않아(Assistant message) 본문이 어디서 끝나는지 알 수 없다.
 // 그래서 판별은 내용을 아는 부분만으로 한다.
-// - reviewStarted: 첫 블록 전(신뢰 구간)의 첫 줄 "Starting Codex Review."와 "Reviewer started: …". 블록 안의 같은 문장은 세지 않는다.
-// - reviewOutput: [Review output captured. / 빈 줄 / Review output 제목 / 저장된 원문과 정확히 같은 본문 / Reviewer finished.]의 고정 순서가
-//   로그 전체에서 정확히 한 번 나타남. 진행 블록이 앞에 있어도 된다. 블록 안에 같은 순서를 위조해 두 번 이상 나타나면 실제 기록을 특정할 수 없어 인정하지 않는다.
-// - finalOutput: 원문 블록 뒤의 마지막 블록이 Final output이고 본문에 원문이 있음.
+// plugin은 한 리뷰 job에서 아래 완료 표시를 각각 한 번만 쓴다(enteredReviewMode·exitedReviewMode는 리뷰 1회에 한 번, Final output은 job 완료 때 한 번).
+// 보존된 실제 job 로그 8건도 모두 각 1회다. 그래서 다음 줄이 로그 어디에든(블록 안 포함) 두 번 이상 있으면 완료 기록이 충돌하거나
+// 다른 job 로그가 섞였을 수 있어 완료 증거로 인정하지 않는다(PR #42 재검증: 다른 원문의 완료 블록 뒤에 일치하는 블록, Final output 두 번).
+// - reviewStarted: 첫 블록 전(신뢰 구간)의 첫 줄 "Starting Codex Review."와 신뢰 구간의 "Reviewer started: …", 두 줄 모두 로그 전체에서 한 번.
+// - reviewOutput: [Review output captured. / 빈 줄 / Review output 제목 / 저장된 원문과 정확히 같은 본문 / Reviewer finished.]의 고정 순서가 있고,
+//   "Review output captured."·"Review output" 제목·"Reviewer finished."가 로그 전체에서 각각 한 번. 진행 블록이 앞에 있어도 된다.
+// - finalOutput: "Final output" 제목이 로그 전체에서 한 번이고, 원문 블록 뒤의 마지막 블록이며 본문에 원문이 있음.
 // 한계: 진행 블록 안에 이 순서 전체를 위조하고 실제 원문 블록이 없는 로그는 구분할 수 없다. 완료된 native 리뷰는 원문 블록을 항상 쓰므로
-// 실제 기록에서는 생기지 않지만, 로컬 로그는 미인증 자료이며 관리자 확인이 계속 필요하다. 진행 블록 뒤의 명령 줄은 parseJobCommands가 확인 불가로 센다.
+// 실제 기록에서는 생기지 않지만, 로컬 로그는 미인증 자료이며 관리자 확인이 계속 필요하다. 반대로 리뷰어 글에 완료 표시와 같은 줄이 있으면
+// 실제 로그도 완료 증거 없음(fail-closed)으로 본다. 진행 블록 뒤의 명령 줄은 parseJobCommands가 확인 불가로 센다.
 function jobCompletion(lines, report) {
   const expected = typeof report === 'string' ? normalizeNewlines(report).trimEnd() : '';
+  const once = pattern => lines.filter(line => pattern.test(line)).length === 1;
   const firstBlock = lines.findIndex(line => !line.trim() || blockTitleLine.test(line));
   const trusted = lines.slice(0, firstBlock < 0 ? lines.length : firstBlock);
-  const reviewStarted = jobStartLine.test(trusted[0] ?? '') && trusted.some(line => reviewerStartedLine.test(line));
+  const reviewStarted = jobStartLine.test(trusted[0] ?? '') && trusted.some(line => reviewerStartedLine.test(line))
+    && once(jobStartLine) && once(reviewerStartedLine);
   const body = expected ? expected.split('\n') : null;
   const ends = [];
   if (body) {
@@ -247,10 +358,11 @@ function jobCompletion(lines, report) {
       if (body.every((line, offset) => lines[i + 3 + offset] === line) && reviewerFinishedLine.test(lines[i + 3 + body.length])) ends.push(i + 3 + body.length);
     }
   }
-  const reviewOutput = ends.length === 1;
+  const reviewOutput = ends.length === 1 && once(reviewCapturedLine) && once(reviewOutputTitle) && once(reviewerFinishedLine);
   let lastBlock = -1;
   for (let i = 1; i < lines.length; i++) if (lines[i - 1] === '' && blockTitleLine.test(lines[i])) lastBlock = i;
-  const finalOutput = reviewOutput && lastBlock > ends[0] && finalOutputTitle.test(lines[lastBlock]) && lines.slice(lastBlock + 1).join('\n').includes(expected);
+  const finalOutput = reviewOutput && once(finalOutputTitle) && lastBlock > ends[0] && finalOutputTitle.test(lines[lastBlock])
+    && lines.slice(lastBlock + 1).join('\n').includes(expected);
   return { reviewStarted, reviewOutput, finalOutput };
 }
 
@@ -356,6 +468,10 @@ const completionText = completion => [['리뷰 시작(Starting Codex Review·Rev
   ['리뷰 원문 기록(Review output captured + 원문 일치)', completion?.reviewOutput], ['최종 출력(마지막 Final output 블록, 원문 포함)', completion?.finalOutput]]
   .map(([name, ok]) => `${name} ${ok ? '있음' : '없음'}`).join(', ');
 const parserLabel = version => version ? `parser v${version}` : 'parser 버전 기록 없음(이 기록을 남기기 이전 wrapper)';
+// 해석 출처 이름. 판정 기록(stored)은 복구 기록인지에 따라 이름이 다르다.
+const recordName = (record, recovered) => ({ original: '원본 ledger', legacyRecovered: 'v2 복구 기록', stored: recovered ? '복구 기록' : '리뷰 당시 ledger',
+  current: '현재 parser 재해석' })[record] ?? record;
+const sourcesText = (sources, recovered) => sources.map(record => recordName(record, recovered)).join('·');
 
 const cell = text => String(text).replace(/\|/g, '\\|').replace(/\n/g, ' ');
 const code = text => {
@@ -390,18 +506,19 @@ export function jobLogSummary(jobLog, homeDir = null) {
 // unknown 사유 한 줄 표시. 발췌는 리뷰 원문의 일부다.
 export const unknownReasonLine = reason => `${unknownReasonText[reason.kind] ?? reason.kind}${reason.excerpt ? `: ${code(clip(reason.excerpt, 200))}` : ''}${reason.checks ? `: ${reason.checks.map(code).join(', ')}` : ''}`;
 
-function uncertainties({ result, jobLog, remoteChecks, interpretation }) {
+function uncertainties({ result, jobLog, remoteChecks, interpretation, recovered }) {
   const items = [];
-  // 원본·저장 결과·현재 재해석의 검사 실패를 모두 보여 준다. 같은 항목은 한 번만 쓴다.
+  // 원본·v2 복구·저장 결과·현재 재해석의 검사 실패를 모두 보여 준다. 같은 항목은 한 번만 쓰고 출처를 붙인다.
   const failures = interpretation.failedChecks;
   const unknown = interpretation.effectiveFindings.unknown;
   if (unknown) items.push(`unknown ${unknown}건: 원문 일부가 자동 해석 문법 밖이거나, 원인 미상 검사 실패·사용량 한도·형식 이상 표현이 있습니다. 결함 없음이나 검사 성공을 뜻하지 않습니다.`);
   if (!interpretation.consistent) items.push(`리뷰 당시 저장된 해석(${parserLabel(interpretation.stored.parserVersion)})과 현재 parser v${interpretation.current.parserVersion} 재해석이 다릅니다. 어느 해석도 실행 증명이 아니며, 재해석 결과로 저장된 unknown·검사 기록을 대체하지 않았습니다.`);
-  if (interpretation.recoveryReduced) items.push('복구 기록이 원본 ledger보다 지적·unknown을 줄였거나 원본의 검사 기록을 빼거나 바꿨습니다. 복구 결과로 원본 판정을 대체하지 않았습니다.');
+  if (interpretation.recoveryReduced) items.push('복구 기록이 이전 기록(원본 ledger·v2 복구 기록)보다 지적·unknown을 줄였거나 이전 기록의 검사 기록을 빼거나 바꿨습니다. 복구 결과로 이전 판정을 대체하지 않았습니다.');
   for (const item of failures) {
+    const from = `(출처: ${sourcesText(item.sources, recovered)})`;
     items.push(item.cause
-      ? `${code(item.name)} 실패의 환경 원인("${cell(item.cause.text)}")은 리뷰어의 주장이며 확인되지 않았습니다.`
-      : `${code(item.name)} 실패는 원인이 밝혀지지 않아 코드 결함 가능성을 배제할 수 없습니다.`);
+      ? `${code(item.name)} 실패${from}의 환경 원인("${cell(item.cause.text)}")은 리뷰어의 주장이며 확인되지 않았습니다.`
+      : `${code(item.name)} 실패${from}는 원인이 밝혀지지 않아 코드 결함 가능성을 배제할 수 없습니다.`);
   }
   if (jobLog.status !== 'captured') items.push(`job 실행 기록 확인 불가: ${jobLog.reason}`);
   else {
@@ -430,7 +547,8 @@ export function buildAttentionDraft(input, listLimit = maxListedCommands) {
   const redact = redactor(homeDir);
   const f = result.findings;
   const current = interpretation.current;
-  const original = interpretation.original;
+  const previous = interpretation.previous ?? [];
+  const recovered = Boolean(ledger.recovered);
   const effective = interpretation.effectiveFindings;
   const state = blockedState(blockers);
   const reasons = current.unknownReasons;
@@ -454,20 +572,24 @@ export function buildAttentionDraft(input, listLimit = maxListedCommands) {
     '- wrapper는 fail-closed 정책에 따라 게시를 요청하지 않았습니다. 새 리뷰·자동 재시도·결과 수정·실패 기록 삭제를 하지 않았습니다.',
     '', '## 2. 코드 지적 (리뷰 원문 집계)', '',
     '| 해석 | Critical | High | Medium | Low | Unknown |', '|---|---|---|---|---|---|',
-    ...(original ? [findingsRow(`원본 ledger 저장 결과 (결과 v${original.resultVersion}, ${parserLabel(original.parserVersion)})`, original.findings)] : []),
-    findingsRow(`${ledger.recovered ? '복구 기록' : '리뷰 당시'} 저장 결과 (${parserLabel(interpretation.stored.parserVersion)})`, f),
+    ...previous.map(view => findingsRow(`${recordName(view.record)} 저장 결과 (결과 v${view.resultVersion}, ${parserLabel(view.parserVersion)})`, view.findings)),
+    findingsRow(`${recovered ? '복구 기록' : '리뷰 당시'} 저장 결과 (${parserLabel(interpretation.stored.parserVersion)})`, f),
     findingsRow(`현재 parser v${current.parserVersion} 재해석 (참고, 저장 결과를 바꾸지 않음)`, current.findings),
     findingsRow('판정에 쓰는 값 (각 항목의 최댓값)', effective), '',
     interpretation.consistent ? '- 저장 결과와 현재 parser 재해석(지적 집계·리뷰어 검사)이 같습니다.'
       : '- 저장 결과와 현재 parser 재해석이 다릅니다(`parser-mismatch`). 저장 결과를 유지하고 자동 게시하지 않습니다.',
-    ...(interpretation.recoveryReduced ? ['- 복구 기록이 원본 ledger의 판정을 줄였습니다(`recovery-reduced`). 원본 판정을 유지하고 자동 게시하지 않습니다.'] : []),
-    '- 판정·확인 문구에는 위 해석 중 각 항목의 최댓값을 씁니다.',
+    ...(interpretation.recoveryReduced ? ['- 복구 기록이 이전 기록(원본 ledger·v2 복구 기록)의 판정을 줄였습니다(`recovery-reduced`). 이전 판정을 유지하고 자동 게시하지 않습니다.'] : []),
+    '- 판정·wrapper 출력·확인 문구에는 위 해석 중 각 항목의 최댓값을 씁니다.',
     blocking ? `- 차단 지적 ${blocking}건이 있습니다. 이 리뷰로 통과 확인을 만들 수 없으며 수정 후 새 HEAD를 다시 리뷰해야 합니다.`
       : '- critical/high/medium 지적은 없습니다. unknown은 결함 없음이나 검사 성공을 뜻하지 않습니다.',
   ];
   if (reasons.length) lines.push(`- unknown 사유(현재 parser v${current.parserVersion} 재해석 진단, 발췌는 리뷰 원문 일부):`, ...reasons.map(reason => `  - ${unknownReasonLine(reason)}`));
   if (interpretation.unexplainedStoredUnknown) {
-    lines.push(`- 저장된 unknown ${f.unknown}건 중 ${interpretation.unexplainedStoredUnknown}건은 현재 parser로 사유를 재현할 수 없습니다. 리뷰 당시 판정이므로 유지하며 결함 없음·검사 통과로 보지 않습니다. 부록의 원문을 직접 확인하세요.`);
+    // 판정 기록(stored)의 값만 쓰면 원본에만 있는 unknown이 "0건 중 1건"처럼 보인다(PR #42 재검증 지적). 기록별 값과 최댓값을 함께 쓴다.
+    const recorded = interpretation.recordedUnknown;
+    lines.push(recorded.length === 1
+      ? `- 리뷰 당시 저장된 unknown ${interpretation.recordedUnknownMax}건 중 ${interpretation.unexplainedStoredUnknown}건은 현재 parser로 사유를 재현할 수 없습니다. 리뷰 당시 판정이므로 유지하며 결함 없음·검사 통과로 보지 않습니다. 부록의 원문을 직접 확인하세요.`
+      : `- 기록된 unknown은 ${recorded.map(item => `${recordName(item.record, recovered)} ${item.unknown}건`).join(', ')}입니다. 가장 큰 ${interpretation.recordedUnknownMax}건 중 ${interpretation.unexplainedStoredUnknown}건은 현재 parser로 사유를 재현할 수 없습니다. 이전 기록의 판정이므로 유지하며 결함 없음·검사 통과로 보지 않습니다. 부록의 원문을 직접 확인하세요.`);
   }
   const checkTable = checks => ['| 검사 | 결과 | 개수 | 원인 주장 |', '|---|---|---|---|',
     ...checks.map(item => `| ${cellCode(item.name)} | ${checkStatus[item.status] ?? cell(item.status)} | ${item.count ?? '-'} | ${item.cause ? `${cell(item.cause.text)} (확인 안 됨)` : '-'} |`)];
@@ -479,11 +601,18 @@ export function buildAttentionDraft(input, listLimit = maxListedCommands) {
     if (current.reviewerChecks.length) lines.push(...checkTable(current.reviewerChecks));
     else lines.push('- 현재 parser로 해석된 검사 문장이 없습니다.');
   }
-  if (original && !Array.isArray(original.reviewerChecks)) lines.push('', `- 원본 ledger 결과(v${original.resultVersion})에는 리뷰어 검사 기록이 없습니다.`);
-  else if (original && !same(original.reviewerChecks, result.reviewerChecks)) {
-    lines.push('', '- 원본 ledger에 저장된 검사 기록은 아래와 같으며 복구 기록과 다릅니다(원본 기록을 유지).', '');
-    if (original.reviewerChecks.length) lines.push(...checkTable(original.reviewerChecks));
-    else lines.push('- 원본 ledger에는 해석된 검사 문장이 없습니다.');
+  for (const view of previous) {
+    const name = recordName(view.record);
+    if (!Array.isArray(view.reviewerChecks)) lines.push('', `- ${name} 결과(v${view.resultVersion})에는 리뷰어 검사 기록이 없습니다.`);
+    else if (!same(view.reviewerChecks, result.reviewerChecks)) {
+      lines.push('', `- ${name}에 저장된 검사 기록은 아래와 같으며 복구 기록과 다릅니다(이전 기록을 유지).`, '');
+      if (view.reviewerChecks.length) lines.push(...checkTable(view.reviewerChecks));
+      else lines.push(`- ${name}에는 해석된 검사 문장이 없습니다.`);
+    }
+  }
+  // wrapper 출력의 reviewerCheckFailures와 같은 집합이다.
+  if (interpretation.failedChecks.length) {
+    lines.push('', `- 판정에 쓰는 검사 실패(모든 기록·해석의 합집합): ${interpretation.failedChecks.map(item => `${code(item.name)}(${sourcesText(item.sources, recovered)})`).join(', ')}`);
   }
   if (effective.unknown) lines.push('', '- 원문 일부가 자동 해석 문법 밖이므로 이 표에 없는 검사 주장이 원문에 있을 수 있습니다.');
   lines.push('', '## 4. 리뷰어 job 실행 기록 (plugin 로컬 로그)', '');
@@ -514,7 +643,7 @@ export function buildAttentionDraft(input, listLimit = maxListedCommands) {
   if (reportedNotRun.length) lines.push(`- 리뷰어가 원문에서 미실행·건너뜀으로 보고: ${reportedNotRun.map(item => `${code(item.name)}(${checkStatus[item.status]})`).join(', ')}`);
   lines.push('', '## 6. 원격 CI (GitHub API, 초안 생성 시점의 현재 HEAD)', '', '| 검사 | 상태 |', '|---|---|');
   for (const item of remoteChecks) lines.push(`| ${cell(item.name)} | ${cell(item.state)} |`);
-  lines.push('', '## 7. 불확실성', '', ...uncertainties({ result, jobLog, remoteChecks, interpretation }).map(item => `- ${item}`));
+  lines.push('', '## 7. 불확실성', '', ...uncertainties({ result, jobLog, remoteChecks, interpretation, recovered }).map(item => `- ${item}`));
   lines.push('', '## 8. 관리자 판단 (관리자 작성)', '',
     '> 아래 항목을 확인하고 판단을 작성하세요. 자동 생성 부분은 수정하지 않는 것을 권장합니다. marker·대상 SHA·원문이 없거나 바뀌면 `/review-gate` 준비 도구가 거부합니다.', '',
     blocking ? '- [ ] 차단 지적을 수정하고 새 HEAD를 다시 리뷰할 계획' : '- [ ] critical/high/medium 지적 0건과 리뷰 완료 기록을 인정하는가',

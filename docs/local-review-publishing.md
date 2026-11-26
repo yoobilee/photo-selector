@@ -243,6 +243,60 @@ PR #40 최종 job의 exit 1 명령 2건은 원인을 확인할 수 없었다. pl
 
 로컬 ledger 12건, 보존된 job 로그 7건에 새 코드를 읽기 전용으로 적용했다. 7건 모두 완료 증거를 갖췄고 판정은 위 표와 같다. 이번 HEAD 리뷰 `3cbf421`은 `findings`, `job-command-failed`다. 파일 30개는 바뀌지 않았다.
 
+### 3차 재검증 지적 반영 (PR #42, 검토 HEAD `94a8c5f`)
+
+별도 Codex CLI 재검증이 Medium 2건, Low 2건과 로그 완료 증거의 추가 경계 조건을 지적했다. 개별 조건을 더하기 전에 게시 이력과 실제 게시 요청의 전체 상태 전이를 다시 정리했다.
+
+**수정 전 구조의 문제**
+
+| 불변 조건 | `94a8c5f`에서 검증하던 곳 | 빠진 부분 |
+|---|---|---|
+| 어느 기록이든 게시 이력이 있거나 불명확하면 새 요청 금지 | 공통 로더는 필드 존재(`!== undefined`), dispatch 분기는 참·거짓(`publicationRequested`만), `--recover` 생성은 참·거짓 | `publicationRequested: false`·`null`, 영수증만 있음, 알 수 없는 필드가 경로마다 다르게 판정됨. v2 복구 기록은 재사용 시 hash만 확인 |
+| 원본과 모든 복구 기록의 연결·출처가 유효 | 생성 시 `assertUnrequestedLegacyRecovery`, 재사용 시 `loadStoredLedger`(v2는 hash만) | 기준이 둘. hash가 맞으면 v2 기록의 게시 이력·형식을 보지 않음 |
+| 복구·재해석으로 지적·unknown·검사 실패가 사라지지 않음 | 원본·저장·현재 세 해석 | v2 복구 기록의 판정은 비교 대상이 아님 |
+| 판정·초안·출력·확인 문구가 같은 유효 판정 | 판정·초안·확인 문구는 유효 판정 | wrapper 출력 `codeFindings`·`reviewerCheckFailures`는 판정 기록 값만 씀 |
+| 새 요청을 허용하는 기준은 하나 | 없음 | 판정 차단, 원격 보고서, 파일 재읽기, job 로그 확인이 wrapper 본문에 흩어져 있음 |
+
+**수정 후 공통 판정 구조**
+
+- `publicationState(record, kind)`: 원본 ledger·v2 복구 기록·v3 복구 기록·수집 직후 기록의 게시 이력을 한 기준으로 `none`·`requested`·`confirmed`·`unclear` 중 하나로 판정한다.
+  - `requested`: `publicationRequested: true`만 있음. `confirmed`: 여기에 형식이 맞는 영수증(`commentUrl`, `evidenceHash`)이 있음.
+  - `false`·`null`·문자열 값, 빈 영수증, 영수증만 있음, 기록 종류에 없는 필드는 모두 `unclear`이며 요청한 것으로 본다. 이전 wrapper(v2 복구 포함)는 `true`와 이 영수증 형식만 썼다.
+- `verifyRecoveryOriginal`·`verifyLegacyRecovery`: v3 복구를 처음 만들 때(`--recover`)와 이미 만든 복구 기록을 다시 읽을 때 같은 함수로 원본 ledger와 v2 복구 기록을 검증한다.
+  - 원본·v2 기록 모두 게시 이력 `none`, 완료 상태, 같은 대상·세션, 허용 필드, 결과 형식(v2·v3 필드 목록, 출처 필드 목록, 출처 세션), 지적 집계 형식, 같은 원문·출처가 필요하다. v2 기록은 parser v2와 원본 hash 연결도 확인한다.
+  - v3 복구 기록은 복구 필드 형식, 원본 hash, v2 기록 hash(없으면 `null`)로 둘을 연결한다.
+- 판정은 원본·v2 복구·v3 복구(저장)·현재 재해석 네 가지를 비교한다. 항목별 최댓값(`effectiveFindings`)과 모든 검사 실패(`failedChecks`, 출처 `sources` 포함)를 판정·관리자 초안·wrapper 출력·`review:attention` 출력·확인 문구가 함께 쓴다. v3 복구가 원본이나 v2 복구 기록보다 줄었으면 `recovery-reduced`다.
+- `decidePublication`: 새 dispatch를 허용하는 유일한 판단이다. 필요한 자료만 이 순서로 읽는다.
+  1. `unclear` → 중단(`review-publication-uncertain`). 영수증 기록·재요청을 하지 않는다.
+  2. `requested`·`confirmed` → 판정 차단이 없으면 영수증만 재조회하고, 있으면 중단(`review-parser-mismatch`). job 로그와 원격 보고서는 읽지 않는다.
+  3. `none` + 판정 차단 → job 로그를 읽고 관리자 초안.
+  4. `none` + 같은 대상의 원격 봇 보고서 있음 → 영수증 재조회.
+  5. `none` + job 로그 차단 → 관리자 초안. 모두 통과해야 dispatch.
+- 게시 직전 확인: `beforeDispatch` 안에서 같은 공통 로더로 다시 읽어 처음 판정한 기록과 hash가 같고 게시 이력이 `none`일 때만 `publicationRequested: true`를 쓴다.
+- 요청 실패·응답 유실: 기록이 `none`이면 재실행할 수 있는 준비 실패, 그 밖이면 결과 불명확으로 재요청하지 않는다.
+- 영수증 재조회: 기록을 같은 로더로 다시 읽는다. `confirmed`이고 영수증이 같으면 다시 쓰지 않고, 다르면 충돌로 중단한다. `unclear`이면 기록하지 않는다.
+- 수집 직후(captured) 기록에 게시 필드가 있으면 완료 기록으로 덮어써 지우지 않고 중단한다.
+
+**지적별 수정 전후**
+
+1. Medium(v3 복구 기록 재사용 시 v2 검증 누락): `94a8c5f`에서는 v2 복구 기록에 게시 요청·게시 기록·`false`·알 수 없는 필드·다른 세션·깨진 지적 집계가 있어도 v3 복구 기록에 그 파일 hash가 맞게 기록돼 있으면 일반 실행과 `--recover`가 각각 dispatch했다. 이제 모든 경로에서 `review-recovery-manual`로 중단하고 파일을 쓰지 않는다.
+2. Medium(게시 이력 판정 불일치): `94a8c5f`에서는 판정 기록의 `publicationRequested: false`·`null`·영수증만 있음·알 수 없는 필드에서 일반 실행이 dispatch했다(v3 복구 기록은 `--recover`도). 원본이 `false`·`null`이면 `--recover`가 v3 복구 파일을 쓴 뒤에야 중단했다. 이제 `unclear`로 중단하며 dispatch와 기록 쓰기가 0회다.
+3. Low(unknown 표시): 원본 1·복구 0·현재 0에서 초안에 "저장된 unknown 0건 중 1건"으로 나오던 문장을 "기록된 unknown은 원본 ledger 1건, 복구 기록 0건입니다. 가장 큰 1건 중 1건은 …"으로 바꿨다.
+4. Low(검사 실패 출력): 원본에만 있는 검사 실패가 wrapper 출력 `reviewerCheckFailures`에 빠지던 문제를 고쳤다. 초안 3·7절과 두 CLI 출력이 같은 `failedChecks` 집합을 출처와 함께 쓴다.
+
+**로그 완료 증거의 추가 경계**
+
+plugin 1.0.6은 한 리뷰 job에서 `Starting Codex Review.`, `Reviewer started: …`, `Review output captured.`, `Review output` 제목, `Reviewer finished.`, `Final output` 제목을 각각 한 번만 쓴다. 보존된 실제 job 로그 8건도 모두 각 1회다. 그래서 이 줄이 로그 어디에든(리뷰어 글 블록 안 포함) 두 번 이상 있으면 완료 증거로 인정하지 않는다.
+
+- 다른 원문의 완료 블록이 일치하는 블록 앞이나 뒤에 있음, `Final output` 두 번, 같은 완료 블록 중복, `Reviewer finished.` 두 번, 다른 job 로그가 이어 붙음 → `job-log-not-completed`
+- 정상 진행 메시지(Reasoning summary, Assistant message)가 있는 로그는 그대로 인정한다.
+- 신뢰 범위는 넓히지 않았다. 리뷰어 글에 완료 표시와 같은 줄을 인용하면 실제 로그도 차단된다(fail-closed). 진행 블록 안에만 위조한 완료 순서는 여전히 구분할 수 없다.
+
+**상태 조합 검증표**: 원본 상태 8가지(v2·v3 복구 없음), 원본 3 × v2 복구 기록 6(v3 없음), 원본 5 × v3 복구 기록 8, v2 복구 기록 8 × v3 복구 기록 3을 합쳐 90개 기록 조합을 만들었다. 각 조합을 지적 없음·unknown 판정, 일반·`--recover`·관리자 초안+`--confirm`, 원격 보고서 유무로 실행해 720개 경우를 비교한다. 모델 호출, dispatch, ledger 쓰기, 초안, 확인 문구, 영수증 재조회를 기대 동작표와 대조한다.
+
+- `94a8c5f`: 273건이 기대와 달랐다. 차단 대상에서 dispatch가 일어난 경우 43건, 기대와 다른 ledger 쓰기 113건이다.
+- 수정 후: 720건 모두 기대와 같다. dispatch는 모든 기록이 유효하고 게시 이력이 없으며 지적 없음·원격 보고서 없음인 7건에서만 1회씩 일어났다. 모델 호출은 0회, 원본·v2 복구 기록 쓰기도 0회다.
+
 ### 유지한 경계와 한계
 
 - 실패·미실행·검증 제한·원인 미상 명령 오류를 통과로 바꾸지 않는다. `git grep` exit 1처럼 무해할 수 있는 실패도 원인을 확인할 수 없으므로 자동으로 허용하지 않는다. 관리자가 초안 4절에서 판단한다.
@@ -264,7 +318,7 @@ PR #23에서 실제 완료 문장이 기존 허용 문법 밖이라 `unknown: 1`
 npm run review:publish -- yoobilee/photo-selector <PR번호> --plugin-root <설치된 Codex 플러그인 루트> --session <원래 Claude 세션 ID> --recover
 ```
 
-`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.v3.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. parser v2가 만든 `<원래 ledger>.recovered.json`은 읽기만 하고 수정·삭제하지 않는다. 그 파일이 정확히 v2 복구 형식이고, 게시 요청·게시 기록이 없으며, 같은 원본 ledger hash·세션·대상·원문·출처에서 파생됐을 때만 모델 재호출 없이 v3로 다시 해석하고 그 파일의 hash를 `legacyRecoveredHash`로 남긴다. 게시 요청 기록이 있거나 알 수 없는 필드·부분 기록처럼 요청 여부가 불명확하면 `review-recovery-manual`로 중단하고 사람이 실제 댓글·Actions·영수증을 확인한다. v2 복구 파일만 있는 대상에서 `--recover` 없이 실행해도 원래 ledger로 되돌아가지 않고 같은 이유로 중단한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 복구 결과가 원본의 지적·unknown·검사 기록을 줄이면 `recovery-reduced`로 게시하지 않고 관리자 초안으로 넘긴다. 이미 만든 복구 기록을 다시 쓸 때도 원본과의 연결과 판정을 매번 다시 확인한다(위 "재검증 지적 반영" 1). 원래 결과가 이미 v3이면 저장 당시 해석이 현재 parser와 같을 때만 복구한다. 다르면 `review-recovery-manual`로 중단하고 복구 파일을 만들지 않는다. 이때는 `--recover` 없이 실행해 `parser-mismatch` 관리자 초안을 쓴다(재해석으로 저장된 unknown·검사 기록을 줄이지 않는다). 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
+`--recover`는 native `result --json`만 조회하며 새 리뷰를 호출하지 않는다. 원래 ledger·원문·job은 수정하지 않고 `<원래 ledger>.recovered.v3.json`에 원본 ledger hash와 parser 버전을 포함한 파생 결과 및 게시 상태를 저장한다. parser v2가 만든 `<원래 ledger>.recovered.json`은 읽기만 하고 수정·삭제하지 않는다. 그 파일이 정확히 v2 복구 형식이고, 게시 요청·게시 기록이 없으며, 같은 원본 ledger hash·세션·대상·원문·출처에서 파생됐을 때만 모델 재호출 없이 v3로 다시 해석하고 그 파일의 hash를 `legacyRecoveredHash`로 남긴다. 게시 요청 기록이 있거나 알 수 없는 필드·부분 기록처럼 요청 여부가 불명확하면 `review-recovery-manual`로 중단하고 사람이 실제 댓글·Actions·영수증을 확인한다. v2 복구 파일만 있는 대상에서 `--recover` 없이 실행해도 원래 ledger로 되돌아가지 않고 같은 이유로 중단한다. 원래 ledger의 결과는 이전 형식(v2)이어도 되며 대상·완료 상태·출처 종류·원문 hash만 확인한다. 파생 결과는 항상 현재 형식(v3)으로 다시 만든다. 복구 결과가 원본의 지적·unknown·검사 기록을 줄이면 `recovery-reduced`로 게시하지 않고 관리자 초안으로 넘긴다. 이미 만든 복구 기록을 다시 쓸 때도 원본·v2 복구 기록과의 연결, 두 기록의 게시 이력·형식, 판정을 생성 시와 같은 함수로 매번 다시 확인한다(위 "재검증 지적 반영" 1, "3차 재검증 지적 반영"). 원래 결과가 이미 v3이면 저장 당시 해석이 현재 parser와 같을 때만 복구한다. 다르면 `review-recovery-manual`로 중단하고 복구 파일을 만들지 않는다. 이때는 `--recover` 없이 실행해 `parser-mismatch` 관리자 초안을 쓴다(재해석으로 저장된 unknown·검사 기록을 줄이지 않는다). 같은 옵션으로 다시 실행하면 그 상태를 재사용한다. job·세션·원문·완료 시각·base/head·정책/fingerprint가 다르거나 이미 게시 요청했다면 중단한다. unknown이 남으면 게시하지 않는다. 원래 ledger가 없거나 running/captured인 경우 이 옵션으로 새 모델 실행을 시작하지 않는다. captured의 기존 조회 복구는 기본 wrapper 경로를 사용한다.
 
 PR #23처럼 이미 병합됐거나 base가 바뀐 결과는 복구 게시 대상으로 삼지 않는다. parser 수정은 옛 결과를 새 base에 재연결하는 허가가 아니다.
 

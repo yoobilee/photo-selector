@@ -331,7 +331,8 @@ test('복구는 running/captured 및 다른 세션 ledger를 조회·쓰기·모
     const text = JSON.stringify({ state: kind === 'session' ? 'completed' : kind,
       session: kind === 'session' ? 'other-session' : 'session-1', target: w.target, result });
     writeFileSync(w.path, text);
-    await assert.rejects(w.run({ options: { ...w.options, recover: true } }), /unpublished completed target/);
+    // --recover 생성 경로도 복구 기록을 다시 읽을 때와 같은 원본 검증(verifyRecoveryOriginal)으로 중단한다.
+    await assert.rejects(w.run({ options: { ...w.options, recover: true } }), error => error.code === 'review-recovery-manual');
     if (kind !== 'captured') await assert.rejects(w.run(), /미완료·실패·다른 세션/);
     assert.equal(readFileSync(w.path, 'utf8'), text); assert.equal(existsSync(w.path + '.recovered.v3.json'), false);
     assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 0);
@@ -699,7 +700,8 @@ test('PR #28 원문: wrapper는 지적 0건과 리뷰어 검사 실패를 분리
   assert.equal(first.state, 'review-checks-need-attention'); assert.equal(first.published, false);
   assert.deepEqual(first.blockers, ['reviewer-check-failed']);
   assert.deepEqual(first.codeFindings, zeroFindings);
-  assert.deepEqual(first.reviewerCheckFailures, [{ name: 'privacyGuard', status: 'failed', count: null, cause: { kind: 'environment-claimed', text: '환경의 임시 폴더 생성 권한 제한' } }]);
+  // 판정·초안과 같은 실패 검사 집합이며 어느 기록·해석에서 나왔는지(sources)를 함께 쓴다.
+  assert.deepEqual(first.reviewerCheckFailures, [{ name: 'privacyGuard', status: 'failed', count: null, cause: { kind: 'environment-claimed', text: '환경의 임시 폴더 생성 권한 제한' }, sources: ['stored', 'current'] }]);
   assert.ok(first.reviewerChecks.some(c => c.name === 'Build' && c.status === 'not-run'));
   assert.ok(first.remoteChecks.some(c => c.name === 'GitHub check: verify'));
   assert.equal(first.result.report, pr28Report); assert.match(first.note, /통과로 바꾸지 않았/);
@@ -749,7 +751,7 @@ test('PR #28 형태 v2 ledger 복구: 원본 불변·parser v3로 실패를 분�
   for (const [name, mutate] of [['hash', r => { r.report += ' '; }], ['version', r => { r.v = 1; }], ['status', r => { r.status = 'failed'; }],
     ['source', r => { r.source.kind = 'local-session'; }]]) await t.test(name, async t => {
     const { w, original } = await legacy(t, mutate);
-    await assert.rejects(w.run({ options: { ...w.options, recover: true } }), /Recovery original result invalid/);
+    await assert.rejects(w.run({ options: { ...w.options, recover: true } }), manualRecovery);
     assert.equal(readFileSync(w.path, 'utf8'), original); assert.equal(existsSync(w.path + '.recovered.v3.json'), false);
     assert.equal(w.calls.reviews, 0); assert.equal(w.calls.reads, 0); assert.equal(w.f.dispatches.length, 0);
   });
@@ -878,7 +880,9 @@ test('게시 요청 전 v2 복구 파일 + PR #28 원문: v3 재해석 후 검�
   let output;
   assert.equal(await recover({ out: text => { output = JSON.parse(text); } }), 2);
   unchanged();
-  assert.equal(output.state, 'review-needs-attention'); assert.deepEqual(output.codeFindings, zeroFindings);
+  // codeFindings는 판정에 쓰는 값(원본 v2의 unknown 1 유지)이고, 복구 기록의 저장 집계는 interpretation.stored에 따로 있다.
+  assert.equal(output.state, 'review-needs-attention'); assert.deepEqual(output.codeFindings, { ...zeroFindings, unknown: 1 });
+  assert.deepEqual(output.interpretation.stored.findings, zeroFindings);
   assert.deepEqual(output.blockers.slice(0, 3), ['findings', 'reviewer-check-failed', 'recovery-reduced']);
   assert.equal(output.interpretation.effectiveFindings.unknown, 1);
   assert.deepEqual(output.reviewerCheckFailures.map(c => c.name), ['privacyGuard']);
@@ -920,11 +924,12 @@ test('v2 복구 파일의 게시 요청 기록·불명확·부분 기록·변조
 
 test('v2 복구 파일이 있어도 원래 ledger의 다른 대상·세션·게시 요청·원문 변조는 먼저 거부', async t => {
   for (const [name, original, pattern] of [
-    ['head', o => { o.target.head = 'e'.repeat(40); }, /unpublished completed target/],
-    ['base', o => { o.target.base = 'a'.repeat(40); }, /unpublished completed target/],
-    ['session', o => { o.session = 'other-session'; }, /unpublished completed target/],
-    ['requested', o => { o.publicationRequested = true; }, /unpublished completed target/],
-    ['report', o => { o.result.report += ' Hidden.'; }, /Recovery original result invalid/],
+    ['head', o => { o.target.head = 'e'.repeat(40); }, manualRecovery],
+    ['base', o => { o.target.base = 'a'.repeat(40); }, manualRecovery],
+    ['session', o => { o.session = 'other-session'; }, manualRecovery],
+    ['requested', o => { o.publicationRequested = true; }, manualRecovery],
+    ['requested false', o => { o.publicationRequested = false; }, manualRecovery],
+    ['report', o => { o.result.report += ' Hidden.'; }, manualRecovery],
   ]) await t.test(name, async t => {
     const { w, unchanged, recover } = await legacyRecoveryFixture(t, { original });
     await assert.rejects(recover(), pattern);

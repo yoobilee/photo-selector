@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { localFixture, pr28Report, pr34Report, pr37FinalReport, pr40FinalReport, cleanJobLog, pr40FinalJobLog, completeJobLog, jobLogStart, jobLogEnd } from './review-local-fixture.mjs';
 import { runPluginPublication, collectPluginResult } from './review-plugin-cli.mjs';
 import { runAttentionCli, parseAttentionArgs, attentionFailureMessage } from './review-attention-cli.mjs';
-import { parseJobCommands, ledgerFileName, draftMarker, classifyCheck, buildAttentionDraft, maxDraftChars, jobLogBlockers, interpretStoredResult } from './review-attention.mjs';
+import { parseJobCommands, ledgerFileName, draftMarker, classifyCheck, buildAttentionDraft, maxDraftChars, jobLogBlockers, interpretStoredResult,
+  publicationState, decidePublication, nodeFiles } from './review-attention.mjs';
+import { analyzeReviewText } from './review-result-parser.mjs';
 import { reportHash, sha256 } from './review-gate-core.mjs';
 
 const home = 'C:\\Users\\tester';
@@ -193,7 +195,7 @@ test('review:attention은 실행 중·v2 복구·복구 연결 불일치·차단
     const s = await setup(t); await s.publish();
     const ledger = JSON.parse(readFileSync(s.ledgerPath, 'utf8'));
     writeFileSync(`${s.ledgerPath}.recovered.v3.json`, JSON.stringify({ ...ledger, recovery: { originalLedgerHash: '0'.repeat(64), parserVersion: 3 } }));
-    assert.equal(await s.attention(), 1); assert.match(s.cliErr.at(-1), /v3 복구 기록과 원본 ledger의 연결/);
+    assert.equal(await s.attention(), 1); assert.match(s.cliErr.at(-1), /v3 복구 기록과 원본 ledger·v2 복구 기록의 연결/);
   });
   await t.test('not blocked', async t => {
     const s = await setup(t);
@@ -648,17 +650,25 @@ test('이전 parser로 저장한 v3 ledger는 재해석으로 바꾸거나 게�
 
 // PR #42 재검증 지적 1: 복구 파일(.recovered.v3.json)이 원본 ledger의 판정을 가리지 않아야 한다.
 // 원본·복구본·현재 parser 해석을 함께 비교하고, 원본과의 연결(대상·세션·job·원문·hash·게시 요청 기록)을 모든 경로에서 같은 기준으로 확인한다.
-async function recoveryLedgers(t, { report = pr37FinalReport, log = completeJobLog(report), original = () => {}, recovered = () => {}, legacy = null } = {}) {
+// legacyRecord를 주면 이전 wrapper 형태(원본 v2 결과 + 유효한 v2 복구 기록)로 만들고, v2 기록을 바꾼 뒤 그 파일의 실제 hash를 v3 복구 기록에 넣는다.
+async function recoveryLedgers(t, { report = pr37FinalReport, log = completeJobLog(report), original = () => {}, recovered = () => {}, legacy = null, legacyRecord = null } = {}) {
   const s = await setup(t, { report, log });
   const current = collectPluginResult({ output: s.job.result, stored: { job: { status: 'completed' }, storedJob: s.job }, target: s.target,
     session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
-  const originalLedger = { state: 'completed', target: structuredClone(s.target), session: 'session-1', result: structuredClone(current) };
+  const v2 = () => { const copy = { ...structuredClone(current), v: 2 }; delete copy.reviewerChecks; return copy; };
+  const originalLedger = { state: 'completed', target: structuredClone(s.target), session: 'session-1', result: legacyRecord ? v2() : structuredClone(current) };
   original(originalLedger);
   const originalText = JSON.stringify(originalLedger);
   writeFileSync(s.ledgerPath, originalText);
+  if (legacyRecord) {
+    const legacyLedger = { state: 'completed', target: structuredClone(s.target), session: 'session-1', result: v2(),
+      recovery: { originalLedgerHash: sha256(originalText), parserVersion: 2 } };
+    legacyRecord(legacyLedger);
+    legacy = JSON.stringify(legacyLedger);
+  }
   if (legacy !== null) writeFileSync(`${s.ledgerPath}.recovered.json`, legacy);
   const recoveredLedger = { state: 'completed', target: structuredClone(s.target), session: 'session-1', result: structuredClone(current),
-    recovery: { originalLedgerHash: sha256(originalText), legacyRecoveredHash: null, parserVersion: 4 } };
+    recovery: { originalLedgerHash: sha256(originalText), legacyRecoveredHash: legacyRecord ? sha256(legacy) : null, parserVersion: 4 } };
   recovered(recoveredLedger);
   const recoveredText = JSON.stringify(recoveredLedger);
   writeFileSync(`${s.ledgerPath}.recovered.v3.json`, recoveredText);
@@ -830,4 +840,471 @@ test('완료 증거 판별 단위: 원문 블록은 고정 순서와 정확한 �
   // Final output은 원문 블록 뒤의 마지막 블록이어야 한다.
   assert.equal(completion([...jobLogStart, '', `${at(1)} Final output`, report, ...end.slice(0, 5)]).finalOutput, false);
   assert.equal(completion([...jobLogStart, ...end, '', `${at(59)} Reasoning summary`, '- late']).finalOutput, false);
+});
+
+// PR #42 3차 재검증: 게시 이력·기록 유효성·실행 모드·원격 보고서 조합별 상태 전이 검증표.
+// 원본 ledger·v2 복구 기록(.recovered.json)·v3 복구 기록(.recovered.v3.json)의 게시 이력 상태와 유효성을 조합하고,
+// 실행 모드(일반·--recover·관리자 초안+--confirm)와 원격 봇 보고서 유무별로 모델 호출·dispatch·기록 쓰기·초안·확인 문구·영수증 재조회를 비교한다.
+// 새 게시 요청(dispatch)은 모든 기록이 유효하고 게시 이력이 없으며 판정·job 로그 차단이 없고 원격 보고서가 없을 때만 1회 허용된다.
+const receiptStub = { commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-999', evidenceHash: 'b'.repeat(64) };
+const recordVariants = {
+  none: () => {},
+  requested: l => { l.publicationRequested = true; },
+  confirmed: (l, receipt) => { l.publicationRequested = true; l.publication = { ...(receipt ?? receiptStub) }; },
+  'unclear:false': l => { l.publicationRequested = false; },
+  'unclear:null': l => { l.publicationRequested = null; },
+  'unclear:empty-publication': l => { l.publicationRequested = true; l.publication = {}; },
+  'unclear:publication-only': (l, receipt) => { l.publication = { ...(receipt ?? receiptStub) }; },
+  'unclear:unknown-field': l => { l.published = true; },
+  'invalid:session': l => { l.session = 'other-session'; },
+  'invalid:findings': l => { l.result.findings = { unknown: 0 }; },
+};
+const variantState = variant => variant === 'absent' ? 'absent' : variant.split(':')[0];
+const judgements = {
+  // 지적 없음·완료 증거가 있는 job 로그: 게시 이력이 없으면 새 요청 대상
+  clean: 'No actionable defects were found. Lint passed. Build and E2E were not run.',
+  // unknown 1(차단 지적 없음): 관리자 초안·확인 문구 대상
+  unknown: pr40FinalReport,
+};
+
+async function transitionCase(t, { original, legacy, recovered, judgement, remote }) {
+  const report = judgements[judgement];
+  const s = await setup(t, { report, log: completeJobLog(report) });
+  // 완료 기록은 수집 시점의 원격 CI 상태를 담는다. --recover가 같은 job에서 다시 만든 결과와 같아야 원격 보고서와 비교할 수 있다.
+  const current = collectPluginResult({ output: s.job.result, stored: { job: { status: 'completed' }, storedJob: s.job }, target: s.target,
+    session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: (await s.f.collect()).packet.checks });
+  let receipt = null;
+  if (remote) { const published = await s.f.publish(current); s.f.finish(published); receipt = await s.f.confirm(); }
+  const receiptFields = receipt && { commentUrl: receipt.commentUrl, evidenceHash: receipt.evidenceHash };
+  const v2 = result => { const copy = { ...structuredClone(result), v: 2 }; delete copy.reviewerChecks; return copy; };
+  // v2 복구 기록이 있는 대상은 원본도 v2 결과(이전 wrapper)다.
+  const originalLedger = { state: 'completed', target: structuredClone(s.target), session: 'session-1',
+    result: legacy === 'absent' ? structuredClone(current) : v2(current), ...(legacy === 'absent' ? { parserVersion: 4 } : {}) };
+  recordVariants[original](originalLedger, receiptFields);
+  const originalText = JSON.stringify(originalLedger);
+  writeFileSync(s.ledgerPath, originalText);
+  let legacyText = null;
+  if (legacy !== 'absent') {
+    const legacyLedger = { state: 'completed', target: structuredClone(s.target), session: 'session-1', result: v2(current),
+      recovery: { originalLedgerHash: sha256(originalText), parserVersion: 2 } };
+    recordVariants[legacy](legacyLedger, receiptFields);
+    legacyText = JSON.stringify(legacyLedger);
+    writeFileSync(`${s.ledgerPath}.recovered.json`, legacyText);
+  }
+  if (recovered !== 'absent') {
+    // v3 복구 기록은 실제 v2 복구 파일 hash를 기록한다(hash만으로는 v2 기록의 유효성·게시 이력 부재를 보장하지 못함).
+    const recoveredLedger = { state: 'completed', target: structuredClone(s.target), session: 'session-1', result: structuredClone(current),
+      recovery: { originalLedgerHash: sha256(originalText), legacyRecoveredHash: legacyText === null ? null : sha256(legacyText), parserVersion: 4 } };
+    recordVariants[recovered](recoveredLedger, receiptFields);
+    writeFileSync(`${s.ledgerPath}.recovered.v3.json`, JSON.stringify(recoveredLedger));
+  }
+  return s;
+}
+
+const recordFiles = { original: '', legacyRecovered: '.recovered.json', recovered: '.recovered.v3.json' };
+const snapshot = s => Object.fromEntries(readdirSync(s.directory).map(name => [name, readFileSync(join(s.directory, name), 'utf8')]));
+const attentionCodes = ['review-attention-busy', 'review-attention-no-ledger', 'review-attention-ledger-invalid', 'review-attention-publication-requested',
+  'review-attention-not-blocked', 'review-recovery-manual', 'review-attention-comment-invalid', 'review-attention-not-admin', 'review-attention-bot-report',
+  'review-attention-blocking-findings', 'review-attention-ci', 'review-attention-gate-mismatch', 'review-attention-draft-too-large', 'review-attention-file-conflict'];
+const attentionCode = text => attentionCodes.find(code => attentionFailureMessage({ code }) === text) ?? 'other';
+
+async function observeTransition(s, mode) {
+  const before = snapshot(s);
+  const base = ledgerFileName(s.target);
+  let outcome;
+  if (mode === 'confirm') {
+    const draftExit = await s.attention();
+    const draftOutcome = draftExit === 0 ? 'draft' : attentionCode(s.cliErr.at(-1));
+    const body = draftExit === 0 ? readFileSync(s.cliOut.at(-1).draftPath, 'utf8') : '# 독립 리뷰 보고서\n\n(초안 아님)';
+    const confirmExit = await s.attention('--confirm', s.post(body));
+    outcome = `${draftOutcome}/${confirmExit === 0 ? 'confirm' : attentionCode(s.cliErr.at(-1))}`;
+  } else {
+    const run = mode === 'recover' ? s.publish({ options: { repository: 'owner/repo', number: 1, session: 'session-1', recover: true } }) : s.publish();
+    try { outcome = `exit:${await run}`; } catch (error) { outcome = error.code ? `stop:${error.code}` : /완료를 확인하지 못함/.test(error.message) ? 'stop:receipt-pending' : `stop:${error.message}`; }
+  }
+  const after = snapshot(s);
+  const changed = name => before[name] !== after[name];
+  return {
+    outcome, reviews: s.calls.reviews, dispatches: s.f.dispatches.length,
+    ledgerWrites: Object.entries(recordFiles).filter(([, suffix]) => changed(base + suffix)).map(([record]) => record),
+    draft: Object.keys(after).some(name => name.includes('.attention-') && !before[name]),
+    confirmation: Object.keys(after).some(name => name.includes('.review-gate-') && !before[name]),
+    receipt: s.outputs.some(item => item.state === 'published-awaiting-human') ? 'confirmed' : outcome === 'stop:receipt-pending' ? 'polled' : 'no',
+  };
+}
+
+// 허용 동작 기준. 모든 기록이 유효하고 게시 이력이 없을 때만 판정 기록(v3 복구가 있으면 v3, 없으면 원본)의 상태로 진행한다.
+function expectedTransition({ original, legacy, recovered, judgement, mode, remote }) {
+  const o = variantState(original); const l = variantState(legacy); const v = variantState(recovered);
+  const none = { reviews: 0, dispatches: 0, ledgerWrites: [], draft: false, confirmation: false, receipt: 'no' };
+  const previousOk = o === 'none' && (l === 'absent' || l === 'none');
+  if (mode === 'confirm') {
+    const refuse = code => ({ ...none, outcome: `${code}/${code}` });
+    if (v === 'absent' ? l !== 'absent' : !previousOk) return refuse('review-recovery-manual');
+    const record = v === 'absent' ? o : v;
+    if (record !== 'none') return refuse('review-attention-publication-requested');
+    // 판정이 깨끗해도 관리자 자료 경로에는 job 로그 사본이 없어(job-log-unverified) 차단된 결과로 초안을 만든다(기존 동작). 게시 요청은 하지 않는다.
+    return { ...none, outcome: remote ? 'draft/review-attention-bot-report' : 'draft/confirm', draft: true, confirmation: !remote };
+  }
+  let record; let created = false;
+  if (v !== 'absent') {
+    if (!previousOk) return { ...none, outcome: 'stop:review-recovery-manual' };
+    record = v;
+  } else if (mode === 'recover') {
+    if (!previousOk) return { ...none, outcome: 'stop:review-recovery-manual' };
+    record = 'none'; created = true;
+  } else {
+    if (l !== 'absent') return { ...none, outcome: 'stop:review-recovery-manual' };
+    record = o;
+  }
+  const file = v !== 'absent' || created ? 'recovered' : 'original';
+  const createdWrites = created ? ['recovered'] : [];
+  if (record === 'unclear') return { ...none, outcome: 'stop:review-publication-uncertain', ledgerWrites: createdWrites };
+  if (record === 'requested' || record === 'confirmed') {
+    if (judgement !== 'clean') return { ...none, outcome: 'stop:review-parser-mismatch', ledgerWrites: createdWrites };
+    return remote ? { ...none, outcome: 'exit:0', receipt: 'confirmed', ledgerWrites: record === 'requested' ? [file] : [] }
+      : { ...none, outcome: 'stop:receipt-pending', receipt: 'polled' };
+  }
+  if (judgement !== 'clean') return { ...none, outcome: 'exit:2', draft: true, ledgerWrites: createdWrites };
+  if (remote) return { ...none, outcome: 'exit:0', receipt: 'confirmed', ledgerWrites: [file] };
+  return { ...none, outcome: 'stop:receipt-pending', dispatches: 1, receipt: 'polled', ledgerWrites: [file] };
+}
+
+const transitionConfigs = [
+  // A. 원본 ledger만 있음: 원본의 게시 이력 상태 전체
+  ...['none', 'requested', 'confirmed', 'unclear:false', 'unclear:null', 'unclear:empty-publication', 'unclear:publication-only', 'unclear:unknown-field']
+    .map(original => ({ original, legacy: 'absent', recovered: 'absent' })),
+  // B. v2 복구 기록만 있음(v3 복구 전): 원본·v2 기록의 게시 이력·유효성
+  ...['none', 'requested', 'unclear:false'].flatMap(original => ['none', 'requested', 'confirmed', 'unclear:false', 'unclear:unknown-field', 'invalid:session']
+    .map(legacy => ({ original, legacy, recovered: 'absent' }))),
+  // C. v3 복구 기록 + 원본: 두 기록의 게시 이력 상태
+  ...['none', 'requested', 'confirmed', 'unclear:false', 'unclear:publication-only'].flatMap(original => Object.keys(recordVariants).filter(name => !name.startsWith('invalid'))
+    .map(recovered => ({ original, legacy: 'absent', recovered }))),
+  // D. v3 복구 기록 + v2 복구 기록 + 원본: 재사용 경로의 v2 기록 검증(hash는 일치)
+  ...['none', 'requested', 'confirmed', 'unclear:false', 'unclear:null', 'unclear:unknown-field', 'invalid:session', 'invalid:findings']
+    .flatMap(legacy => ['none', 'requested', 'unclear:false'].map(recovered => ({ original: 'none', legacy, recovered }))),
+];
+const transitionRuns = transitionConfigs.flatMap(config => [
+  ...['normal', 'recover'].flatMap(mode => [false, true].map(remote => ({ ...config, judgement: 'clean', mode, remote }))),
+  { ...config, judgement: 'clean', mode: 'confirm', remote: false },
+  ...['normal', 'recover', 'confirm'].map(mode => ({ ...config, judgement: 'unknown', mode, remote: false })),
+]);
+const transitionName = run => `${run.original} | v2 ${run.legacy} | v3 ${run.recovered} | ${run.judgement} | ${run.mode} | remote ${run.remote ? 'yes' : 'no'}`;
+
+test('상태 전이 검증표: 원본·v2·v3 기록의 게시 이력·유효성 × 실행 모드 × 원격 보고서별 허용 동작만 일어남', async t => {
+  const rows = [];
+  for (const run of transitionRuns) {
+    await t.test(transitionName(run), async t => {
+      const s = await transitionCase(t, run);
+      const actual = await observeTransition(s, run.mode);
+      const expected = expectedTransition(run);
+      rows.push({ ...run, ...actual });
+      assert.deepEqual(actual, expected);
+      // 차단 대상의 dispatch는 0회, 허용 대상도 1회를 넘지 않는다. 기존 리뷰가 있으므로 모델은 호출하지 않는다.
+      assert.ok(actual.dispatches <= 1); assert.equal(actual.reviews, 0);
+      // 원본 ledger·v2 복구 기록은 어떤 경로에서도 바뀌지 않는다(영수증·요청 기록은 판정 기록에만 쓴다).
+      assert.ok(!actual.ledgerWrites.includes('legacyRecovered'));
+      if (run.recovered !== 'absent' || run.mode === 'recover') assert.ok(!actual.ledgerWrites.includes('original'));
+    });
+  }
+  // 조합 수와 dispatch가 일어난 조합(모든 기록 유효·게시 이력 없음·지적 없음·원격 보고서 없음)만 따로 확인한다.
+  assert.equal(rows.length, transitionRuns.length);
+  const dispatched = rows.filter(row => row.dispatches > 0).map(transitionName);
+  assert.deepEqual(dispatched, transitionRuns.filter(run => expectedTransition(run).dispatches === 1).map(transitionName));
+  for (const name of dispatched) assert.match(name, /^none \| v2 (absent|none) \| v3 (absent|none) \| clean \| (normal|recover) \| remote no$/);
+});
+
+test('정상 최초 게시부터 영수증 재조회·재실행까지 모델 호출과 dispatch는 각각 한 번', async t => {
+  const report = judgements.clean;
+  const s = await setup(t, { report, log: completeJobLog(report) });
+  const recover = () => s.publish({ options: { repository: 'owner/repo', number: 1, session: 'session-1', recover: true } });
+  await assert.rejects(s.publish(), /완료를 확인하지 못함/);
+  assert.deepEqual([s.calls.reviews, s.f.dispatches.length], [1, 1]);
+  assert.equal(JSON.parse(readFileSync(s.ledgerPath, 'utf8')).publicationRequested, true);
+  // 응답 대기 중 재실행: 영수증만 재조회하고 다시 요청하지 않는다. --recover도 게시 이력이 있는 원본에서는 복구 기록을 만들지 않는다.
+  await assert.rejects(s.publish(), /완료를 확인하지 못함/);
+  await assert.rejects(recover(), error => error.code === 'review-recovery-manual');
+  assert.equal(await s.attention(), 1); assert.match(s.cliErr.at(-1), /이미 봇 게시를 요청/);
+  const published = await s.f.publish(s.f.dispatches[0].result); s.f.finish(published);
+  assert.equal(await s.publish(), 0);
+  const confirmedText = readFileSync(s.ledgerPath, 'utf8');
+  assert.deepEqual(Object.keys(JSON.parse(confirmedText).publication).sort(), ['commentUrl', 'evidenceHash']);
+  // 영수증 기록 뒤 재실행은 같은 영수증을 확인만 하고 ledger를 다시 쓰지 않는다.
+  assert.equal(await s.publish(), 0); assert.equal(readFileSync(s.ledgerPath, 'utf8'), confirmedText);
+  await assert.rejects(recover(), error => error.code === 'review-recovery-manual');
+  assert.deepEqual(s.files().filter(name => name.includes('.recovered')), []);
+  assert.deepEqual([s.calls.reviews, s.f.dispatches.length, s.f.comments.length], [1, 1, 1]);
+});
+
+test('로컬 기록 없음·실행 중·수집 직후 기록의 상태 전이', async t => {
+  const report = judgements.clean;
+  await t.test('원격 보고서가 이미 있으면 모델·dispatch 없이 영수증만 확인하고 기록을 만들지 않음', async t => {
+    const s = await setup(t, { report, log: completeJobLog(report) });
+    const current = collectPluginResult({ output: s.job.result, stored: { job: { status: 'completed' }, storedJob: s.job }, target: s.target,
+      session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+    const published = await s.f.publish(current); s.f.finish(published);
+    assert.equal(await s.publish(), 0); assert.equal(s.outputs.at(-1).state, 'published-awaiting-human');
+    assert.deepEqual([s.calls.reviews, s.f.dispatches.length], [0, 0]); assert.deepEqual(s.files(), ['job-1.log']);
+  });
+  await t.test('--recover는 기록이 없으면 모델을 호출하지 않음', async t => {
+    const s = await setup(t, { report, log: completeJobLog(report) });
+    await assert.rejects(s.publish({ options: { repository: 'owner/repo', number: 1, session: 'session-1', recover: true } }));
+    assert.deepEqual([s.calls.reviews, s.f.dispatches.length], [0, 0]); assert.deepEqual(s.files(), ['job-1.log']);
+  });
+  await t.test('실행 중 기록은 재실행·게시하지 않음', async t => {
+    const s = await setup(t, { report, log: completeJobLog(report) });
+    const text = JSON.stringify({ state: 'running', target: s.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z' });
+    writeFileSync(s.ledgerPath, text);
+    await assert.rejects(s.publish(), /미완료/);
+    assert.equal(readFileSync(s.ledgerPath, 'utf8'), text); assert.deepEqual([s.calls.reviews, s.f.dispatches.length], [0, 0]);
+  });
+  for (const [name, mutate] of [['requested', l => { l.publicationRequested = true; }], ['false', l => { l.publicationRequested = false; }],
+    ['publication', l => { l.publication = { ...receiptStub }; }]]) {
+    await t.test(`게시 이력이 있는 수집 직후 기록(${name})은 완료 기록으로 덮어쓰지 않고 중단`, async t => {
+      const s = await setup(t, { report, log: completeJobLog(report) });
+      const ledger = { state: 'captured', target: s.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', output: s.job.result };
+      mutate(ledger);
+      const text = JSON.stringify(ledger);
+      writeFileSync(s.ledgerPath, text);
+      await assert.rejects(s.publish(), error => error.code === 'review-publication-uncertain');
+      assert.equal(readFileSync(s.ledgerPath, 'utf8'), text); assert.deepEqual([s.calls.reviews, s.calls.reads, s.f.dispatches.length], [0, 0, 0]);
+    });
+  }
+  await t.test('게시 이력 없는 수집 직후 기록은 모델 재호출 없이 완료 처리 후 한 번 요청', async t => {
+    const s = await setup(t, { report, log: completeJobLog(report) });
+    writeFileSync(s.ledgerPath, JSON.stringify({ state: 'captured', target: s.target, session: 'session-1', startedAt: '2026-11-09T00:00:00Z', output: s.job.result }));
+    await assert.rejects(s.publish(), /완료를 확인하지 못함/);
+    assert.deepEqual([s.calls.reviews, s.f.dispatches.length], [0, 1]);
+  });
+});
+
+test('게시 이력 상태는 모든 기록에서 같은 기준 하나로 판정하고 불완전·모호한 기록은 요청한 것으로 봄', () => {
+  const base = { state: 'completed', target: {}, session: 's', result: {} };
+  const cases = [
+    [{}, 'none'], [{ publicationRequested: true }, 'requested'], [{ publicationRequested: true, publication: receiptStub }, 'confirmed'],
+    [{ publicationRequested: false }, 'unclear'], [{ publicationRequested: null }, 'unclear'], [{ publicationRequested: 'true' }, 'unclear'],
+    [{ publicationRequested: 1 }, 'unclear'], [{ publicationRequested: undefined }, 'unclear'], [{ publication: receiptStub }, 'unclear'],
+    [{ publicationRequested: true, publication: {} }, 'unclear'], [{ publicationRequested: true, publication: null }, 'unclear'],
+    [{ publicationRequested: true, publication: { commentUrl: '', evidenceHash: 'b'.repeat(64) } }, 'unclear'],
+    [{ publicationRequested: true, publication: { commentUrl: 'x', evidenceHash: 'zz' } }, 'unclear'],
+    [{ publicationRequested: true, publication: { ...receiptStub, extra: 1 } }, 'unclear'],
+    [{ published: true }, 'unclear'], [{ dispatched: false }, 'unclear'],
+  ];
+  for (const [fields, expected] of cases) {
+    for (const kind of ['original', 'recovered', 'legacyRecovered']) {
+      const record = { ...base, ...(kind === 'original' ? {} : { recovery: {} }), ...fields };
+      assert.equal(publicationState(record, kind), expected, `${kind} ${JSON.stringify(fields)}`);
+    }
+  }
+  // 기록 종류별 허용 필드: 원본의 recovery, 복구 기록의 parserVersion은 형식 밖이다.
+  assert.equal(publicationState({ ...base, recovery: {} }, 'original'), 'unclear');
+  assert.equal(publicationState({ ...base, recovery: {}, parserVersion: 4 }, 'recovered'), 'unclear');
+  assert.equal(publicationState({ ...base, parserVersion: 4 }, 'original'), 'none');
+  assert.equal(publicationState(null), 'unclear'); assert.equal(publicationState([]), 'unclear');
+  assert.equal(publicationState({ state: 'captured', target: {}, session: 's', startedAt: 't', output: {}, stored: {} }, 'captured'), 'none');
+  assert.equal(publicationState({ state: 'captured', target: {}, session: 's', startedAt: 't', output: {}, publicationRequested: true }, 'captured'), 'unclear');
+});
+
+test('새 게시 요청 판단 기준은 decidePublication 하나이며 필요한 자료만 읽음', async () => {
+  const clean = interpretStoredResult({ report: judgements.clean, ...analyzeReviewText(judgements.clean) });
+  const blockedInterpretation = interpretStoredResult({ report: pr40FinalReport, ...analyzeReviewText(pr40FinalReport) });
+  const goodLog = { status: 'captured', commands: [], unfinished: [], ambiguous: [], completion: { reviewStarted: true, reviewOutput: true, finalOutput: true } };
+  const badLog = { ...goodLog, completion: { ...goodLog.completion, finalOutput: false } };
+  const decide = async (publication, interpretation, remote, log) => {
+    const reads = { remote: 0, log: 0 };
+    const decision = await decidePublication({ publication, result: {}, interpretation,
+      remoteReports: async () => { reads.remote++; return remote; }, jobLog: async () => { reads.log++; return log; } });
+    return { action: decision.action, code: decision.code ?? null, blockers: decision.blockers ?? [], reads };
+  };
+  const cases = [
+    [['unclear', clean, 0, goodLog], { action: 'stop', code: 'review-publication-uncertain', blockers: [], reads: { remote: 0, log: 0 } }],
+    [['bogus', clean, 0, goodLog], { action: 'stop', code: 'review-publication-uncertain', blockers: [], reads: { remote: 0, log: 0 } }],
+    [['requested', clean, 0, goodLog], { action: 'receipt', code: null, blockers: [], reads: { remote: 0, log: 0 } }],
+    [['confirmed', clean, 1, goodLog], { action: 'receipt', code: null, blockers: [], reads: { remote: 0, log: 0 } }],
+    [['requested', blockedInterpretation, 0, goodLog], { action: 'stop', code: 'review-parser-mismatch', blockers: ['findings'], reads: { remote: 0, log: 0 } }],
+    [['none', blockedInterpretation, 0, goodLog], { action: 'blocked', code: null, blockers: ['findings'], reads: { remote: 0, log: 1 } }],
+    [['none', blockedInterpretation, 1, badLog], { action: 'blocked', code: null, blockers: ['findings', 'job-log-not-completed'], reads: { remote: 0, log: 1 } }],
+    [['none', clean, 1, badLog], { action: 'receipt', code: null, blockers: [], reads: { remote: 1, log: 0 } }],
+    [['none', clean, 0, badLog], { action: 'blocked', code: null, blockers: ['job-log-not-completed'], reads: { remote: 1, log: 1 } }],
+    [['none', clean, 0, goodLog], { action: 'dispatch', code: null, blockers: [], reads: { remote: 1, log: 1 } }],
+  ];
+  for (const [args, expected] of cases) assert.deepEqual(await decide(...args), expected, args[0]);
+});
+
+test('게시 직전 확인에서 판정 기록이 바뀌었거나 게시 이력이 생겼으면 요청하지 않음', async t => {
+  const report = judgements.clean;
+  for (const [name, mutate] of [['requested by another run', l => { l.publicationRequested = true; }], ['same state, different record', l => { l.parserVersion = 3; }]]) {
+    await t.test(name, async t => {
+      const s = await setup(t, { report, log: completeJobLog(report) });
+      const current = collectPluginResult({ output: s.job.result, stored: { job: { status: 'completed' }, storedJob: s.job }, target: s.target,
+        session: 'session-1', startedAt: '2026-11-09T00:00:00Z', checks: [] });
+      writeFileSync(s.ledgerPath, JSON.stringify({ state: 'completed', target: s.target, session: 'session-1', result: current, parserVersion: 4 }));
+      // 판정용 로딩(1회차) 뒤, 게시 직전 로딩(2회차) 전에 다른 실행이 기록을 바꾼 상황.
+      let loads = 0; let changed = null;
+      const files = { ...nodeFiles, read: path => {
+        if (path === s.ledgerPath && ++loads === 2) {
+          const ledger = JSON.parse(readFileSync(path, 'utf8')); mutate(ledger); changed = JSON.stringify(ledger); writeFileSync(path, changed);
+        }
+        return readFileSync(path, 'utf8');
+      } };
+      await assert.rejects(s.publish({ files }), error => error.code === 'review-publication-uncertain');
+      assert.equal(readFileSync(s.ledgerPath, 'utf8'), changed); assert.equal(s.f.dispatches.length, 0);
+    });
+  }
+});
+
+test('기록한 영수증과 원격 영수증이 다르면 덮어쓰지 않고 충돌로 중단', async t => {
+  const s = await transitionCase(t, { original: 'confirmed', legacy: 'absent', recovered: 'absent', judgement: 'clean', remote: true });
+  const ledger = JSON.parse(readFileSync(s.ledgerPath, 'utf8'));
+  ledger.publication.commentUrl = receiptStub.commentUrl;
+  const text = JSON.stringify(ledger); writeFileSync(s.ledgerPath, text);
+  await assert.rejects(s.publish(), error => error.code === 'review-publication-conflict');
+  assert.equal(readFileSync(s.ledgerPath, 'utf8'), text); assert.equal(s.f.dispatches.length, 0);
+});
+
+// PR #42 3차 재검증 Medium 1: 이미 만든 v3 복구 기록을 다시 읽을 때도 v2 복구 기록을 처음 만들 때와 같은 기준으로 검증한다.
+// v3 복구 기록에 v2 파일 hash가 맞게 기록돼 있어도 v2 기록의 내용(게시 이력·형식·연결·출처)을 확인한다.
+test('v3 복구 기록 재사용 시 v2 복구 기록의 게시 이력·형식·연결·출처를 생성 시와 같은 기준으로 검증', async t => {
+  const cases = [
+    ['requested', l => { l.publicationRequested = true; }],
+    ['published', l => { l.publicationRequested = true; l.publication = { ...receiptStub }; }],
+    ['requested false', l => { l.publicationRequested = false; }],
+    ['requested null', l => { l.publicationRequested = null; }],
+    ['empty publication', l => { l.publicationRequested = true; l.publication = {}; }],
+    ['publication only', l => { l.publication = { ...receiptStub }; }],
+    ['unknown field', l => { l.extra = 1; }],
+    ['recovery extra', l => { l.recovery.publicationRequested = true; }],
+    ['parser version', l => { l.recovery.parserVersion = 3; }],
+    ['original hash', l => { l.recovery.originalLedgerHash = '0'.repeat(64); }],
+    ['state', l => { l.state = 'captured'; }],
+    ['session', l => { l.session = 'other-session'; }],
+    ['target', l => { l.target.fingerprint = '0'.repeat(64); }],
+    ['result version', l => { l.result.v = 3; }],
+    ['result extra field', l => { l.result.reviewerChecks = []; }],
+    ['findings format', l => { l.result.findings = { unknown: 0 }; }],
+    ['report', l => { l.result.report += ' Hidden.'; l.result.source.outputHash = reportHash(l.result.report); }],
+    ['job', l => { l.result.source.jobId = 'other-job'; }],
+    ['source session', l => { l.result.source.sessionId = 'other-session'; }],
+    ['source extra field', l => { l.result.source.extra = 1; }],
+  ];
+  for (const [name, mutate] of cases) await t.test(name, async t => {
+    const s = await recoveryLedgers(t, { report: judgements.clean, log: completeJobLog(judgements.clean), legacyRecord: mutate });
+    await assert.rejects(s.publish(), error => error.code === 'review-recovery-manual');
+    await assert.rejects(s.recover(), error => error.code === 'review-recovery-manual');
+    assert.equal(await s.attention(), 1); assert.match(s.cliErr.at(-1), /v2 복구 기록/);
+    assert.equal(await s.attention('--confirm', s.post('# 독립 리뷰 보고서\n')), 1); assert.match(s.cliErr.at(-1), /v2 복구 기록/);
+    s.unchanged();
+    assert.deepEqual([s.calls.reviews, s.calls.reads, s.calls.jobReads, s.f.dispatches.length], [0, 0, 0, 0]);
+  });
+  await t.test('valid v2 record (control)', async t => {
+    const s = await recoveryLedgers(t, { report: judgements.clean, log: completeJobLog(judgements.clean), legacyRecord: () => {} });
+    await assert.rejects(s.publish(), /완료를 확인하지 못함/);
+    assert.equal(s.f.dispatches.length, 1); s.unchanged({ recoveredToo: false });
+  });
+});
+
+// v2 복구 기록도 이전 판정 기록이다. v3 복구 기록이 v2 복구 기록보다 지적·unknown을 줄이면 원본과 마찬가지로 축소로 본다.
+test('v3 복구 기록이 v2 복구 기록의 지적·unknown을 줄이면 일반 실행·--recover·초안·--confirm 모두 이전 판정을 유지', async t => {
+  for (const [name, raise, blockers] of [['medium', { medium: 1 }, ['findings', 'recovery-reduced']], ['unknown', { unknown: 1 }, ['findings', 'recovery-reduced']],
+    ['low', { low: 1 }, ['recovery-reduced']]]) {
+    await t.test(name, async t => {
+      const s = await recoveryLedgers(t, { report: judgements.clean, log: completeJobLog(judgements.clean),
+        legacyRecord: l => { Object.assign(l.result.findings, raise); } });
+      const expected = { critical: 0, high: 0, medium: 0, low: 0, unknown: 0, ...raise };
+      for (const run of [() => s.publish(), () => s.recover()]) {
+        assert.equal(await run(), 2);
+        const output = s.outputs.at(-1);
+        assert.deepEqual(output.blockers, blockers); assert.deepEqual(output.codeFindings, expected);
+        assert.deepEqual(output.interpretation.previous.map(item => item.record), ['original', 'legacyRecovered']);
+        assert.deepEqual(output.interpretation.previous[1].findings, expected);
+      }
+      assert.equal(await s.attention(), 0);
+      assert.deepEqual(s.cliOut.at(-1).codeFindings, expected);
+      const draft = readFileSync(s.cliOut.at(-1).draftPath, 'utf8');
+      assert.match(draft, new RegExp(`\\| v2 복구 기록 저장 결과 \\(결과 v2, parser v2\\) \\| 0 \\| 0 \\| ${expected.medium} \\| ${expected.low} \\| ${expected.unknown} \\|`));
+      const url = s.post(draft);
+      if (expected.medium) { assert.equal(await s.attention('--confirm', url), 1); assert.match(s.cliErr.at(-1), /critical\/high\/medium/); }
+      else { assert.equal(await s.attention('--confirm', url), 0); assert.deepEqual(s.cliOut.at(-1).confirmation.findings, expected); }
+      s.unchanged(); assert.deepEqual([s.calls.reviews, s.f.dispatches.length], [0, 0]);
+    });
+  }
+});
+
+// PR #42 3차 재검증 Low: 출력·관리자 초안이 같은 유효 판정과 같은 실패 검사 집합을 쓰고, 출처(원본·v2 복구·복구 기록·현재 해석)를 구분한다.
+test('원본에만 있는 unknown·검사 실패도 wrapper 출력·review:attention 출력·초안에 같은 값과 출처로 표시', async t => {
+  await t.test('unknown: 원본 1, 복구 기록 0, 현재 0', async t => {
+    const s = await recoveryLedgers(t, { original: l => { l.result.findings.unknown = 1; } });
+    assert.equal(await s.publish(), 2);
+    const output = s.outputs[0];
+    assert.deepEqual(output.interpretation.recordedUnknown, [{ record: 'original', unknown: 1 }, { record: 'stored', unknown: 0 }]);
+    assert.equal(output.interpretation.unexplainedStoredUnknown, 1); assert.equal(output.codeFindings.unknown, 1);
+    const draft = readFileSync(output.adminDraft.draftPath, 'utf8');
+    assert.doesNotMatch(draft, /저장된 unknown 0건 중/);
+    assert.match(draft, /- 기록된 unknown은 원본 ledger 1건, 복구 기록 0건입니다\. 가장 큰 1건 중 1건은 현재 parser로 사유를 재현할 수 없습니다\./);
+    assert.equal(await s.attention(), 0); assert.deepEqual(s.cliOut.at(-1).codeFindings, output.codeFindings);
+    assert.deepEqual(s.cliOut.at(-1).interpretation, output.interpretation);
+  });
+  await t.test('검사 실패: 원본에만 있음', async t => {
+    const failure = { name: 'privacyGuard', status: 'failed', count: null, cause: null };
+    const s = await recoveryLedgers(t, { report: 'No findings. Lint passed. Build was not run.',
+      original: l => { l.result.reviewerChecks = [...l.result.reviewerChecks, failure]; } });
+    assert.equal(await s.publish(), 2);
+    const output = s.outputs[0];
+    assert.deepEqual(output.reviewerCheckFailures, [{ ...failure, sources: ['original'] }]);
+    assert.deepEqual(output.interpretation.failedChecks, output.reviewerCheckFailures);
+    const draft = readFileSync(output.adminDraft.draftPath, 'utf8');
+    assert.match(draft, /- 판정에 쓰는 검사 실패\(모든 기록·해석의 합집합\): `privacyGuard`\(원본 ledger\)/);
+    assert.match(draft, /`privacyGuard` 실패\(출처: 원본 ledger\)는 원인이 밝혀지지 않아/);
+    assert.equal(await s.attention(), 0);
+    assert.deepEqual(s.cliOut.at(-1).reviewerCheckFailures, output.reviewerCheckFailures);
+    assert.deepEqual(s.cliOut.at(-1).codeFindings, output.codeFindings);
+  });
+  await t.test('같은 실패가 여러 기록·해석에 있으면 한 번만 쓰고 출처를 모두 남김', async t => {
+    const s = await recoveryLedgers(t, { report: pr28Report });
+    assert.equal(await s.publish(), 2);
+    assert.deepEqual(s.outputs[0].reviewerCheckFailures.map(item => [item.name, item.sources]), [['privacyGuard', ['original', 'stored', 'current']]]);
+  });
+});
+
+// PR #42 3차 재검증: 로그 완료 증거의 추가 경계 조건. 완료 표시가 충돌하거나 두 번 이상이면 fail-closed다.
+test('완료 증거 경계: 다른 원문의 완료 블록·Final output 두 번·같은 완료 블록 중복·다른 job 로그 혼합은 인정하지 않음', async t => {
+  const report = judgements.clean;
+  const other = 'No actionable defects were found in a different review.';
+  const end = jobLogEnd(report);
+  const finalBlock = ['', `${at(58)} Final output`, '# Codex Review', '', report, ''];
+  const cases = [
+    // [이름, 로그 줄, 완료 증거, 기대 차단 사유]
+    ['normal progress messages', [...jobLogStart, ...progress('Reasoning summary', ['- a']), ...progress('Assistant message', ['b'], 'Assistant message captured: b'), ...end],
+      { reviewStarted: true, reviewOutput: true, finalOutput: true }, []],
+    ['other report completion block before matching block', [...jobLogStart, ...fakeReviewOutput(other), ...end],
+      { reviewStarted: true, reviewOutput: false, finalOutput: false }, ['job-log-not-completed']],
+    ['other report completion block inside progress block', [...jobLogStart, ...progress('Assistant message', ['quote:', ...fakeReviewOutput(other)]), ...end],
+      { reviewStarted: true, reviewOutput: false, finalOutput: false }, ['job-log-not-completed']],
+    ['matching block then other report block', [...jobLogStart, ...end.slice(0, 5), ...fakeReviewOutput(other), ...end.slice(5)],
+      { reviewStarted: true, reviewOutput: false, finalOutput: false }, ['job-log-not-completed']],
+    ['final output twice', [...jobLogStart, ...end.slice(0, 5), ...finalBlock, ...end.slice(5)],
+      { reviewStarted: true, reviewOutput: true, finalOutput: false }, ['job-log-not-completed']],
+    ['final output twice (both after review)', [...jobLogStart, ...end, ...finalBlock],
+      { reviewStarted: true, reviewOutput: true, finalOutput: false }, ['job-log-not-completed']],
+    ['same completion block twice', [...jobLogStart, ...end.slice(0, 5), ...end.slice(0, 5), ...end.slice(5)],
+      { reviewStarted: true, reviewOutput: false, finalOutput: false }, ['job-log-not-completed']],
+    ['reviewer finished twice', [...jobLogStart, ...end.slice(0, 5), `${at(40)} Reviewer finished.`, ...end.slice(5)],
+      { reviewStarted: true, reviewOutput: false, finalOutput: false }, ['job-log-not-completed']],
+    ['another job log appended', [...jobLogStart, ...end, ...jobLogStart, ...end],
+      { reviewStarted: false, reviewOutput: false, finalOutput: false }, ['job-log-not-completed']],
+    ['truncated after review output', [...jobLogStart, ...end.slice(0, 4)],
+      { reviewStarted: true, reviewOutput: false, finalOutput: false }, ['job-log-not-completed']],
+    ['different job report', [...jobLogStart, ...jobLogEnd(other)],
+      { reviewStarted: true, reviewOutput: false, finalOutput: false }, ['job-log-not-completed']],
+  ];
+  for (const [name, lines, completion, blockers] of cases) await t.test(name, async t => {
+    assert.deepEqual(parseJobCommands(lines.join('\n'), report).completion, completion);
+    const s = await setup(t, { report, log: lines.join('\n') });
+    if (!blockers.length) {
+      await assert.rejects(s.publish(), /완료를 확인하지 못함/); assert.equal(s.f.dispatches.length, 1);
+    } else {
+      assert.equal(await s.publish(), 2);
+      assert.deepEqual(s.outputs[0].blockers, blockers); assert.equal(s.f.dispatches.length, 0);
+    }
+  });
 });
